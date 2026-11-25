@@ -89,15 +89,29 @@ def fetch_url(url, tries=3):
     raise RuntimeError(f"fetch failed: {url}: {last}")
 
 
-def discord(hook, embed, label=""):
+def discord(hook, embed, label="", content=None, files=None):
     """Post one embed (or a list of up to 10 as one message). True when safe to mark as posted."""
     if SILENT:
         return True
-    if CAPTURE is not None:              # used by the simulator
-        CAPTURE.append(embed)
-        return True
     embeds = embed if isinstance(embed, list) else [embed]
+    if CAPTURE is not None:              # used by the simulator / previews
+        if files or content:
+            import copy as _copy
+            import tempfile as _tf
+            ems = _copy.deepcopy(embeds)
+            for name, data in (files or {}).items():
+                fp = Path(_tf.mkdtemp()) / name
+                fp.write_bytes(data)
+                for em in ems:
+                    if (em.get("image") or {}).get("url") == f"attachment://{name}":
+                        em["image"]["url"] = fp.as_uri()
+            CAPTURE.append({"content": content, "embeds": ems})
+        else:
+            CAPTURE.append(embed)
+        return True
     if DRY_RUN or not hook:
+        if content:
+            print("\n" + content)
         for em in embeds:
             print("\n" + "=" * 70)
             print(f"[{label or 'post'}]  {em.get('title', '')}")
@@ -108,11 +122,24 @@ def discord(hook, embed, label=""):
             if em.get("footer"):
                 print(f"({em['footer']['text']})")
         return True
-    body = json.dumps({"username": "Scores Bot", "embeds": embeds[:10]}).encode()
+    payload = {"username": "Scores Bot", "embeds": embeds[:10]}
+    if content:
+        payload["content"] = content
+    if files:
+        boundary = "----sportsbot" + str(int(time.time() * 1000))
+        parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
+                 f"Content-Type: application/json\r\n\r\n".encode() + json.dumps(payload).encode() + b"\r\n"]
+        for i, (name, data) in enumerate(files.items()):
+            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[{i}]\"; filename=\"{name}\"\r\n"
+                         f"Content-Type: image/png\r\n\r\n".encode() + data + b"\r\n")
+        body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+        ctype = f"multipart/form-data; boundary={boundary}"
+    else:
+        body, ctype = json.dumps(payload).encode(), "application/json"
     for _ in range(5):
         req = urllib.request.Request(
             hook, data=body, method="POST",
-            headers={"Content-Type": "application/json",
+            headers={"Content-Type": ctype,
                      "User-Agent": "DiscordBot (sports-bot, 1.0)"})
         try:
             with urllib.request.urlopen(req, timeout=20):
@@ -977,6 +1004,8 @@ def nba_players(summary):
                 elite = (fp >= cfg["elite_threshold"] or pts >= cfg["always_flag_points"]
                          or (cfg["always_flag_triple_double"] and doubles >= 3))
                 out.append({"name": a["athlete"]["displayName"], "team": abbr, "fp": fp,
+                            "raw": {"pts": int(pts), "reb": int(reb), "ast": int(ast), "stl": int(stl),
+                                    "blk": int(blk), "tpm": int(tpm)},
                             "line": " · ".join(parts) + tag + f" · **{fmt_pts(fp)} fpts**",
                             "elite": elite})
     out.sort(key=lambda x: -x["fp"])
@@ -1025,6 +1054,8 @@ NBA_LOGO = "https://a.espncdn.com/i/teamlogos/leagues/500/nba.png"
 
 def post_nba_batch(events):
     """One message per tip-off batch, one card per game (Discord allows 10 cards per message)."""
+    if len(events) == 1 and events[0]["status"]["type"].get("completed"):
+        return post_nba_game(events[0])
     cards = []
     first = parse_time(events[0]["date"])
     league = CONFIG["nba"].get("league_name", "league")
@@ -1073,6 +1104,338 @@ def post_nba_batch(events):
     for i in range(0, len(cards), 10):
         ok = discord(NBA_HOOK, cards[i:i + 10], "NBA batch") and ok
     return ok
+
+
+# ------------------------------------------------------ NBA full-time card post
+
+CHROME_CANDIDATES = [os.environ.get("CHROME_BIN", ""), "google-chrome", "google-chrome-stable", "chromium",
+                     "chromium-browser", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                     "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"]
+
+
+def find_chrome():
+    import shutil
+    for c in CHROME_CANDIDATES:
+        if c and (shutil.which(c) or Path(c).exists()):
+            return shutil.which(c) or c
+    return None
+
+
+def hex_rgb(h, default="5865f2"):
+    h = (h or default).strip("#")
+    if len(h) != 6:
+        h = default
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def bright(h, alt=None):
+    """A version of the team colour that shows up on a dark card."""
+    r, g, b = hex_rgb(h)
+    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    if lum < 0.28 and alt:
+        ar, ag, ab = hex_rgb(alt)
+        if (0.299 * ar + 0.587 * ag + 0.114 * ab) / 255 > lum and (ar, ag, ab) != (255, 255, 255):
+            r, g, b = ar, ag, ab
+            lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    if lum < 0.35:
+        k = 0.45
+        r, g, b = (int(c + (255 - c) * k) for c in (r, g, b))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def team_stats(summary, abbr):
+    for t in summary.get("boxscore", {}).get("teams", []):
+        if t["team"]["abbreviation"] == abbr:
+            return {s["name"]: s.get("displayValue", "") for s in t.get("statistics", [])}
+    return {}
+
+
+def conf_rank(summary, team_id):
+    for grp in (summary.get("standings") or {}).get("groups", []):
+        entries = (grp.get("standings") or {}).get("entries", [])
+        for i, e in enumerate(entries, 1):
+            if str(e.get("id")) == str(team_id):
+                hdr = grp.get("header", "") or grp.get("name", "") or ""
+                div = re.sub(r"^\d{4}(-\d{2})?\s*|\s*Standings$", "", hdr).strip()
+                return i, div
+    return None, ""
+
+
+def ordinal(n):
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def top_scorers(summary, abbr, n=2):
+    rows = []
+    for team in summary.get("boxscore", {}).get("players", []):
+        if team["team"]["abbreviation"] != abbr:
+            continue
+        for block in team.get("statistics", []):
+            keys = block.get("keys", [])
+            for a in block.get("athletes", []):
+                if a.get("stats"):
+                    s = dict(zip(keys, a["stats"]))
+                    rows.append((num(s.get("points")), a["athlete"]["displayName"]))
+    rows.sort(key=lambda r: -r[0])
+    return rows[:n]
+
+
+def headshot(summary, name):
+    for team in summary.get("boxscore", {}).get("players", []):
+        for block in team.get("statistics", []):
+            for a in block.get("athletes", []):
+                if a["athlete"]["displayName"] == name:
+                    return (a["athlete"].get("headshot") or {}).get("href", "")
+    return ""
+
+
+def nba_story(event, summary, players):
+    """Headline, recap sentences and bullet insights, written from the box score."""
+    away, home = teams_of(event)
+    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+    w, l = (away, home) if a_s > h_s else (home, away)
+    ws, ls = max(a_s, h_s), min(a_s, h_s)
+    wn, ln = w["team"].get("name"), l["team"].get("name")
+    wcity = w["team"].get("location") or w["team"].get("displayName")
+    margin = ws - ls
+    ot = ot_tag(event).strip(" ()")
+    tw, tl = team_stats(summary, w["team"]["abbreviation"]), team_stats(summary, l["team"]["abbreviation"])
+    lead_l = int(num(tl.get("largestLead")))
+    lead_w = int(num(tw.get("largestLead")))
+
+    if ot:
+        head, verb, tag = f"{wn} outlast the {ln} in {ot}", "outlasted", f"{ot} THRILLER"
+    elif lead_l >= 12:
+        head, verb, tag = f"{wn} storm back to stun the {ln}", "came back to beat", "COMEBACK WIN"
+    elif margin >= 20:
+        head, verb, tag = f"{wn} rout the {ln}", "routed", f"{ws}-{ls} ROUT"
+    elif margin >= 10:
+        head, verb, tag = f"{wn} cruise past the {ln}", "beat", "COMFORTABLE WIN"
+    elif margin >= 4:
+        head, verb, tag = f"{wn} hold off the {ln}", "held off", f"{wn.upper()} HOLD ON"
+    else:
+        head, verb, tag = f"{wn} edge the {ln} in a thriller", "edged", f"{margin}-POINT THRILLER"
+
+    rec = record_of(w)
+    s = [f"{wcity} {verb} the {ln} {ws}-{ls}" + (f" to move to {rec}" if rec else "") + "."]
+    pog = players[0] if players else None
+    if pog:
+        bits = pog["raw"]
+        line = f"{bits['pts']} points, {bits['reb']} rebounds and {bits['ast']} assists"
+        s.append(f"{pog['name']} {'led the way' if pog['team'] == w['team']['abbreviation'] else 'starred in defeat'} with {line}"
+                 + (f", hitting {bits['tpm']} threes" if bits["tpm"] >= 4 else "") + ".")
+    lt = top_scorers(summary, l["team"]["abbreviation"], 1)
+    if lt and (not pog or lt[0][1] not in pog["name"]):
+        why = ""
+        if num(tl.get("threePointFieldGoalPct")) and num(tl.get("threePointFieldGoalPct")) < 32:
+            why = f", but the {ln} shot just {tl.get('threePointFieldGoalsMade-threePointFieldGoalsAttempted')} from deep"
+        elif num(tl.get("totalTurnovers")) >= 16:
+            why = f", but the {ln} gave it away {int(num(tl.get('totalTurnovers')))} times"
+        elif num(tw.get("totalRebounds")) - num(tl.get("totalRebounds")) >= 8:
+            why = f", but the {ln} were beaten {tw.get('totalRebounds')}-{tl.get('totalRebounds')} on the glass"
+        s.append(f"{lt[0][1]} scored {int(lt[0][0])} for the {ln}{why}.")
+
+    bullets = []
+    if lead_l >= 10:
+        bullets.append(f"{wn} overturned a {lead_l}-point deficit")
+    elif lead_w >= 15:
+        bullets.append(f"{wn} led by as many as {lead_w}")
+    tp_w, tp_l = num(tw.get("threePointFieldGoalPct")), num(tl.get("threePointFieldGoalPct"))
+    if tp_w and tp_l and abs(tp_w - tp_l) >= 12:
+        hi, lo = (w, l) if tp_w > tp_l else (l, w)
+        bullets.append(f"From three: {hi['team'].get('name')} {max(tp_w, tp_l):.0f}% vs {lo['team'].get('name')} {min(tp_w, tp_l):.0f}%")
+    tov_w, tov_l = num(tw.get("totalTurnovers")), num(tl.get("totalTurnovers"))
+    if abs(tov_w - tov_l) >= 6:
+        bullets.append(f"Turnovers: {wn} {int(tov_w)} · {ln} {int(tov_l)}")
+    return head, tag, " ".join(s), bullets[:2]
+
+
+CARD_CSS = """
+*{box-sizing:border-box;margin:0;padding:0}
+body{width:880px;height:530px;font-family:Inter,'Helvetica Neue',Arial,sans-serif;color:#fff;background:#0d1220}
+.card{position:relative;width:880px;height:530px;overflow:hidden;border-radius:18px;background:#0d1220}
+.bg{position:absolute;inset:0;background:linear-gradient(115deg,var(--a) 0%,rgba(13,18,32,.0) 48%),
+ linear-gradient(295deg,var(--h) 0%,rgba(13,18,32,0) 48%);opacity:.38}
+.split{position:absolute;inset:0;background:linear-gradient(105deg,transparent 49.6%,rgba(255,255,255,.06) 50%,transparent 50.4%)}
+.in{position:relative;padding:22px 30px}
+.top{display:flex;justify-content:space-between;align-items:center;font-size:13px;letter-spacing:2px;color:#aab3c5;font-weight:600}
+.top .lg{display:flex;align-items:center;gap:10px}.top img{width:26px;height:26px;background:#fff;border-radius:6px;padding:2px}
+.pill{border:1.5px solid #8b95a8;border-radius:6px;padding:4px 10px;font-size:12px;color:#e6e9ef}
+.score{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;margin-top:18px}
+.tm{display:flex;align-items:center;gap:16px}.tm.r{justify-content:flex-end}
+.tm img{width:86px;height:86px;object-fit:contain;filter:drop-shadow(0 2px 6px rgba(0,0,0,.4))}
+.nm{font-size:22px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;line-height:1.1}
+.rk{font-size:12.5px;color:#aab3c5;margin-top:5px;font-weight:500;letter-spacing:.3px}
+.sc{font-size:12.5px;color:#cfd5e1;margin-top:8px;font-weight:500;white-space:nowrap}
+.nums{display:flex;gap:10px;align-items:center}
+.box{min-width:104px;height:84px;border-radius:12px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;
+ font-size:54px;font-weight:800;font-variant-numeric:tabular-nums}
+.box.w{background:rgba(255,255,255,.16)}
+.dot{width:8px;height:8px;border-radius:50%;background:#8b95a8}
+.tag{text-align:center;font-size:12px;letter-spacing:2.5px;font-weight:700;margin-top:8px}
+.qs{display:flex;justify-content:center;margin-top:12px}
+.qs table{border-collapse:collapse;font-size:12.5px;color:#cfd5e1;font-variant-numeric:tabular-nums}
+.qs td,.qs th{padding:2px 9px;text-align:center}.qs th{color:#7d879b;font-weight:600;font-size:11px}
+.qs td.t{font-weight:800;color:#fff}.qs td.n{text-align:left;font-weight:700;color:#fff}
+.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
+.tile{background:rgba(255,255,255,.055);border-radius:10px;padding:9px 12px 10px}
+.tl{font-size:10.5px;letter-spacing:1.6px;color:#9aa3b5;font-weight:600;text-align:center}
+.tv{display:flex;justify-content:center;align-items:baseline;gap:10px;font-size:23px;font-weight:800;margin-top:3px;font-variant-numeric:tabular-nums}
+.tv .lo{color:#9aa3b5}.tv i{font-style:normal;color:#5d6679;font-size:16px}
+.bars{display:flex;gap:6px;margin-top:6px}.bars div{height:4px;border-radius:2px}
+.bot{display:flex;justify-content:space-between;align-items:center;margin-top:14px}
+.pog{display:flex;align-items:center;gap:12px}
+.pog img{width:58px;height:58px;border-radius:50%;object-fit:cover;object-position:top;background:#1d2436;border:2px solid rgba(255,255,255,.15)}
+.pl{font-size:10.5px;letter-spacing:1.6px;color:#9aa3b5;font-weight:600}
+.pn{font-size:20px;font-weight:800;margin-top:1px}.ps{font-size:13px;color:#cfd5e1;margin-top:2px}
+.chip{background:#1faa59;color:#fff;font-weight:800;font-size:15px;border-radius:6px;padding:3px 8px;margin-left:6px}
+.own{font-size:12.5px;color:#cfd5e1;text-align:right;line-height:1.5}
+.own b{color:#fff}
+"""
+
+
+def nba_card_html(event, summary, players, tag):
+    import html as H
+    away, home = teams_of(event)
+    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+    ca = bright(away["team"].get("color"))
+    ch = bright(home["team"].get("color"))
+    if sum(abs(x - y) for x, y in zip(hex_rgb(ca), hex_rgb(ch))) < 120:
+        ch = bright(home["team"].get("alternateColor")) if home["team"].get("alternateColor") else "#cfd5e1"
+        if sum(abs(x - y) for x, y in zip(hex_rgb(ca), hex_rgb(ch))) < 120:
+            ch = "#cfd5e1"
+    ta, th = team_stats(summary, away["team"]["abbreviation"]), team_stats(summary, home["team"]["abbreviation"])
+    ot = ot_tag(event).strip(" ()")
+
+    def side(t, right):
+        rank, conf = conf_rank(summary, t["team"].get("id"))
+        rk = (f"{ordinal(rank)} in {conf} · " if rank and conf else "") + (record_of(t) or "")
+        sc = " · ".join(f"{H.escape(([w for w in n.split(' ') if w.rstrip('.').lower() not in ('jr', 'sr', 'ii', 'iii', 'iv')] or [n])[-1])} {int(p)}"
+                        for p, n in top_scorers(summary, t["team"]["abbreviation"]))
+        txt = (f"<div><div class='nm'>{H.escape(t['team'].get('name', ''))}</div>"
+               f"<div class='rk'>{H.escape(rk)}</div><div class='sc'>{sc}</div></div>")
+        img = f"<img src='{H.escape(t['team'].get('logo', ''))}'>"
+        return f"<div class='tm{' r' if right else ''}' style='{'text-align:right' if right else ''}'>" + \
+            (txt + img if right else img + txt) + "</div>"
+
+    # quarter table
+    la = [str(int(num(x.get("value", x.get("displayValue", 0))))) for x in away.get("linescores", [])]
+    lh = [str(int(num(x.get("value", x.get("displayValue", 0))))) for x in home.get("linescores", [])]
+    n = max(len(la), len(lh))
+    hdr = "".join(f"<th>{q}</th>" for q in (["Q1", "Q2", "Q3", "Q4"] + [f"OT{i}" if i > 1 else "OT" for i in range(1, n - 3)])[:n])
+    rows = "".join(f"<tr><td class='n'>{t['team']['abbreviation']}</td>" + "".join(f"<td>{v}</td>" for v in ls)
+                   + f"<td class='t'>{sc}</td></tr>" for t, ls, sc in ((away, la, a_s), (home, lh, h_s)))
+    qtable = f"<table><tr><th></th>{hdr}<th>T</th></tr>{rows}</table>" if n else ""
+
+    def tile(label, av, hv, fmt=lambda v: f"{v:g}", lower_better=False, show=None):
+        a, h = num(av), num(hv)
+        tot = (a + h) or 1
+        better_a = (a < h) if lower_better else (a > h)
+        sa, sh = show or (fmt(a), fmt(h))
+        return (f"<div class='tile'><div class='tl'>{label}</div><div class='tv'>"
+                f"<span class='{'' if better_a or a == h else 'lo'}'>{sa}</span><i>·</i>"
+                f"<span class='{'' if (not better_a) or a == h else 'lo'}'>{sh}</span></div>"
+                f"<div class='bars'><div style='flex:{a / tot:.3f};background:{ca}'></div>"
+                f"<div style='flex:{h / tot:.3f};background:{ch}'></div></div></div>")
+
+    tiles = "".join([
+        tile("FIELD GOAL %", ta.get("fieldGoalPct"), th.get("fieldGoalPct"), lambda v: f"{v:.0f}%"),
+        tile("THREE POINTERS", ta.get("threePointFieldGoalsMade-threePointFieldGoalsAttempted", "0").split("-")[0],
+             th.get("threePointFieldGoalsMade-threePointFieldGoalsAttempted", "0").split("-")[0]),
+        tile("REBOUNDS", ta.get("totalRebounds"), th.get("totalRebounds")),
+        tile("ASSISTS", ta.get("assists"), th.get("assists")),
+        tile("TURNOVERS", ta.get("totalTurnovers"), th.get("totalTurnovers"), lower_better=True),
+        tile("POINTS IN PAINT", ta.get("pointsInPaint"), th.get("pointsInPaint")),
+    ])
+
+    pog = players[0] if players else None
+    pog_html = own_html = ""
+    if pog:
+        hs = headshot(summary, pog["name"])
+        r = pog["raw"]
+        st = f"{r['pts']} PTS · {r['reb']} REB · {r['ast']} AST" + (f" · {r['stl']} STL" if r["stl"] >= 2 else "") + \
+             (f" · {r['blk']} BLK" if r["blk"] >= 2 else "")
+        pog_html = (f"<div class='pog'>{'<img src=' + chr(39) + H.escape(hs) + chr(39) + '>' if hs else ''}<div>"
+                    f"<div class='pl'>PLAYER OF THE GAME</div><div class='pn'>{H.escape(pog['name'])}"
+                    f"<span class='chip'>{fmt_pts(pog['fp'])}</span></div><div class='ps'>{st}</div></div></div>")
+        o = league_owner("", pog["name"], "nba")
+        league = CONFIG["nba"].get("league_name", "League")
+        own_html = (f"<div class='own'>{H.escape(league)} league<br><b>{H.escape(o['manager'])}</b>"
+                    f"{' · starting' if o['starting'] else ' · bench'}</div>") if o else \
+                   f"<div class='own'>{H.escape(league)} league<br><b>Unrostered</b> · waiver pickup?</div>"
+
+    w_col = ca if a_s > h_s else ch
+    return (f"<!doctype html><html><head><meta charset='utf-8'>"
+            f"<link href='https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800&display=swap' rel='stylesheet'>"
+            f"<style>{CARD_CSS}</style></head><body><div class='card' style='--a:{ca};--h:{ch}'>"
+            f"<div class='bg'></div><div class='split'></div><div class='in'>"
+            f"<div class='top'><div class='lg'><img src='{NBA_LOGO}'>NBA</div>"
+            f"<div class='pill'>{'FINAL · ' + ot if ot else 'FULL-TIME'}</div></div>"
+            f"<div class='score'>{side(away, False)}<div><div class='nums'>"
+            f"<div class='box{' w' if a_s > h_s else ''}'>{a_s}</div><div class='dot'></div>"
+            f"<div class='box{' w' if h_s > a_s else ''}'>{h_s}</div></div>"
+            f"<div class='tag' style='color:{w_col}'>{H.escape(tag)}</div></div>{side(home, True)}</div>"
+            f"<div class='qs'>{qtable}</div><div class='tiles'>{tiles}</div>"
+            f"<div class='bot'>{pog_html}{own_html}</div></div></div></body></html>")
+
+
+def render_png(html_text, width=880, height=530):
+    """HTML -> PNG with headless Chrome. Returns bytes, or None if Chrome isn't available."""
+    import subprocess
+    import tempfile
+    chrome = find_chrome()
+    if not chrome:
+        log("No Chrome found: posting without the image card")
+        return None
+    with tempfile.TemporaryDirectory() as d:
+        src, out = Path(d) / "card.html", Path(d) / "card.png"
+        src.write_text(html_text)
+        try:
+            subprocess.run([chrome, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars",
+                            "--force-device-scale-factor=2", f"--window-size={width},{height}",
+                            "--virtual-time-budget=8000", "--default-background-color=00000000",
+                            f"--screenshot={out}", src.as_uri()],
+                           check=True, timeout=60, capture_output=True)
+            return out.read_bytes()
+        except Exception as e:  # noqa: BLE001
+            log(f"card render failed: {e}")
+            return None
+
+
+def post_nba_game(e):
+    """One full-time post for a single game: headline, recap, insights and a graphic card."""
+    summary = fetch(f"basketball/nba/summary?event={e['id']}")
+    players = nba_players(summary)
+    away, home = teams_of(e)
+    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+    winner = away if a_s > h_s else home
+    head, tag, recap, bullets = nba_story(e, summary, players)
+
+    extra = []
+    if players:
+        p = players[0]
+        o = league_owner("", p["name"], "nba")
+        extra.append(f"🧢 **{p['name']}** {fmt_pts(p['fp'])} fpts — "
+                     + (f"**{o['manager']}**{' ⭐ starting' if o['starting'] else ' (bench)'}" if o else "unrostered 👀"))
+        more = [x for x in players[1:] if x["elite"]]
+        if more:
+            extra.append("🔥 Also elite: " + " · ".join(f"{x['name']} {fmt_pts(x['fp'])}" for x in more[:3]))
+    desc = "> " + recap + "\n\n" + "\n".join(f"• {b}" for b in bullets + extra)
+
+    embed = {
+        "author": {"name": "NBA", "icon_url": NBA_LOGO},
+        "title": f"{head} · {max(a_s, h_s)}-{min(a_s, h_s)}{ot_tag(e)}",
+        "url": f"https://www.espn.com/nba/game/_/gameId/{e['id']}",
+        "description": desc[:4000],
+        "color": color(winner["team"].get("color"), 0xC9082A),
+        "footer": {"text": f"fpts = {CONFIG['nba'].get('league_name', 'league')} scoring", "icon_url": NBA_LOGO},
+    }
+    content = (f"🏁 **FULL-TIME** · {away['team'].get('displayName')} {a_s}–{h_s} {home['team'].get('displayName')}"
+               f"{ot_tag(e)}")
+    png = render_png(nba_card_html(e, summary, players, tag))
+    if png:
+        embed["image"] = {"url": "attachment://card.png"}
+    return discord(NBA_HOOK, embed, "NBA FT", content=content, files={"card.png": png} if png else None)
 
 
 # ===================================================================== main
