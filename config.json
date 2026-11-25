@@ -15,8 +15,8 @@
     "elite_threshold": { "QB": 26, "other": 24 }
   },
   "nba": {
-    "batch_note": "Games are grouped by tip-off time: a game tipping off within this many minutes of the previous one joins its batch. One post per batch once every game in it is finished.",
-    "batch_gap_minutes": 60,
+    "batch_note": "-1 = one post per game as soon as it finishes. Set e.g. 60 to group games that tip off within 60 minutes of each other into one post.",
+    "batch_gap_minutes": -1,
 
     "league_name": "Rickth21",
     "sleeper_league_id": "1415449436443680768",

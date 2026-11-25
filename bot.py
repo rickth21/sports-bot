@@ -886,7 +886,8 @@ def nfl_game(event, st, force=False):
             summary = fetch(f"football/nfl/summary?event={gid}")
             if post_nfl_preview(event, summary):
                 g["preview"] = True
-        return -0.4 < age < 0.5          # kicking off soon (or running late)
+        # prime time: stay on from ~70 min before kick-off so one run covers preview + game
+        return (-1.2 < age < 0.5) if prime else (-0.4 < age < 0.5)
 
     if state == "in" or force:
         if prime:
