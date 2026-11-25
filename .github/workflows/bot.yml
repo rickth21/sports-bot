@@ -22,7 +22,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 58
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,7 +41,7 @@ jobs:
         env:
           NFL_WEBHOOK_URL: ${{ secrets.NFL_WEBHOOK_URL }}
           NBA_WEBHOOK_URL: ${{ secrets.NBA_WEBHOOK_URL }}
-          MAX_RUNTIME_MIN: "50"
+          MAX_RUNTIME_MIN: "345"
           POLL_SECONDS: "45"
 
       - name: Save what has been posted
