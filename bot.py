@@ -90,23 +90,25 @@ def fetch_url(url, tries=3):
 
 
 def discord(hook, embed, label=""):
-    """Post one embed. Returns True when it is safe to mark the item as posted."""
+    """Post one embed (or a list of up to 10 as one message). True when safe to mark as posted."""
     if SILENT:
         return True
     if CAPTURE is not None:              # used by the simulator
         CAPTURE.append(embed)
         return True
+    embeds = embed if isinstance(embed, list) else [embed]
     if DRY_RUN or not hook:
-        print("\n" + "=" * 70)
-        print(f"[{label or 'post'}]  {embed.get('title', '')}")
-        if embed.get("description"):
-            print(embed["description"])
-        for f in embed.get("fields", []):
-            print(f"-- {f['name']}\n{f['value']}")
-        if embed.get("footer"):
-            print(f"({embed['footer']['text']})")
+        for em in embeds:
+            print("\n" + "=" * 70)
+            print(f"[{label or 'post'}]  {em.get('title', '')}")
+            if em.get("description"):
+                print(em["description"])
+            for f in em.get("fields", []):
+                print(f"-- {f['name']}\n{f['value']}")
+            if em.get("footer"):
+                print(f"({em['footer']['text']})")
         return True
-    body = json.dumps({"username": "Scores Bot", "embeds": [embed]}).encode()
+    body = json.dumps({"username": "Scores Bot", "embeds": embeds[:10]}).encode()
     for _ in range(5):
         req = urllib.request.Request(
             hook, data=body, method="POST",
@@ -461,13 +463,13 @@ def name_key(name):
     return "n:" + " ".join(n.split())
 
 
-def league_owner(espn_id, name=""):
-    idx = league_index("nfl")
+def league_owner(espn_id, name="", sport="nfl"):
+    idx = league_index(sport)
     return idx.get(str(espn_id)) or idx.get(name_key(name))
 
 
-def owner_text(espn_id, name=""):
-    o = league_owner(espn_id, name)
+def owner_text(espn_id, name="", sport="nfl"):
+    o = league_owner(espn_id, name, sport)
     if not o:
         return "🆓 unrostered in the league"
     star = " ⭐ starting" if o["starting"] else " (bench)"
@@ -1017,15 +1019,29 @@ def run_nba(st, dates=None, force=False):
                 st["nba"][e["id"]] = {"date": e["date"][:10], "posted": True}
 
 
+NBA_LOGO = "https://a.espncdn.com/i/teamlogos/leagues/500/nba.png"
+
+
 def post_nba_batch(events):
-    lines, extra = [], []
+    """One message per tip-off batch, one card per game (Discord allows 10 cards per message)."""
+    cards = []
+    first = parse_time(events[0]["date"])
+    league = CONFIG["nba"].get("league_name", "league")
     for e in events:
         away, home = teams_of(e)
+        an = away["team"].get("name") or away["team"]["abbreviation"]
+        hn = home["team"].get("name") or home["team"]["abbreviation"]
         if not e["status"]["type"].get("completed"):
-            lines.append(f"{away['team']['abbreviation']} @ {home['team']['abbreviation']} — "
-                         f"{e['status']['type'].get('description', 'Postponed')}")
+            cards.append({"author": {"name": "NBA · " + e["status"]["type"].get("description", "Postponed").upper(),
+                                     "icon_url": NBA_LOGO},
+                          "title": f"{an} @ {hn}", "color": 0x5865F2})
             continue
-        lines.append(f"{score_line(away, home, bold_winner=True)}{ot_tag(e)}")
+        a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+        winner, loser = (away, home) if a_s > h_s else (home, away)
+        rec_w, rec_l = record_of(winner), record_of(loser)
+        desc = [f"🏆 **{winner['team'].get('displayName')}** win"
+                + (f" · {rec_w}" if rec_w else "")
+                + (f"  |  {loser['team'].get('name')} {rec_l}" if rec_l else "")]
         try:
             ps = nba_players(fetch(f"basketball/nba/summary?event={e['id']}"))
         except Exception as ex:  # noqa: BLE001
@@ -1034,21 +1050,28 @@ def post_nba_batch(events):
         if ps:
             top = ps[0]
             fire = " 🔥" if top["elite"] else ""
-            lines.append(f"↳ ⭐ **{top['name']}** ({top['team']}) {top['line']}{fire}")
-            extra += [p for p in ps[1:] if p["elite"]]
-        lines.append("")
-    first = parse_time(events[0]["date"])
-    desc = "\n".join(lines).strip()
-    if extra:
-        desc += "\n\n**🔥 Also elite**\n" + "\n".join(
-            f"**{p['name']}** ({p['team']}) {p['line']}" for p in extra)
-    embed = {
-        "title": f"🏀 NBA Full-Time — tip-offs from {uk_time(first)} UK",
-        "description": desc[:4000],
-        "color": 0xC9082A,
-        "footer": {"text": f"fpts = {CONFIG['nba'].get('league_name', 'league')} scoring"},
-    }
-    return discord(NBA_HOOK, embed, "NBA batch")
+            desc.append(f"\n⭐ **{top['name']}** ({top['team']}){fire}\n{top['line']}")
+            o = league_owner("", top["name"], "nba")
+            desc.append(f"↳ 🧢 {owner_text('', top['name'], 'nba')}" if o else "↳ 🆓 unrostered in the league")
+            more = [p for p in ps[1:] if p["elite"]]
+            if more:
+                desc.append("\n🔥 **Also elite:** " + " · ".join(
+                    f"{p['name']} ({p['team']}) {fmt_pts(p['fp'])} fpts" for p in more))
+        cards.append({
+            "author": {"name": "NBA · FULL TIME" + ot_tag(e).upper(), "icon_url": NBA_LOGO},
+            "title": f"{an} {a_s} – {h_s} {hn}",
+            "description": "\n".join(desc)[:4000],
+            "color": color(winner["team"].get("color"), 0xC9082A),
+            "thumbnail": {"url": winner["team"].get("logo", "")},
+        })
+    if not cards:
+        return True
+    cards[-1]["footer"] = {"text": f"Tip-offs from {uk_time(first)} UK  ·  fpts = {league} scoring",
+                           "icon_url": NBA_LOGO}
+    ok = True
+    for i in range(0, len(cards), 10):
+        ok = discord(NBA_HOOK, cards[i:i + 10], "NBA batch") and ok
+    return ok
 
 
 # ===================================================================== main
