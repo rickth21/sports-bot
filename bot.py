@@ -48,6 +48,7 @@ STALE_HOURS = 30         # never post results for games older than this
 TD_PAT_WAIT = 150        # seconds to wait for the extra point to be added to a TD
 
 SILENT = False           # True on the very first run: mark everything as seen, post nothing
+CAPTURE = None           # list -> collect embeds instead of posting (simulator)
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -91,6 +92,9 @@ def fetch_url(url, tries=3):
 def discord(hook, embed, label=""):
     """Post one embed. Returns True when it is safe to mark the item as posted."""
     if SILENT:
+        return True
+    if CAPTURE is not None:              # used by the simulator
+        CAPTURE.append(embed)
         return True
     if DRY_RUN or not hook:
         print("\n" + "=" * 70)
@@ -333,7 +337,7 @@ def nfl_fantasy(summary):
         if ret_td:
             parts.append(f"{int(ret_td)} return TD")
         thr = CONFIG["nfl"]["elite_threshold"]["QB" if pos == "QB" else "other"]
-        out.append({"name": p["name"], "team": p["team"], "pos": pos, "pts": pts,
+        out.append({"id": pid, "name": p["name"], "team": p["team"], "pos": pos, "pts": pts,
                     "line": " · ".join(parts), "elite": pts >= thr})
     out.sort(key=lambda x: -x["pts"])
     return out
@@ -410,56 +414,390 @@ TD_KINDS = {
 }
 
 
-def post_touchdown(event, play):
+# ------------------------------------------------------- Sleeper league rosters
+
+_LEAGUE = {}
+SLEEPER_TEAM = {"WSH": "WAS"}     # ESPN abbreviation -> Sleeper abbreviation where they differ
+
+
+def league_index(sport="nfl"):
+    """ESPN athlete id -> who rosters him in the Sleeper league (and whether he's in their lineup)."""
+    if sport in _LEAGUE:
+        return _LEAGUE[sport]
+    idx = {}
+    lid = str(CONFIG[sport].get("sleeper_league_id") or "").strip()
+    if lid:
+        try:
+            users = {u["user_id"]: u for u in fetch_url(f"{SLEEPER}/league/{lid}/users")}
+            rosters = fetch_url(f"{SLEEPER}/league/{lid}/rosters")
+            players = fetch_url(f"{SLEEPER}/players/{sport}", tries=2)
+            for r in rosters:
+                u = users.get(r.get("owner_id")) or {}
+                starters = set(r.get("starters") or [])
+                for pid in r.get("players") or []:
+                    p = players.get(pid) or {}
+                    if not p.get("full_name"):
+                        continue
+                    entry = {
+                        "manager": u.get("display_name", "?"),
+                        "team_name": (u.get("metadata") or {}).get("team_name") or "",
+                        "starting": pid in starters,
+                        "name": p.get("full_name") or "",
+                        "pos": p.get("position") or "",
+                        "team": p.get("team") or "",
+                    }
+                    idx[name_key(p["full_name"])] = entry      # fallback: Sleeper lacks some ESPN ids
+                    if p.get("espn_id"):
+                        idx[str(p["espn_id"])] = entry
+        except Exception as e:  # noqa: BLE001
+            log(f"Sleeper league rosters unavailable: {e}")
+    _LEAGUE[sport] = idx
+    return idx
+
+
+def name_key(name):
+    n = re.sub(r"[^a-z ]", "", (name or "").lower())
+    n = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", n)
+    return "n:" + " ".join(n.split())
+
+
+def league_owner(espn_id, name=""):
+    idx = league_index("nfl")
+    return idx.get(str(espn_id)) or idx.get(name_key(name))
+
+
+def owner_text(espn_id, name=""):
+    o = league_owner(espn_id, name)
+    if not o:
+        return "🆓 unrostered in the league"
+    star = " ⭐ starting" if o["starting"] else " (bench)"
+    return f"**{o['manager']}**{star}"
+
+
+# ----------------------------------------------------------------- touchdowns
+
+def play_detail(summary, play_id):
+    drives = summary.get("drives") or {}
+    pool = list(drives.get("previous") or [])
+    if drives.get("current"):
+        pool.append(drives["current"])
+    for d in pool:
+        for p in d.get("plays") or []:
+            if str(p.get("id")) == str(play_id):
+                return d, p
+    return None, None
+
+
+def win_prob(summary, play_id, home_scored):
+    wp = summary.get("winprobability") or []
+    for i, w in enumerate(wp):
+        if str(w.get("playId")) == str(play_id):
+            now = w.get("homeWinPercentage")
+            before = wp[i - 1].get("homeWinPercentage") if i else None
+            if now is None:
+                return None
+            if not home_scored:
+                now = 1 - now
+                before = None if before is None else 1 - before
+            return now, before
+    return None
+
+
+DIR_DEEP = {"left": "down the left sideline", "middle": "down the seam", "right": "down the right sideline"}
+DIR_SHORT = {"left": "to the left", "middle": "over the middle", "right": "to the right"}
+GAP = {"left end": "around the left edge", "right end": "around the right edge",
+       "left tackle": "off left tackle", "right tackle": "off right tackle",
+       "left guard": "behind the left guard", "right guard": "behind the right guard",
+       "up the middle": "straight up the middle"}
+
+
+def commentary(td, detail_text, down_text, nick, lead_txt, seed):
+    """Build a commentator-style line from ESPN's play-by-play description."""
+    t = (detail_text or "").lower()
+    gun = "from the shotgun " if "shotgun" in t else ""
+    dd = f"on {down_text.split(' at ')[0]}, " if down_text else ""
+    yds = td["yds"] or 0
+    pick = lambda opts: opts[seed % len(opts)]  # noqa: E731
+    line = None
+
+    if td["kind"] == "pass":
+        qb, rec = td["qb"], td["scorer"]
+        m = re.search(r"pass (short|deep) (left|middle|right)", t)
+        depth, side = (m.group(1), m.group(2)) if m else ("short", "middle")
+        if yds <= 5:
+            line = pick([f"{qb} {gun}{dd}fires it {DIR_SHORT[side]} and {rec} makes the grab in the end zone!",
+                         f"Goal-to-go, {qb} looks {side}… {rec} is open and that's six!"])
+        elif depth == "deep" or yds >= 30:
+            line = pick([f"{qb} {gun}{dd}steps up and lets it fly {DIR_DEEP[side]} — {rec} gets behind the coverage and hauls it in. {yds} yards, touchdown {nick}!",
+                         f"{qb} takes the shot! Deep ball {DIR_DEEP[side]}, {rec} tracks it all the way in — a {yds}-yard strike!"])
+        else:
+            line = pick([f"{qb} {gun}{dd}finds {rec} {DIR_SHORT[side]}, and he does the rest — {yds} yards to the house!",
+                         f"Quick throw {DIR_SHORT[side]} from {qb}, {rec} breaks a tackle and walks in from {yds}!"])
+    elif td["kind"] == "rush":
+        rb = td["scorer"]
+        gap = next((v for k, v in GAP.items() if k in t), "")
+        if yds <= 3:
+            line = pick([f"{rb} {gap or 'up the gut'} and pushes the pile over the goal line!",
+                         f"{dd.capitalize()}{rb} keeps the legs churning {gap} and he's in!"])
+        elif yds >= 40:
+            line = f"{rb} bursts {gap or 'through the hole'}, breaks into the open field and nobody's catching him — {yds} yards to the house!"
+        else:
+            line = f"{rb} takes the handoff {gap or 'up field'}, finds a crease and scores from {yds} out!"
+    elif td["kind"] == "int":
+        line = f"PICKED OFF! {td['scorer']} jumps the route and takes it {yds} yards the other way for six!"
+    elif td["kind"] in ("fumble",):
+        line = f"Ball's out! {td['scorer']} scoops it up and rumbles {yds} yards to the end zone!"
+    elif td["kind"] in ("punt", "kick", "blocked"):
+        line = f"{td['scorer']} takes it back {yds} yards — special teams touchdown!"
+    if not line:
+        return ""
+    return f"🎙️ *{line[0].upper() + line[1:]}* {lead_txt}".strip()
+
+
+def lead_context(team_is_away, a_s, h_s, a_before, h_before):
+    us, them = (a_s, h_s) if team_is_away else (h_s, a_s)
+    us0, them0 = (a_before, h_before) if team_is_away else (h_before, a_before)
+    if us == them:
+        return "All square!", "TIES IT"
+    if us > them and us0 <= them0:
+        return "That's the go-ahead score!", "GO-AHEAD SCORE"
+    if us > them:
+        return f"Lead stretches to {us - them}.", f"LEAD NOW {us - them}"
+    return f"Gap cut to {them - us}.", f"WITHIN {them - us}"
+
+
+def player_tonight(summary, name):
+    """Stat line + fpts so far for a player in this game, and his ESPN id."""
+    try:
+        for p in nfl_fantasy(summary):
+            if p["name"] == name:
+                return p
+    except Exception as e:  # noqa: BLE001
+        log(f"fantasy line unavailable: {e}")
+    return None
+
+
+def post_touchdown(event, play, summary=None):
+    summary = summary or {}
     away, home = teams_of(event)
     abbr = play.get("team", {}).get("abbreviation", "")
     team = away if away["team"]["abbreviation"] == abbr else home
     t = team["team"]
-    nick = (t.get("name") or t.get("shortDisplayName") or abbr).upper()
+    nick = t.get("name") or t.get("shortDisplayName") or abbr
     td = td_parse(play)
     yds = td["yds"]
-
-    fields = []
-    if td["kind"] == "pass":
-        desc = f"### {td['qb']} ➜ {td['scorer']}\n{yds}-yard touchdown pass"
-        fields += [{"name": "🎯 Quarterback", "value": td["qb"], "inline": True},
-                   {"name": "🙌 Receiver", "value": td["scorer"], "inline": True},
-                   {"name": "📏 Distance", "value": f"{yds} yd" + ("" if yds == 1 else "s"), "inline": True}]
-    elif td["kind"] in TD_KINDS:
-        what, label, emoji = TD_KINDS[td["kind"]]
-        desc = f"### {td['scorer']}\n{yds}-yard {what}"
-        fields += [{"name": f"{emoji} {label}", "value": td["scorer"], "inline": True},
-                   {"name": "📏 Distance", "value": f"{yds} yd" + ("" if yds == 1 else "s"), "inline": True},
-                   {"name": "​", "value": "​", "inline": True}]
-    else:
-        desc = f"### {td['raw']}"
-
-    pat = td["pat"]
-    if pat:
-        value = pat["mark"] + (f"\n{pat['who']}" if pat["who"] else "")
-        fields.append({"name": pat["label"], "value": value, "inline": True})
+    yd_txt = (f"{yds} yd" + ("" if yds == 1 else "s")) if yds is not None else "—"
 
     a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
-    a_ab, h_ab = away["team"]["abbreviation"], home["team"]["abbreviation"]
-    board = (f"{a_ab:<4}{a_s:>3}{'  ◀' if team is away else ''}\n"
-             f"{h_ab:<4}{h_s:>3}{'  ◀' if team is home else ''}")
-    fields.append({"name": "📊 Score", "value": f"```\n{board}\n```", "inline": True})
+    pat_pts = 0
+    if td["pat"] and "Good" in td["pat"]["mark"]:
+        pat_pts = 2 if "2-pt" in td["pat"]["label"] else 1
+    scored = 6 + pat_pts
+    a0, h0 = (a_s - scored, h_s) if team is away else (a_s, h_s - scored)
+    lead_txt, tag = lead_context(team is away, a_s, h_s, a0, h0)
+
+    drive, detail = play_detail(summary, play.get("id"))
+    down_text = ((detail or {}).get("start") or {}).get("downDistanceText", "")
+    seed = int(re.sub(r"\D", "", str(play.get("id", "0")))[-6:] or 0)
+    call = commentary(td, (detail or {}).get("text", ""), down_text, nick, lead_txt, seed)
 
     q = play.get("period", {}).get("number", 0)
     qtxt = f"Q{q}" if q <= 4 else ("OT" if q == 5 else f"{q - 4}OT")
     clock = play.get("clock", {}).get("displayValue", "")
-    a_nick = away["team"].get("name") or a_ab
-    h_nick = home["team"].get("name") or h_ab
+
+    if td["kind"] == "pass":
+        head = f"### {td['qb']} ➜ {td['scorer']}"
+        sub = f"{yds}-yard touchdown pass"
+        fields = [{"name": "🎯 Quarterback", "value": td["qb"], "inline": True},
+                  {"name": "🙌 Receiver", "value": td["scorer"], "inline": True},
+                  {"name": "📏 Distance", "value": yd_txt, "inline": True}]
+    elif td["kind"] in TD_KINDS:
+        what, label, emoji = TD_KINDS[td["kind"]]
+        head = f"### {td['scorer']}"
+        sub = f"{yds}-yard {what}"
+        fields = [{"name": f"{emoji} {label}", "value": td["scorer"], "inline": True},
+                  {"name": "📏 Distance", "value": yd_txt, "inline": True},
+                  {"name": "🧭 Situation", "value": down_text.split(" at ")[0] if down_text else "—", "inline": True}]
+    else:
+        head, sub, fields = f"### {td['raw']}", "", []
+
+    pat = td["pat"]
+    if pat:
+        fields.append({"name": pat["label"], "value": pat["mark"] + (f"\n{pat['who']}" if pat["who"] else ""),
+                       "inline": True})
+    if drive and drive.get("description") and (drive.get("team") or {}).get("abbreviation", abbr) == abbr:
+        fields.append({"name": "🚚 Drive", "value": drive["description"].replace(", ", " · "), "inline": True})
+    wp = win_prob(summary, play.get("id"), team is home)
+    if wp:
+        now, before = wp
+        delta = "" if before is None else f"  {'▲' if now >= before else '▼'}{abs(round((now - before) * 100))}"
+        fields.append({"name": "📈 Win probability", "value": f"{abbr} {round(now * 100)}%{delta}", "inline": True})
+
+    a_ab, h_ab = away["team"]["abbreviation"], home["team"]["abbreviation"]
+    board = (f"{a_ab:<4}{a_s:>3}{'  ◀' if team is away else ''}\n"
+             f"{h_ab:<4}{h_s:>3}{'  ◀' if team is home else ''}")
+    fields.append({"name": "📊 Score", "value": f"```\n{board}\n```", "inline": False})
+
+    fan = []
+    for who in ([td["qb"]] if td.get("qb") else []) + [td["scorer"]]:
+        p = player_tonight(summary, who)
+        if p:
+            fan.append(f"**{p['name']}** — {p['line']} · **{fmt_pts(p['pts'])} fpts**\n↳ {owner_text(p['id'], p['name'])}")
+    if fan:
+        fields.append({"name": f"🧢 {CONFIG['nfl'].get('league_name', 'League')} — tonight so far",
+                       "value": "\n".join(fan)[:1024], "inline": False})
+
+    desc = f"**{tag}** · {qtxt} {clock}\n{head}\n{sub}" + (f"\n\n{call}" if call else "")
     embed = {
         "author": {"name": t.get("displayName", abbr), "icon_url": t.get("logo", "")},
-        "title": f"🏈 TOUCHDOWN {nick}!",
+        "title": f"🏈 TOUCHDOWN {nick.upper()}!",
         "description": desc,
         "color": color(t.get("color")),
         "thumbnail": {"url": t.get("logo", "")},
         "fields": fields,
-        "footer": {"text": f"{qtxt} · {clock}  |  {a_nick} @ {h_nick}", "icon_url": NFL_LOGO},
+        "footer": {"text": f"{qtxt} · {clock}  |  {away['team'].get('name') or a_ab} @ {home['team'].get('name') or h_ab}",
+                   "icon_url": NFL_LOGO},
     }
     return discord(NFL_HOOK, embed, "NFL TD")
+
+
+# -------------------------------------------------------------- pre-game post
+
+def form_line(summary, abbr):
+    for t in summary.get("lastFiveGames") or []:
+        if t.get("team", {}).get("abbreviation") != abbr:
+            continue
+        evs = sorted(t.get("events") or [], key=lambda e: e.get("gameDate", ""))
+        marks = {"W": "🟩", "L": "🟥", "T": "⬜"}
+        return "".join(marks.get(e.get("gameResult"), "⬜") for e in evs)
+    return ""
+
+
+def season_leaders(summary, abbr):
+    out = []
+    for t in summary.get("leaders") or []:
+        if t.get("team", {}).get("abbreviation") != abbr:
+            continue
+        for cat in t.get("leaders") or []:
+            if cat.get("name") not in ("passingYards", "rushingYards", "receivingYards") or not cat.get("leaders"):
+                continue
+            x = cat["leaders"][0]
+            dv = x.get("displayValue", "")
+            if cat["name"] == "passingYards":
+                dv = ", ".join(dv.split(", ")[1:]) or dv
+            dv = dv.replace(" YDS", " yds").replace(" CAR", " car").replace(" REC", " rec")
+            out.append(f"{x['athlete']['displayName']} · {dv}")
+    return out
+
+
+def injury_lines(summary, abbr, limit=4):
+    rank = {"Out": 0, "Injured Reserve": 1, "Doubtful": 2, "Questionable": 3}
+    short = {"Out": "OUT", "Injured Reserve": "IR", "Doubtful": "D", "Questionable": "Q"}
+    skill = {"QB", "RB", "WR", "TE", "K"}
+    rows = []
+    for t in summary.get("injuries") or []:
+        if t.get("team", {}).get("abbreviation") != abbr:
+            continue
+        for i in t.get("injuries") or []:
+            st = i.get("status")
+            if st not in rank:
+                continue
+            pos = (i.get("athlete", {}).get("position") or {}).get("abbreviation", "")
+            rows.append((0 if pos in skill else 1, rank[st], f"{i['athlete']['displayName']} {pos} ({short[st]})"))
+    rows.sort()
+    return [r[2] for r in rows[:limit]]
+
+
+def post_nfl_preview(event, summary):
+    away, home = teams_of(event)
+    a, h = away["team"], home["team"]
+    kick = parse_time(event["date"]).astimezone(UK)
+    comp = event["competitions"][0]
+    tv = ", ".join(n for b in comp.get("broadcasts") or [] for n in b.get("names", []))
+    gi = summary.get("gameInfo") or {}
+    venue = (gi.get("venue") or {}).get("fullName") or (comp.get("venue") or {}).get("fullName", "")
+    city = ((gi.get("venue") or {}).get("address") or {}).get("city", "")
+
+    lines = [f"**{kick.strftime('%a %-d %b')} · kick-off {kick.strftime('%H:%M')} UK** — 1 hour to go",
+             f"🏟️ {venue}{', ' + city if city else ''}",
+             f"📺 {tv + ' (US) · ' if tv else ''}DAZN (UK)"]
+    head = (summary.get("article") or {}).get("headline")
+    if head:
+        lines.append(f"\n📰 *{head}*")
+
+    fields = []
+    for t in (away, home):
+        ab = t["team"]["abbreviation"]
+        rec = record_of(t)
+        val = f"**{rec}**" if rec else ""
+        form = form_line(summary, ab)
+        if form:
+            val += f"\nLast 5: {form}"
+        fields.append({"name": f"{t['team'].get('displayName', ab)}", "value": val or "—", "inline": True})
+    fields.append({"name": "​", "value": "​", "inline": True})
+
+    pc = (summary.get("pickcenter") or [{}])[0]
+    if pc.get("details"):
+        fields.append({"name": "🎲 Line", "value": f"{pc['details']}\nO/U {pc.get('overUnder', '—')}", "inline": True})
+    pr = summary.get("predictor") or {}
+    try:
+        hp = float(pr["homeTeam"]["gameProjection"])
+        fav, pct = (h["abbreviation"], hp) if hp >= 50 else (a["abbreviation"], 100 - hp)
+        fields.append({"name": "🔮 ESPN predictor", "value": f"{fav} {round(pct)}% to win", "inline": True})
+    except (KeyError, TypeError, ValueError):
+        pass
+    w = gi.get("weather") or {}
+    if w.get("temperature") is not None:
+        f_ = w["temperature"]
+        fields.append({"name": "🌡️ Conditions", "value": f"{f_}°F / {round((f_ - 32) * 5 / 9)}°C", "inline": True})
+
+    for t in (away, home):
+        ab = t["team"]["abbreviation"]
+        ldr = season_leaders(summary, ab)
+        if ldr:
+            fields.append({"name": f"⭐ {t['team'].get('name', ab)} to watch", "value": "\n".join(ldr)[:1024],
+                           "inline": True})
+    inj = []
+    for t in (away, home):
+        ab = t["team"]["abbreviation"]
+        rows = injury_lines(summary, ab)
+        if rows:
+            inj.append(f"**{ab}:** " + " · ".join(rows))
+    if inj:
+        fields.append({"name": "🚑 Injury report", "value": "\n".join(inj)[:1024], "inline": False})
+
+    # league stakes: who in the Sleeper league has players in this game
+    hurt = {name_key(i["athlete"]["displayName"]) for t in summary.get("injuries") or []
+            for i in t.get("injuries") or [] if i.get("status") in ("Out", "Injured Reserve", "Doubtful")}
+    teams = {SLEEPER_TEAM.get(x, x) for x in (a["abbreviation"], h["abbreviation"])}
+    by_mgr = {}
+    seen = set()
+    for o in league_index("nfl").values():
+        if id(o) in seen:
+            continue
+        seen.add(id(o))
+        if o["team"] in teams and o["pos"] in ("QB", "RB", "WR", "TE", "K"):
+            by_mgr.setdefault(o["manager"], []).append(o)
+    if by_mgr:
+        rows = []
+        for mgr, ps in sorted(by_mgr.items(), key=lambda kv: (-sum(p["starting"] for p in kv[1]), kv[0].lower())):
+            ps.sort(key=lambda p: (not p["starting"], p["name"]))
+            rows.append(f"**{mgr}** — " + ", ".join(
+                p["name"] + (" ⭐" if p["starting"] else "") + (" 🚑" if name_key(p["name"]) in hurt else "")
+                for p in ps))
+        fields.append({"name": f"🧢 {CONFIG['nfl'].get('league_name', 'League')} stakes  (⭐ in lineup · 🚑 out)",
+                       "value": "\n".join(rows)[:1024], "inline": False})
+
+    embed = {
+        "author": {"name": "PRIME TIME · KICK-OFF IN 1 HOUR", "icon_url": NFL_LOGO},
+        "title": f"{a.get('displayName')} @ {h.get('displayName')}",
+        "description": "\n".join(lines),
+        "color": color(h.get("color")),
+        "thumbnail": {"url": h.get("logo", "")},
+        "fields": fields,
+        "footer": {"text": "Touchdowns will be posted live in this channel", "icon_url": a.get("logo", "")},
+    }
+    return discord(NFL_HOOK, embed, "NFL preview")
 
 
 def record_of(comp):
@@ -502,6 +840,21 @@ def post_nfl_final(event, summary, prime):
         if elite:
             fields.append({"name": "🔥 Elite fantasy",
                            "value": "\n".join(nfl_player_line(p) for p in elite)[:1024], "inline": False})
+        if prime:
+            idx = league_index("nfl")
+            by_mgr = {}
+            for p in ff:
+                o = league_owner(p.get("id"), p["name"])
+                if o and o["starting"]:
+                    by_mgr.setdefault(o["manager"], []).append(p)
+            if by_mgr:
+                rows = []
+                for mgr, ps in sorted(by_mgr.items(), key=lambda kv: -sum(p["pts"] for p in kv[1])):
+                    total = sum(p["pts"] for p in ps)
+                    rows.append(f"**{mgr}** {fmt_pts(total)} — " +
+                                ", ".join(f"{p['name'].split(' ')[-1]} {fmt_pts(p['pts'])}" for p in ps))
+                fields.append({"name": f"🧢 {CONFIG['nfl'].get('league_name', 'League')} — starters in this game",
+                               "value": "\n".join(rows)[:1024], "inline": False})
 
     embed = {
         "author": {"name": "FULL TIME" + ot_tag(event).upper(), "icon_url": NFL_LOGO},
@@ -526,6 +879,11 @@ def nfl_game(event, st, force=False):
     age = (now_utc() - kick).total_seconds() / 3600
 
     if state == "pre":
+        # pre-game post for prime-time games, about an hour before kick-off
+        if prime and not g.get("preview") and -1.1 <= age < -0.15:
+            summary = fetch(f"football/nfl/summary?event={gid}")
+            if post_nfl_preview(event, summary):
+                g["preview"] = True
         return -0.4 < age < 0.5          # kicking off soon (or running late)
 
     if state == "in" or force:
@@ -544,7 +902,7 @@ def nfl_game(event, st, force=False):
                 if not force and not has_pat and is_latest and time.time() - first < TD_PAT_WAIT \
                         and state == "in":
                     continue
-                if post_touchdown(event, p):
+                if post_touchdown(event, p, summary):
                     g["tds"].append(p["id"])
                     g["pending"].pop(p["id"], None)
         if state == "in":
