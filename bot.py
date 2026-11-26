@@ -7706,6 +7706,341 @@ def maybe_daily_race(st):
     return _maybe_daily_race_qol(st)
 
 
+
+# ------------------------------------------------ extras: power rankings, waiver wire, trade check-ups, league records
+
+def power_rankings(sport, upto):
+    """Order of teams by all-play record (55%), points for (25%) and last-3-weeks form (20%)."""
+    scores, rec = season_history(sport, upto)
+    if not scores:
+        return [], {}, {}
+    weeks = max(len(v) for v in scores.values())
+    ap = {r: [0, 0] for r in scores}
+    for w in range(weeks):
+        wk = {r: v[w] for r, v in scores.items() if w < len(v) and v[w] > 0}
+        for r, p in wk.items():
+            ap[r][0] += sum(1 for q in wk.values() if q < p)
+            ap[r][1] += sum(1 for q in wk.values() if q > p)
+    pf = {r: rec[r]["pf"] for r in rec}
+    form = {r: sum(scores[r][-3:]) / max(1, len(scores[r][-3:])) for r in scores}
+
+    def nrm(d, r):
+        lo, hi = min(d.values()), max(d.values())
+        return (d[r] - lo) / ((hi - lo) or 1)
+    score = {r: 0.55 * (ap[r][0] / max(1, sum(ap[r]))) + 0.25 * nrm(pf, r) + 0.20 * nrm(form, r) for r in rec if r in ap}
+    return sorted(score, key=lambda r: -score[r]), ap, form
+
+
+PWR_CSS = """
+.pwl{display:flex;flex-direction:column;gap:2px}
+.pwl div{display:grid;grid-template-columns:26px 40px 1fr 64px;gap:6px;font-size:15px;align-items:center}
+.pwl b.rk{color:#ffd166;font-weight:900}.pwl .up{color:#7ee2a8;font-weight:900}.pwl .dn{color:#ff9a9e;font-weight:900}.pwl .z{color:#6f7788}
+.pwl .m{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pwl .ap{color:#aab3c5;text-align:right;font-variant-numeric:tabular-nums}
+"""
+
+_recap_wide_plain = recap_wide_html
+
+
+def recap_wide_html(sport, week, live, settings):
+    a, b = _recap_wide_plain(sport, week, live, settings)
+    import html as H
+    names = {rid: x["manager"] for rid, x in live["rosters"].items()}
+    # power rankings box in the title-race sidebar
+    try:
+        now_o, ap, _ = power_rankings(sport, week)
+        prev_o, _, _ = power_rankings(sport, week - 1) if week > 1 else (now_o, None, None)
+        rows = []
+        for i, r in enumerate(now_o, 1):
+            mv = (prev_o.index(r) + 1 - i) if r in prev_o else 0
+            arrow = f"<span class='up'>▲{mv}</span>" if mv > 0 else (f"<span class='dn'>▼{-mv}</span>" if mv < 0 else "<span class='z'>—</span>")
+            rows.append(f"<div><b class='rk'>{i}</b>{arrow}<span class='m'>{H.escape(names.get(r, '?'))}</span>"
+                        f"<span class='ap'>{ap[r][0]}-{ap[r][1]}</span></div>")
+        box = (f"<div class='col'><div class='ch'>POWER RANKINGS · ALL-PLAY RECORD</div><div class='pwl'>{''.join(rows)}</div></div>")
+        b = b.replace("<div class='col'><div class='ch'>THE RACE</div>", box + "<div class='col'><div class='ch'>THE RACE</div>", 1)
+        b = b.replace("</style>", PWR_CSS + "</style>", 1)
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"power rankings skipped: {e}")
+    # league record: best team week ever (this league's history in Sleeper)
+    try:
+        scores, _ = season_history(sport, week - 1) if week > 1 else ({}, {})
+        prev_best = max((p for v in scores.values() for p in v), default=0)
+        top = max((x for x in live["rosters"].values() if x.get("matchup_id")), key=lambda x: x["points"])
+        if prev_best and top["points"] > prev_best:
+            stamp = (f"<div class='h2' style='margin-top:6px'><span style='background:linear-gradient(90deg,#6d28d9,#a855f7,#d4af37);"
+                     f"color:#fff;font-weight:900;border-radius:999px;padding:2px 10px'>🏛️ NEW LEAGUE RECORD</span> "
+                     f"<b>{H.escape(top['manager'])}</b> {top['points']:.1f} is the best week in league history (old best {prev_best:.1f})</div>")
+            a = a.replace("</div></div><div class='rw'>", stamp + "</div></div><div class='rw'>", 1) if "</div></div><div class='rw'>" in a else a
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"team record check skipped: {e}")
+    return a, b
+
+
+# ---- league record: best single-player game (NFL; one game a week so Sleeper's weekly points are per game)
+_REC_CACHE = {}
+
+
+def nfl_player_game_record(before_week):
+    """(points, player name, week) of the best game by any rostered player in weeks before `before_week`."""
+    if before_week in _REC_CACHE:
+        return _REC_CACHE[before_week]
+    lid = str(CONFIG["nfl"].get("sleeper_league_id")).strip()
+    best = (0.0, "", 0)
+    allp = sleeper_players("nfl")
+    for w in range(1, before_week):
+        try:
+            for m in fetch_url(f"{SLEEPER}/league/{lid}/matchups/{w}") or []:
+                for pid, pts in (m.get("players_points") or {}).items():
+                    if pts and float(pts) > best[0] and (allp.get(pid) or {}).get("position") != "DEF":
+                        best = (float(pts), (allp.get(pid) or {}).get("full_name") or pid, w)
+        except Exception:  # noqa: BLE001
+            continue
+    _REC_CACHE[before_week] = best
+    return best
+
+
+REC_CSS = """
+.pr2.rec{position:relative;overflow:visible!important;isolation:isolate;margin-top:10px;
+ background:linear-gradient(100deg,rgba(124,58,237,.45),rgba(212,175,55,.28) 55%,rgba(124,58,237,.35))!important;
+ box-shadow:0 0 0 2px #d4af37,0 0 28px rgba(168,85,247,.7)!important}
+.pr2.rec .fp{background:linear-gradient(160deg,#fff4c2,#d4af37 55%,#a16207)!important;color:#1b1305!important;box-shadow:0 0 20px rgba(212,175,55,.9)!important}
+.recr{position:absolute;top:-13px;left:64px;z-index:5;white-space:nowrap;font-size:13px;font-weight:900;letter-spacing:1.3px;color:#fff;
+ padding:3px 12px;border-radius:999px;background:linear-gradient(90deg,#6d28d9,#a855f7,#d4af37);box-shadow:0 0 16px rgba(168,85,247,.9)}
+.recr em{font-style:normal;font-weight:800;opacity:.9;margin-left:6px}
+"""
+
+_nfl_game_html_norec = nfl_game_fantasy_html
+
+
+def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=30):
+    h = _nfl_game_html_norec(event, summary, live, ol, base, max_rows)
+    try:
+        if not event["status"]["type"].get("completed") or not live:
+            return h
+        import html as H
+        rec_pts, rec_name, rec_wk = nfl_player_game_record(int(live["week"]))
+        if not rec_pts:
+            return h
+        for p in sorted(nfl_fantasy(summary), key=lambda p: -p["pts"])[:3]:
+            if p["pts"] <= rec_pts or str(p.get("id", "")).startswith("def:") or not league_owner(p.get("id"), p["name"]):
+                continue
+            i = h.find(f"<div class='nm2'>{H.escape(p['name'])}")
+            j = h.rfind("<div class='pr2", 0, i)
+            if i < 0 or j < 0:
+                continue
+            k = h.find(">", j)
+            opening = h[j:k].replace(" sh'", "'").replace("class='pr2", "class='pr2 rec", 1)
+            rest = re.sub(r"^<span class='shr'>.*?</span>", "", h[k + 1:], count=1)
+            ribbon = (f"<span class='recr'>🏛️ NEW LEAGUE RECORD<em>best game in league history · old {rec_pts:.1f} "
+                      f"({H.escape(rec_name)}, wk {rec_wk})</em></span>")
+            h = h[:j] + opening + ">" + ribbon + rest
+            h = h.replace("</style>", REC_CSS + "</style>", 1)
+            break
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"record check skipped: {e}")
+    return h
+
+
+# ---- trade check-ups: 4 weeks after a trade the bot posted, who's actually winning it
+def sleeper_week_points(sport, week):
+    if sport == "nfl":
+        return nfl_week_points(week)
+    key = ("nba", week)
+    if key in _SH_WEEKS:
+        return _SH_WEEKS[key]
+    out = {}
+    try:
+        season = fetch_url(f"{SLEEPER}/state/nba").get("season")
+        sc = dict(league_scoring("nba"))
+        for pid, st_ in (fetch_url(f"{SLEEPER}/stats/nba/regular/{season}/{week}") or {}).items():
+            if isinstance(st_, dict):
+                out[pid] = sum(float(v or 0) * float(sc[k]) for k, v in st_.items() if k in sc and isinstance(v, (int, float)))
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"NBA week points unavailable: {e}")
+    _SH_WEEKS[key] = out
+    return out
+
+
+TC_CSS = """
+.tcw{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px}
+.tcs{background:rgba(255,255,255,.06);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:8px;border:2px solid transparent}
+.tcs.win{border-color:rgba(255,209,102,.75);box-shadow:0 0 24px rgba(255,190,70,.25)}
+.tch{display:flex;justify-content:space-between;align-items:baseline}.tch b{font-size:24px;font-weight:900}.tch span{font-size:30px;font-weight:900;color:#ffd166}
+.tca{display:grid;grid-template-columns:48px 1fr 90px 110px;gap:10px;align-items:center;background:rgba(0,0,0,.22);border-radius:10px;padding:6px 10px}
+.tca img{width:48px;height:48px;border-radius:50%;object-fit:cover;object-position:top;background:#1d2436}
+.tca b{display:block;font-size:17px;font-weight:900}.tca small{font-size:12.5px;color:#aab3c5;font-weight:700}
+.tca .p{font-size:20px;font-weight:900;text-align:right}.tca .v{font-size:12px;font-weight:900;text-align:right;color:#cfd5e1}
+"""
+
+
+def trade_checkup_html(sport, t, done_week):
+    import html as H
+    sides = trade_sides(t)
+    people = _league_people(sport)
+    allp = sleeper_players(sport)
+    weeks = list(range(int(t.get("leg") or 1), done_week + 1))
+    pts_w = {w: sleeper_week_points(sport, w) for w in weeks}
+    fc = fantasycalc_values()["players"] if sport == "nfl" else {}
+    cols, totals = [], {}
+    for rid, sd in sides.items():
+        rows, tot = [], 0.0
+        for pid in sd["players"]:
+            pp = allp.get(pid) or {}
+            since = sum(pts_w[w].get(pid, 0) for w in weeks)
+            tot += since
+            val = (f"<span class='v'>VALUE {(fc.get(pid) or {}).get('value', 0):,.0f}</span>" if sport == "nfl" else "<span></span>")
+            rows.append(f"<div class='tca'><img src='https://sleepercdn.com/content/{sport}/players/thumb/{pid}.jpg'><div>"
+                        f"<b>{H.escape(pp.get('full_name') or pid)}</b><small>{pp.get('position', '')} · {pp.get('team') or 'FA'}</small></div>"
+                        f"<span class='p'>{since:.1f}</span>{val}</div>")
+        for pk in sd["picks"]:
+            v = f"VALUE {pick_value(pk['season'], pk['round']):,.0f}" if sport == "nfl" else ""
+            rows.append(f"<div class='tca'><div style='font-size:28px;text-align:center'>🎟️</div><div><b>{pk['season']} {_ord(pk['round'])}-round pick</b>"
+                        f"<small>not used yet</small></div><span class='p'>—</span><span class='v'>{v}</span></div>")
+        totals[rid] = tot
+        cols.append((rid, rows, tot))
+    if len(totals) < 2:
+        return None, None
+    lead = max(totals, key=totals.get)
+    other = min(totals, key=totals.get)
+    html_cols = "".join(f"<div class='tcs{' win' if rid == lead else ''}'><div class='tch'><b>{H.escape(people.get(rid, {}).get('manager', '?'))} got</b>"
+                        f"<span>{tot:.1f}</span></div>{''.join(rows)}</div>" for rid, rows, tot in cols)
+    head = f"So far: {people.get(lead, {}).get('manager', '?')} winning by {totals[lead] - totals[other]:.1f} points"
+    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
+    body = (f"<div class='top'><div class='lg'><img src='{logo}'>🤝 TRADE CHECK-UP · {len(weeks)} WEEKS ON</div>"
+            f"<div class='pill'>WEEK {t.get('leg')} TRADE</div></div>"
+            f"<div class='hl'><div class='h1'>{H.escape(head)}</div><div class='h2'>Fantasy points each side's players have scored since the "
+            f"trade (weeks {weeks[0]}–{weeks[-1]}){', plus today' + chr(39) + 's dynasty value' if sport == 'nfl' else ''}</div></div>"
+            f"<div class='tcw'>{html_cols}</div>")
+    html_text = _card("--a:#d97757;--h:#5b7bd5" if sport == "nfl" else "--a:#ee6730;--h:#ffb347", body, None,
+                      HL_CSS + TC_CSS + "body,.card{width:1240px!important}", width=1240)
+    return (_nba_theme(html_text, None, "TRADE CHECK-UP") if sport == "nba" else html_text), head
+
+
+def maybe_trade_checkups(st):
+    due = st.setdefault("trade_checks", {})
+    for tid, x in list(due.items()):
+        if x.get("done") or time.time() < x["due"]:
+            continue
+        sport = x["sport"]
+        try:
+            lid = str(CONFIG[sport].get("sleeper_league_id")).strip()
+            t = next((tt for tt in fetch_url(f"{SLEEPER}/league/{lid}/transactions/{x['leg']}") or []
+                      if str(tt.get("transaction_id")) == tid), None)
+            done_week = int((league_settings(sport).get("settings") or {}).get("last_scored_leg") or 0)
+            if not t or done_week < int(x["leg"]):
+                x["done"] = True
+                continue
+            html_text, _ = trade_checkup_html(sport, t, done_week)
+            if not html_text:
+                x["done"] = True
+                continue
+            ok = (_nba_post(html_text, "🤝 **TRADE CHECK-UP**", {}, "checkup.png") if sport == "nba"
+                  else _post_card(NFL_HOOK, html_text, "🤝 **TRADE CHECK-UP**", {}, "checkup.png"))
+            if ok:
+                x["done"] = True
+        except Exception as ex:  # noqa: BLE001
+            log(f"trade check-up error ({tid}): {ex}")
+    for tid in [k for k, v in due.items() if v.get("done") and time.time() - v["due"] > 30 * 86400]:
+        due.pop(tid, None)
+
+
+_post_trade_nocheck = post_trade
+
+
+def post_trade(sport, t):
+    ok = _post_trade_nocheck(sport, t)
+    if ok and _NFL_ST.get("st") is not None and (CONFIG.get("trade_checkups") or {}).get("enabled", True):
+        days = float((CONFIG.get("trade_checkups") or {}).get("after_days", 28))
+        _NFL_ST["st"].setdefault("trade_checks", {})[str(t.get("transaction_id"))] = {
+            "sport": sport, "leg": int(t.get("leg") or 1), "due": (t.get("created") or time.time() * 1000) / 1000 + days * 86400}
+    return ok
+
+
+# ---- weekly NFL waiver wire (Wednesday morning)
+WW_CSS = """
+.ww{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.wr{display:grid;grid-template-columns:56px 1fr 170px 92px;align-items:center;gap:12px;background:rgba(255,255,255,.06);border-radius:12px;padding:8px 12px}
+.wr img{width:56px;height:56px;border-radius:50%;object-fit:cover;object-position:top;background:#1d2436}
+.wr b{display:block;font-size:19px;font-weight:900}.wr small{font-size:13.5px;color:#aab3c5;font-weight:700}
+.sp{display:flex;align-items:flex-end;gap:5px;height:44px}.sp i{width:30px;border-radius:4px 4px 0 0;background:linear-gradient(180deg,#7ee2a8,#1faa59);
+ font-style:normal;font-size:11px;font-weight:900;color:#0d1220;text-align:center;line-height:14px}
+.pj{text-align:center;font-weight:900;font-size:20px;background:rgba(255,209,102,.16);border-radius:8px;padding:4px 0;color:#ffd166}
+.pj small{display:block;font-size:10px;letter-spacing:1px;color:#cfd5e1}
+"""
+
+
+def waiver_html(done_week, next_week):
+    import html as H
+    rp = roster_pid_index("nfl")
+    allp = sleeper_players("nfl")
+    wks = [w for w in (done_week - 2, done_week - 1, done_week) if w >= 1]
+    pts = {w: nfl_week_points(w) for w in wks}
+    proj = nfl_projections(next_week)
+    fa = []
+    for pid, pp in allp.items():
+        if pid in rp or pp.get("position") not in ("QB", "RB", "WR", "TE") or not pp.get("team"):
+            continue
+        if pp.get("injury_status") in ("Out", "IR", "PUP", "Sus"):
+            continue
+        last = [pts[w].get(pid, 0) for w in wks]
+        nxt = proj.get(pid, 0)
+        if not any(last) and not nxt:
+            continue
+        fa.append((pid, sum(last) / len(last), last, nxt))
+    fa.sort(key=lambda x: -(0.6 * x[1] + 0.4 * x[3]))
+    if not fa:
+        return None
+    top = fa[:6]
+    mxv = max(max(x[2]) for x in top) or 1
+    cells = []
+    for pid, avg, last, nxt in top:
+        pp = allp[pid]
+        bars = "".join(f"<i style='height:{max(14, 44 * v / mxv):.0f}px'>{v:.0f}</i>" for v in last)
+        cells.append(f"<div class='wr'><img src='https://sleepercdn.com/content/nfl/players/thumb/{pid}.jpg'><div><b>{H.escape(pp.get('full_name', pid))}</b>"
+                     f"<small>{pp.get('position')} · {pp.get('team')} · {avg:.1f} a week lately</small></div>"
+                     f"<div class='sp'>{bars}</div><div class='pj'>{nxt:.1f}<small>WEEK {next_week} PROJ</small></div></div>")
+    league = CONFIG["nfl"].get("league_name", "League")
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>{H.escape(league.upper())} · WAIVER WIRE</div>"
+            f"<div class='pill'>WEEK {next_week}</div></div>"
+            f"<div class='hl'><div class='h1'>Best free agents right now: {H.escape(allp[top[0][0]].get('full_name', ''))} leads the way</div>"
+            f"<div class='h2'>Unowned in the league · weeks {wks[0]}–{wks[-1]} in your scoring (bars) + week {next_week} projection</div></div>"
+            f"<div class='ww'>{''.join(cells)}</div>")
+    return _card("--a:#1faa59;--h:#5b7bd5", body, None, HL_CSS + WW_CSS + "body,.card{width:1300px!important}", width=1300)
+
+
+def maybe_waivers(st):
+    cfg = CONFIG.get("waiver_wire") or {}
+    if not cfg.get("enabled", True):
+        return
+    now = datetime.now(UK)
+    if now.strftime("%A") != cfg.get("weekday", "Wednesday") or now.hour < int(cfg.get("hour_uk", 10)):
+        return
+    settings = league_settings("nfl") or {}
+    s = settings.get("settings") or {}
+    done_week = int(s.get("last_scored_leg") or 0)
+    next_week = done_week + 1
+    if done_week < 3 or next_week > int(s.get("playoff_week_start") or 15) + 2:
+        return
+    key = f"{settings.get('season')}-{next_week}"
+    if st.get("waivers_done") == key:
+        return
+    html_text = waiver_html(done_week, next_week)
+    if not html_text or _post_card(NFL_HOOK, html_text, "🧲 **WAIVER WIRE**", {}, "waivers.png"):
+        st["waivers_done"] = key
+
+
+_maybe_daily_race_extras = maybe_daily_race
+
+
+def maybe_daily_race(st):
+    _NFL_ST["st"] = st                                  # post_trade needs it to schedule check-ups
+    for fn in (maybe_trade_checkups, maybe_waivers):
+        try:
+            fn(st)
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"{fn.__name__} skipped: {ex}")
+    return _maybe_daily_race_extras(st)
+
+
 # ===================================================================== main
 
 def send_test():
