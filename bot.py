@@ -49,6 +49,7 @@ TD_PAT_WAIT = 0          # seconds to wait for the extra point to be added to a 
 
 SILENT = False           # True on the very first run: mark everything as seen, post nothing
 _POSTER = {}              # per-post webhook name override (NBA posts use their own name)
+_LAST_MSG = {}            # id + channel of the last webhook message (Discord returns it with ?wait=true)
 CAPTURE = None           # list -> collect embeds instead of posting (simulator)
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -149,11 +150,17 @@ def discord(hook, embed, label="", content=None, files=None):
         body, ctype = json.dumps(payload).encode(), "application/json"
     for _ in range(5):
         req = urllib.request.Request(
-            hook, data=body, method="POST",
+            hook + ("&" if "?" in hook else "?") + "wait=true", data=body, method="POST",
             headers={"Content-Type": ctype,
                      "User-Agent": "DiscordBot (sports-bot, 1.0)"})
         try:
-            with urllib.request.urlopen(req, timeout=20):
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                try:
+                    m = json.loads(resp.read().decode() or "{}")
+                    _LAST_MSG.clear()
+                    _LAST_MSG.update({"id": m.get("id"), "channel_id": m.get("channel_id")})
+                except Exception:  # noqa: BLE001
+                    pass
                 time.sleep(1)
                 return True
         except urllib.error.HTTPError as e:
@@ -5871,6 +5878,136 @@ FAN_CSS += """
 .tpr .pj5 b{margin-left:5px}.tpr .pj5 b.up{color:#7ee2a8}.tpr .pj5 b.dn{color:#ff9a9e}
 .tpr .pj5.beat{color:#ffd166}.tpr .pj5.beat b.up{color:#ffd166}
 """
+
+
+
+# ------------------------------------------------ pin NFL full-time posts for 16 hours (needs a Discord bot token)
+
+BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+_PIN_QUEUE = []
+
+
+def discord_api(method, path, body=None):
+    """Discord REST call as the bot user. Returns (status, json-or-None)."""
+    for _ in range(3):
+        req = urllib.request.Request(
+            "https://discord.com/api/v10" + path, method=method,
+            data=json.dumps(body).encode() if body is not None else (b"" if method in ("PUT", "POST") else None),
+            headers={"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json",
+                     "User-Agent": "DiscordBot (sports-bot, 1.0)"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                t = r.read().decode()
+                return r.status, (json.loads(t) if t else None)
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                try:
+                    time.sleep(float(json.loads(e.read().decode()).get("retry_after", 2)) + 0.5)
+                except Exception:  # noqa: BLE001
+                    time.sleep(2)
+                continue
+            return e.code, None
+        except Exception:  # noqa: BLE001
+            return 0, None
+    return 429, None
+
+
+def pin_hours():
+    return float((CONFIG.get("nfl") or {}).get("pin_final_hours", 16) or 0)
+
+
+def _pin(ch, mid, on=True):
+    meth = "PUT" if on else "DELETE"
+    code, _ = discord_api(meth, f"/channels/{ch}/messages/pins/{mid}")
+    if code in (404, 405):                                   # older endpoint
+        code, _ = discord_api(meth, f"/channels/{ch}/pins/{mid}")
+    return code
+
+
+def _hide_pin_notice(ch, mid):
+    """Remove Discord's "Donald pinned a message" line so the channel stays clean (needs Manage Messages)."""
+    code, msgs = discord_api("GET", f"/channels/{ch}/messages?limit=5")
+    for m in msgs or []:
+        if m.get("type") == 6 and str((m.get("message_reference") or {}).get("message_id")) == str(mid):
+            discord_api("DELETE", f"/channels/{ch}/messages/{m['id']}")
+
+
+def pin_last_post(label):
+    """Pin the message just posted; remember to unpin it after pin_hours()."""
+    if not BOT_TOKEN or pin_hours() <= 0 or SILENT or DRY_RUN or CAPTURE is not None:
+        return
+    ch, mid = _LAST_MSG.get("channel_id"), _LAST_MSG.get("id")
+    if not (ch and mid):
+        return
+    code = _pin(ch, mid, True)
+    if code in (200, 204):
+        _log_plain(f"pinned {label} for {pin_hours():g}h")
+        _PIN_QUEUE.append({"ch": ch, "id": mid, "until": time.time() + pin_hours() * 3600, "label": label})
+        try:
+            if (CONFIG.get("nfl") or {}).get("hide_pin_notice", True):
+                _hide_pin_notice(ch, mid)
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        log(f"Discord pin error ({code}) for {label}: check the bot's Pin Messages permission in the channel")
+
+
+def pins_tick(st):
+    """Store new pins in state and unpin the ones whose 16 hours are up."""
+    pins = st.setdefault("pins", [])
+    while _PIN_QUEUE:
+        pins.append(_PIN_QUEUE.pop(0))
+    if not pins or not BOT_TOKEN:
+        return
+    now, keep = time.time(), []
+    for p in pins:
+        if p["until"] > now:
+            keep.append(p)
+            continue
+        code = _pin(p["ch"], p["id"], False)
+        if code in (200, 204, 404):
+            _log_plain(f"unpinned {p.get('label', p['id'])}")
+        elif now - p["until"] < 6 * 3600:
+            keep.append(p)                                     # try again on the next loop
+        else:
+            log(f"Discord unpin error ({code}) for {p.get('label', p['id'])}: giving up")
+    st["pins"] = keep
+
+
+_save_state_nopins = save_state
+
+
+def save_state(st):
+    try:
+        pins_tick(st)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"pins: {ex}")
+    return _save_state_nopins(st)
+
+
+def _pinning(fn, label_of):
+    def wrapped(*a, **k):
+        _LAST_MSG.clear()
+        ok = fn(*a, **k)
+        lab = label_of(*a, **k)
+        if ok and lab:
+            try:
+                pin_last_post(lab)
+            except Exception as ex:  # noqa: BLE001
+                _log_plain(f"pin skipped: {ex}")
+        return ok
+    return wrapped
+
+
+def _final_label(event, *a, **k):
+    away, home = teams_of(event)
+    return f"NFL full-time {away['team']['abbreviation']} @ {home['team']['abbreviation']}"
+
+
+post_prime_final = _pinning(post_prime_final, _final_label)
+post_nfl_final = _pinning(post_nfl_final, _final_label)
+post_slot = _pinning(post_slot, lambda mode, slot, live: f"NFL full-time slate ({len(slot)} games)"
+                     if mode == "FULL-TIME" else None)
 
 
 # ===================================================================== main

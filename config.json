@@ -50,7 +50,9 @@
     "td_card_v5": true,
     "clutch_field_goals": true,
     "overtime_posts": true,
-    "game_changer_swing": 12
+    "game_changer_swing": 12,
+    "pin_final_hours": 16,
+    "hide_pin_notice": true
   },
   "nba": {
     "batch_note": "-1 = one post per game as soon as it finishes. Set e.g. 60 to group games that tip off within 60 minutes of each other into one post.",
