@@ -9092,8 +9092,8 @@ def render_anim(html_text, width=None):
 # ------------------------------------------------ readable without opening: in-game cards sized for Discord's inline view
 #   Donald attaches each card as a plain image; Discord desktop shows it scaled to fit about 550 x 350 px, so a card
 #   W px wide shows its text at 550 / W of its size. Target: the smallest meaningful text >= ~11px on screen, i.e.
-#   about W / 50 px in the card. Less text, bigger: no top strip (the scoreboard says it), no commentary line on
-#   moment cards, no per-row matchup column on game cards (the pinned weekly board has those), and long player
+#   about W / 50 px in the card. Less text, bigger: no top strip (the scoreboard says it), commentary kept to one
+#   line, no per-row matchup column on game cards (the pinned weekly board has those), and long player
 #   lists show the top 8 with the rest in one line. Few rows -> bigger rows that fill the panel.
 #   tools/inline_size.py measures any card.
 
@@ -9106,7 +9106,8 @@ BIG_MOMENT_CSS = """
 .in>.top{display:none!important}
 .in>.hl{margin:0 0 12px!important;padding:10px 18px!important}
 .hl .h1{font-size:28px!important;line-height:1.18!important}
-.hl .h2{display:none!important}
+.hl .h2{display:-webkit-box!important;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;
+ font-size:20px!important;line-height:1.3!important;margin-top:4px!important}
 .sbx{padding:10px 22px!important;margin-top:0!important;gap:12px!important}
 .sbx .disc{width:80px!important;height:80px!important}.sbx .disc img{width:62px!important;height:62px!important}
 .sbx .tm{gap:14px!important}
@@ -9114,16 +9115,16 @@ BIG_MOMENT_CSS = """
 .sbx .sc{font-size:84px!important}
 .sbx .clk{font-size:22px!important}
 .sbx .yd{font-size:34px!important;margin-top:4px!important}
-.sbx .st{font-size:22px!important;margin-top:6px!important;padding:3px 14px!important}
+.sbx .st{font-size:22px!important;margin-top:6px!important;padding:3px 14px!important;display:inline-block!important;vertical-align:middle}
 .sbx .plus{font-size:24px!important;padding:1px 12px!important;margin-top:4px!important}
-.sbx .tryt{font-size:22px!important;padding:3px 12px!important;margin:8px 0 0!important}
+.sbx .tryt{font-size:22px!important;padding:3px 12px!important;margin:6px 0 0 8px!important;vertical-align:middle}
 .lsx{gap:14px!important;margin-top:12px!important;align-items:stretch!important}
 .lsx>.lcol,.lsx>.rcol{display:flex;flex-direction:column;gap:12px}
 .lsx .lcol>*{margin-top:0!important}
 .lsx .lcol>.pair{flex:1;display:flex!important;flex-direction:column;gap:12px!important;margin:0!important}
 .lsx .lcol>.pair>.pp5{flex:1}
 .lsx .rcol>.imp,.lsx .rcol>.sw5{flex:1}
-.lsx .rcol .cv{margin-bottom:0!important}
+.lsx .cv{margin:0!important}
 .pp5{grid-template-columns:92px minmax(0,1fr)!important;gap:16px!important;padding:10px 16px!important;align-items:center!important}
 .pp5 img{width:92px!important;height:92px!important;border-radius:14px!important}
 .pp5 .role{display:none!important}
@@ -9136,6 +9137,11 @@ BIG_MOMENT_CSS = """
 .pb5 .beat{display:inline-block;font-size:22px!important;font-weight:900!important;padding:4px 12px!important;letter-spacing:.4px!important;
  background:#ffd166!important;color:#140d00!important;box-shadow:none!important;text-shadow:none!important;border-radius:9px!important}
 .pjn{font-size:22px!important;margin-top:4px!important}.pjn b{font-size:22px!important}
+.lsx .lcol:not(:has(.pp5+.pp5)) .pp5{grid-template-columns:124px minmax(0,1fr)!important}
+.lsx .lcol:not(:has(.pp5+.pp5)) .pp5 img{width:124px!important;height:124px!important}
+.lsx .lcol:not(:has(.pp5+.pp5)) .pp5 .nm{font-size:30px!important}
+.lsx .lcol:not(:has(.pp5+.pp5)) .pp5 .gn b{font-size:50px!important}
+.lsx .lcol:not(:has(.pp5+.pp5)) .pjn,.lsx .lcol:not(:has(.pp5+.pp5)) .pp5 .ow3{font-size:24px!important}
 .pp5 .ow3{font-size:22px!important;margin-top:4px!important}
 .cv{font-size:21px!important;padding:10px 16px!important;gap:10px!important}
 .cv .tg,.cv .ok,.cv .no{font-size:20px!important}.cv .cvw{font-size:21px!important}
@@ -9156,6 +9162,9 @@ BIG_MOMENT_CSS = """
 .imp:not(:has(.im+.im+.im)) .im .who5{font-size:31px!important}
 .imp:not(:has(.im+.im+.im)) .im{font-size:24px!important}
 .imp:not(:has(.im+.im+.im)) .im>:nth-child(3){font-size:24px!important}
+.imp:has(.im+.im+.im) .im{grid-template-columns:26px minmax(0,1fr) auto auto!important;padding:7px 0!important;column-gap:10px!important}
+.imp:has(.im+.im+.im) .im>:nth-child(5){display:none!important}
+.imp:has(.im+.im+.im) .im .who5{font-size:25px!important}
 .imp:not(:has(.im+.im)) .im .who5{font-size:36px!important}.imp:not(:has(.im+.im)) .im{font-size:27px!important}
 .imp:not(:has(.im+.im)) .im>:nth-child(3){font-size:27px!important}
 .sw5{padding:14px 20px!important;display:flex;flex-direction:column;justify-content:space-evenly}
@@ -9289,7 +9298,16 @@ def readable_inline(html_text):
                 html_text = html_text.replace(m.group(0), "", 1)
                 k = html_text.find("</div>", html_text.find("<div class=st>")) + len("</div>")
                 html_text = html_text[:k] + m.group(0) + html_text[k:]
-            html_text = html_text.replace("<div class='pjn'>projected ", "<div class='pjn'>proj ")
+            html_text = (html_text.replace("<div class='pjn'>projected ", "<div class='pjn'>proj ")
+                         .replace("<span class='tg'>EXTRA POINT</span>", "<span class='tg'>XP</span>")
+                         .replace("<span class='tg'>2-PT CONVERSION</span>", "<span class='tg'>2-PT</span>"))
+            c, l = html_text.find("<div class='cv'>"), html_text.find("<div class='lcol'>")
+            if c > 0 and l > 0 and c > l:                     # kicker / 2-pt strip under the players: evens the columns
+                ce = _div_end(html_text, c)
+                cv = html_text[c:ce]
+                html_text = html_text[:c] + html_text[ce:]
+                le = _div_end(html_text, l) - len("</div>")
+                html_text = html_text[:le] + cv + html_text[le:]
         elif "<div class='pl2'>" in html_text and "class='pr2" in html_text:
             busy = "<div class='h2'>" in html_text or "class='nbar'" in html_text
             html_text = _cap_rows(html_text, 6 if busy else 8)       # extra headline lines: fewer full rows
@@ -9309,16 +9327,109 @@ def readable_inline(html_text):
         return html_text
 
 
+
+
+# ---- big games get hype: NFL 30+ "BIG GAME", 40+ "MONSTER GAME"; NBA (lock-in, defence-heavy) 55+ / 70+.
+#   Config: <sport>.hype = [big, monster]. Works on the TD/FG scorer panels, game-card rows and grouped NBA rows,
+#   stacks with the season-high ribbon (that one sits on the other side). Animated in GIFs, glowing in stills.
+HYPE_DEFAULT = {"nfl": (30, 40), "nba": (55, 70)}
+
+HYPE_CSS = """
+.pp5.h3,.pr2.h3,.tpr.h3,.pp5.h4,.pr2.h4,.tpr.h4{position:relative;overflow:visible!important}
+.pp5.h3,.pr2.h3,.tpr.h3{box-shadow:0 0 0 3px #ff8a00,0 0 26px rgba(255,120,0,.6)!important;
+ background:linear-gradient(120deg,rgba(110,38,0,.9),rgba(24,12,8,.88))!important}
+.pp5.h4,.pr2.h4,.tpr.h4{box-shadow:0 0 0 4px #ffd600,0 0 44px rgba(255,40,0,.9)!important;
+ background:radial-gradient(circle at 15% 0%,rgba(255,90,0,.6),rgba(130,0,0,.8) 55%,rgba(30,4,4,.92))!important}
+.hyr{position:absolute;top:-15px;right:14px;z-index:7;font-size:20px;font-weight:900;letter-spacing:1.2px;padding:3px 12px;
+ border-radius:8px;white-space:nowrap;background:linear-gradient(90deg,#ff3d00,#ff9100,#ffd600,#ff9100,#ff3d00);
+ background-size:240px 100%;color:#1a0800;box-shadow:0 0 16px rgba(255,120,0,.75)}
+.hyr.h4{font-size:22px;color:#fff;text-shadow:0 1px 0 rgba(0,0,0,.6);
+ background:linear-gradient(90deg,#9e0000,#ff2d00,#ffb000,#ff2d00,#9e0000);background-size:240px 100%;box-shadow:0 0 24px rgba(255,50,0,1)}
+.pr2 .hyr{right:auto;left:70px}.pr2.h3,.pr2.h4{padding-top:16px!important}
+.tpr .hyr{right:90px;top:-13px;font-size:16px}.tpr.h3,.tpr.h4{margin-top:10px}
+.pp5.h3,.pp5.h4{padding-top:28px!important}
+.pp5.h3 .gn span em{color:#ffb347!important}
+.pp5.h4 .gn span em{color:#ffd600!important;text-shadow:0 0 12px rgba(255,60,0,.95)}
+.pp5.h3 .gn,.pp5.h4 .gn{white-space:nowrap}
+.pr2.h3 .fp,.tpr.h3 .fp5{background:linear-gradient(180deg,#ffc04d,#ff6a00)!important;color:#1a0800!important}
+.pr2.h4 .fp,.tpr.h4 .fp5{background:linear-gradient(180deg,#fff066,#ff3d00)!important;color:#1a0000!important;
+ box-shadow:0 0 18px rgba(255,60,0,.9)}
+.pr2.h3 .fp{font-size:35px!important}.pr2.h4 .fp{font-size:38px!important}
+"""
+
+ANIM_CSS += """
+@keyframes a_hype{0%,100%{box-shadow:0 0 0 3px #ff8a00,0 0 16px rgba(255,120,0,.45)}50%{box-shadow:0 0 0 3px #ffb000,0 0 44px rgba(255,140,0,1)}}
+@keyframes a_mon{0%,100%{box-shadow:0 0 0 4px #ffd600,0 0 30px rgba(255,40,0,.8)}25%{box-shadow:0 0 0 4px #ff3d00,0 0 64px rgba(255,200,0,1)}
+ 50%{box-shadow:0 0 0 4px #ffd600,0 0 36px rgba(255,40,0,.9)}75%{box-shadow:0 0 0 4px #fff,0 0 70px rgba(255,90,0,1)}}
+@keyframes a_shake{0%,100%{transform:translate(0,0) rotate(0)}20%{transform:translate(-2px,1px) rotate(-2deg)}
+ 40%{transform:translate(2px,-1px) rotate(2deg)}60%{transform:translate(-1px,-1px) rotate(-1deg)}80%{transform:translate(1px,1px) rotate(1deg)}}
+@keyframes a_embers{from{background-position:0 0,23px 30px}to{background-position:0 -60px,23px -30px}}
+.pp5.h3,.pr2.h3,.tpr.h3{animation:a_hype 1s ease-in-out infinite!important}
+.pp5.h4,.pr2.h4,.tpr.h4{animation:a_mon .5s linear infinite!important}
+.pp5.h4::after,.pr2.h4::after,.tpr.h4::after{content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+ background-image:radial-gradient(circle,rgba(255,214,0,.9) 0 2px,transparent 3px),radial-gradient(circle,rgba(255,110,0,.8) 0 3px,transparent 4px);
+ background-size:46px 60px,70px 60px;background-position:0 0,23px 30px;opacity:.45;animation:a_embers .5s linear infinite}
+.pp5.h4 .gn span em,.pr2.h4 .fp,.tpr.h4 .fp5{display:inline-block;animation:a_shake .5s linear infinite}
+.hyr{animation:a_shine 1s linear infinite}
+"""
+
+
+def _hype_levels(html_text):
+    sport = "nba" if "class='nbar'" in html_text else "nfl"
+    lv = (CONFIG.get(sport) or {}).get("hype") or HYPE_DEFAULT[sport]
+    return sport, float(lv[0]), float(lv[1])
+
+
+def _hype_scan(html_text):
+    """[(start, end, tier, points)] for every scorer panel / player row worth hype."""
+    sport, lo, hi = _hype_levels(html_text)
+    out = []
+    for cls, num_re in (("pp5", r"now <em>([\d.]+)</em>"), ("pr2", r"class='fp[^']*'>([\d.]+)"),
+                        ("tpr", r"class='fp5'>([\d.]+)")):
+        for m in re.finditer(r"<div class='%s[^']*'>" % cls, html_text):
+            e = _div_end(html_text, m.start())
+            v = re.search(num_re, html_text[m.start():e])
+            if v and float(v.group(1)) >= lo:
+                out.append((m.start(), m.end(), 4 if float(v.group(1)) >= hi else 3, float(v.group(1))))
+    return out
+
+
+def hype_mark(html_text):
+    """Add the BIG GAME / MONSTER GAME treatment to the panels and rows that earned it."""
+    try:
+        sport, lo, hi = _hype_levels(html_text)
+        found = sorted(_hype_scan(html_text), reverse=True)
+        if not found:
+            return html_text
+        for start, tag_end, tier, v in found:
+            tag = html_text[start:tag_end]
+            new = tag[:-2] + f" h{tier}'>"
+            label = (f"💥 MONSTER GAME · {v:g} PTS" if tier == 4 else f"🔥 BIG GAME · {v:g} PTS")
+            html_text = html_text[:start] + new + f"<span class='hyr h{tier}'>{label}</span>" + html_text[tag_end:]
+        return html_text.replace("</style>", HYPE_CSS + "</style>", 1)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"hype skipped: {ex}")
+        return html_text
+
+
+_wants_animation_plain = wants_animation
+
+
+def wants_animation(html_text):
+    return _wants_animation_plain(html_text) or (
+        (CONFIG.get("animations") or {}).get("enabled", True) and any(t == 4 for _, _, t, _ in _hype_scan(html_text)))
+
+
 _render_card_small = render_card
 _render_anim_small = render_anim
 
 
 def render_card(html_text, width=None):
-    return _render_card_small(readable_inline(_shape_more(_moment_landscape(html_text))), width)
+    return _render_card_small(hype_mark(readable_inline(_shape_more(_moment_landscape(html_text)))), width)
 
 
 def render_anim(html_text, width=None):
-    return _render_anim_small(readable_inline(_shape_more(_moment_landscape(html_text))), width)
+    return _render_anim_small(hype_mark(readable_inline(_shape_more(_moment_landscape(html_text)))), width)
 
 
 

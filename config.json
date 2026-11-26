@@ -59,6 +59,7 @@
       "mention_role_id": ""
     },
     "season_high_min": 20,
+    "hype": [30, 40],
     "weekly_board": {
       "note": "One matchups board per week (points now, projected final, win %, players left), edited every 5 min while games are live. Posted 00:00 UK on the day of the week's first game (normally Friday), pinned until Tuesday 12:00 UK. Pinning needs DISCORD_BOT_TOKEN on the server.",
       "enabled": true,
@@ -107,6 +108,7 @@
       "mention_role_id": ""
     },
     "season_high_min": 40,
+    "hype": [55, 70],
     "weekly_board": {
       "note": "Weekly matchups board, posted + pinned Monday 12:00 UK and replaced the next Monday 12:00 UK.",
       "enabled": true,
