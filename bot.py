@@ -2995,6 +2995,8 @@ def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=7):
             f"<div class='big2'>{len([r for r in rows if r['owner']])} league players · "
             f"{fmt_pts(sum(r['pts'] for r in rows if r['owner'] and r['starting']))} fpts from starters</div></div>{strip}</div>"
             f"<div class='pl2'>{''.join(prs)}</div>{panel}")
+    if event["status"].get("period", 0) > 4 and event["status"]["type"].get("state") == "post":
+        body = body.replace("<div class='pill'>FULL-TIME</div>", "<div class='pill'>FULL-TIME · OT</div>", 1)
     return _card(f"--a:{ca};--h:{ch}", body, 64 + 70 + len(prs) * 62 + (60 + ((len(sub) + 1) // 2) * 24 if panel else 0) + 14,
                  OUT_CSS + RECAP_CSS)
 
@@ -3445,6 +3447,8 @@ def post_td_fantasy(event, play, summary, ctx):
                   2 if td["pat"] and "Good" in td["pat"]["mark"] else 0)
     a0, h0 = (a_s - scored, h_s) if team is away else (a_s, h_s - scored)
     lead_txt, tag = lead_context(team is away, a_s, h_s, a0, h0)
+    if event["status"]["type"].get("state") == "post" and (play.get("period") or {}).get("number", 0) > 4:
+        lead_txt, tag = f"{nick} win it in overtime!", "WALK-OFF"
     drive, detail = play_detail(summary, play.get("id"))
     down_text = ((detail or {}).get("start") or {}).get("downDistanceText", "")
     seed = int(re.sub(r"\D", "", str(play.get("id", "0")))[-6:] or 0)
@@ -4354,7 +4358,7 @@ TD5_CSS = """
 .sec{color:#e3e7ef!important}
 .imp{margin-top:8px;border-radius:12px;padding:8px 14px}
 .imp .ih{font-size:10.5px;letter-spacing:1.4px;font-weight:800;margin-bottom:2px}
-.im{display:grid;grid-template-columns:18px 130px 1fr 110px 120px;align-items:center;gap:10px;font-size:14px;color:#e3e7ef;
+.im{display:grid;grid-template-columns:18px 175px 1fr 110px 120px;align-items:center;gap:10px;font-size:14px;color:#e3e7ef;
  padding:5px 0;border-top:1px solid rgba(255,255,255,.07)}
 .ih + .im{border-top:none}
 .im b{color:#fff}.im .who5{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -4547,7 +4551,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
     mus = [f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>"] if rows else []
     st["nfl_td_win"] = {str(r): v["win"] for r, v in ol.items()}
 
-    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>TOUCHDOWN · Q{q} "
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>TOUCHDOWN · {'OT' if q > 4 else 'Q' + str(q)} "
             f"{play.get('clock', {}).get('displayValue', '')} · {away['team']['abbreviation']} {a_s}–{h_s} "
             f"{home['team']['abbreviation']}</div><div class='pill'>{H.escape(tag)}</div></div>"
             f"<div class='sec' style='margin-top:10px'>{H.escape(what.upper())}</div>"
