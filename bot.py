@@ -6785,7 +6785,7 @@ def render_anim(html_text, width=None):
     with tempfile.TemporaryDirectory() as d:
         src, grid, out = Path(d) / "card.html", Path(d) / "grid.html", Path(d) / "grid.png"
         src.write_text(card)
-        base = [chrome, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--virtual-time-budget=15000"]
+        base = _gif_nice() + [chrome, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--virtual-time-budget=15000"]
         try:
             dom = subprocess.run(base + [f"--window-size={width},3000", "--dump-dom", src.as_uri()],
                                  check=True, timeout=60, capture_output=True, text=True).stdout
@@ -8548,7 +8548,8 @@ def td_try_tick(st, slot, getctx):
                     if ctx:                                # take "conversion to come" off the card (nothing new shown)
                         img, name, _ = _rebuild_td_image(e, td_only_play(p, summary), summary, ctx, None)
                         if img and not r.get("done"):
-                            discord_edit(NFL_HOOK, r["msg"], img, name)
+                            if discord_edit(NFL_HOOK, r["msg"], img, name):
+                                _gif_after_edit(NFL_HOOK, r["msg"])
                 else:
                     waiting = True
                 continue
@@ -8575,6 +8576,8 @@ def td_try_tick(st, slot, getctx):
             _wait_for_send_slot()
             ok = discord_edit(NFL_HOOK, r["msg"], img, name)
             _record_send(ok is True)
+            if ok:
+                _gif_after_edit(NFL_HOOK, r["msg"])
             if ok is not False:
                 r["try"] = "done" if ok else "gone"
                 r["try_result"] = res["label"]
@@ -9760,13 +9763,13 @@ _RANKS = {}
 
 RANK_CSS = """
 .pp5,.pr2,.as,.pp2,.pog{position:relative}
-.phw{position:relative;display:block;width:fit-content;line-height:0}
+.phw{position:relative;display:block;width:fit-content;line-height:0;margin-bottom:15px}
 .pr2>.phw{grid-column:1;grid-row:1/3}.pr2>.phw>img{width:58px!important;height:58px!important}
-.prk{position:absolute;left:50%;bottom:-12px;transform:translateX(-50%);z-index:6;font-style:normal;font-weight:900;font-size:16px;
- line-height:22px;height:24px;width:68px;text-align:center;letter-spacing:.3px;border-radius:999px;box-sizing:border-box;
+.prk{position:absolute;left:50%;bottom:-19px;transform:translateX(-50%);z-index:6;font-style:normal;font-weight:900;font-size:16px;
+ line-height:22px;height:24px;width:auto;min-width:68px;padding:0 7px;text-align:center;letter-spacing:.3px;border-radius:999px;box-sizing:border-box;
  background:#1f2937;color:#f3f4f6;border:1.5px solid #6b7280;white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums;
  text-shadow:none}
-.as .prk,.pog .prk{width:58px;font-size:14px;height:22px;line-height:20px;bottom:-10px}
+.as .prk,.pog .prk{min-width:58px;padding:0 6px;font-size:14px;height:22px;line-height:20px;bottom:-17px}
 .prk.r12{background:linear-gradient(180deg,#f8fafc,#cbd5e1);color:#0f172a;border-color:#f8fafc}
 .prk.r5{background:linear-gradient(135deg,#6d28d9,#a855f7 60%,#e879f9);color:#fff;border-color:#f0abfc;
  box-shadow:0 0 12px rgba(192,132,252,.85)}
@@ -10468,6 +10471,145 @@ def push_state():
         if r.returncode and c[1] not in ("commit",):
             log(f"state push: {' '.join(c[:2])} failed: {r.stderr.strip()[:200]}")
             return
+
+
+
+# ------------------------------------------------ faster in-game posts: the still card goes out at once (~2-3s to
+#   build), the looping animation is built in the background and swapped into the same message when it's ready.
+#   One animation is built at a time (queued; Chrome runs at low priority so the next still card isn't slowed).
+#   Every edit of a message bumps its version; a swap is only made if nothing newer was put in the message since
+#   the animation was asked for (try edits, overturned stamps, corrections always win). Pending swaps live in memory
+#   only: after a restart the message simply keeps its still card. Switch: config animations.still_first (default on).
+import queue as _queue
+import threading as _threading
+
+_GIF_Q = _queue.Queue()
+_GIF_VER = {}                         # message id -> version (bumped by every edit that isn't a swap)
+_GIF_LOCK = _threading.Lock()         # an edit and a swap never interleave
+_GIF_WORKER = {"t": None}
+_GIF_LAST = {}                        # html + file name of the last still-first card (for the try-edit rebuilds)
+_GIF_LOG = []                         # (built secs, swapped secs after the still) for the report / tests
+
+
+def _still_first():
+    a = CONFIG.get("animations") or {}
+    return a.get("enabled", True) and a.get("still_first", True)
+
+
+def _gif_nice():
+    """Low CPU priority for the Chrome that builds animations (the bot has one core)."""
+    import shutil
+    if _threading.current_thread().name == "gif-swap" and shutil.which("nice"):
+        return ["nice", "-n", "15"]
+    return []
+
+
+def _gif_bump(message_id):
+    if message_id:
+        _GIF_VER[str(message_id)] = _GIF_VER.get(str(message_id), 0) + 1
+
+
+def _gif_queue(hook, message_id, html_text, name, t0=None, posted=None):
+    """Ask for the animated version of a posted still card (latest version of that message only)."""
+    if not (hook and message_id and html_text) or CAPTURE is not None:
+        return
+    job = {"hook": hook, "msg": str(message_id), "html": html_text, "name": name.rsplit(".", 1)[0] + ".gif",
+           "ver": _GIF_VER.get(str(message_id), 0), "t0": t0, "posted": posted or time.time()}
+    _GIF_Q.put(job)
+    if _GIF_WORKER["t"] is None or not _GIF_WORKER["t"].is_alive():
+        _GIF_WORKER["t"] = _threading.Thread(target=_gif_worker, name="gif-swap", daemon=True)
+        _GIF_WORKER["t"].start()
+
+
+def _gif_worker():
+    while True:
+        job = _GIF_Q.get()
+        try:
+            _gif_swap(job)
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"animation swap failed: {ex}")
+        finally:
+            _GIF_Q.task_done()
+
+
+def _gif_swap(job):
+    msg = job["msg"]
+    if _GIF_VER.get(msg, 0) != job["ver"]:
+        return                                            # the message changed since: a newer job (or none) applies
+    t = time.time()
+    gif = render_anim(job["html"])
+    built = time.time() - t
+    if not gif:
+        _log_plain("animation not built: the post keeps its still card")
+        return
+    with _GIF_LOCK:
+        if _GIF_VER.get(msg, 0) != job["ver"]:
+            _log_plain("animation dropped: the post was edited while it was being built")
+            return
+        ok = _discord_edit_raw(job["hook"], msg, gif, job["name"])
+    if ok:
+        after = time.time() - job["posted"]
+        _GIF_LOG.append((round(built, 1), round(after, 1)))
+        del _GIF_LOG[:-40]
+        mom = f", {time.time() - job['t0']:.1f}s after the moment" if job.get("t0") else ""
+        _log_plain(f"gif swapped {after:.1f}s later (built in {built:.1f}s{mom})")
+        st = _NFL_ST.get("st") or {}
+        for r in (st.get("td_posts") or {}).values():   # later text-only edits must name the new file
+            if str(r.get("msg")) == msg:
+                r["file"] = job["name"]
+
+
+_discord_edit_raw = discord_edit
+
+
+def discord_edit(hook, message_id, png=None, name="live.png", content=None):
+    with _GIF_LOCK:
+        _gif_bump(message_id)
+        return _discord_edit_raw(hook, message_id, png, name, content)
+
+
+_post_card_animfirst = _post_card
+
+
+def _post_card(hook, html_text, content, embed, name):
+    """Animated moments: post the still card now and swap the animation in when it's built."""
+    if not ((CONFIG.get("bot") or {}).get("image_only", True) and wants_animation(html_text) and _still_first()):
+        return _post_card_animfirst(hook, html_text, content, embed, name)
+    for nm in list(_SH_HEAD):                             # same SEASON HIGH headline as the other paths
+        for k in ("img_title", "title"):
+            t = embed.get(k)
+            if t and nm in t and "SEASON HIGH" not in t:
+                embed[k] = f"🔥 SEASON HIGH! {t}"
+    _SH_HEAD.clear()
+    full = _inject_headline(html_text, embed)
+    png = render_card(full)
+    if not png:
+        return _post_card_animfirst(hook, html_text, content, embed, name)
+    still = name.rsplit(".", 1)[0] + ".png"
+    _GIF_LAST.clear()
+    _GIF_LAST.update(html=full, name=still)
+    t0 = _SEND_AT.get("t0")
+    if _SEND_AT.get("label") and not _SEND_AT["label"].startswith("still "):
+        _SEND_AT["label"] = "still " + _SEND_AT["label"]
+    _LAST_MSG.clear()
+    ok = discord(hook, [], name, files={still: png})
+    if ok is True and _LAST_MSG.get("id"):
+        _gif_queue(hook, _LAST_MSG["id"], full, still, t0)
+    return ok
+
+
+_rebuild_td_image_still = _rebuild_td_image
+
+
+def _rebuild_td_image(event, play, summary, ctx, tag):
+    _GIF_LAST.clear()
+    return _rebuild_td_image_still(event, play, summary, ctx, tag)
+
+
+def _gif_after_edit(hook, message_id):
+    """After a try / give-up edit made with a rebuilt still card: queue its animated version."""
+    if _GIF_LAST.get("html"):
+        _gif_queue(hook, message_id, _GIF_LAST["html"], _GIF_LAST["name"])
 
 
 if __name__ == "__main__":

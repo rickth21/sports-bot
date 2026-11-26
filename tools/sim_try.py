@@ -144,11 +144,23 @@ def flow():
         return m.group(1) if m else None
 
     bot.discord = fake_discord
+    gif_edit = bot.discord_edit                          # the real wrapper (bumps the message version)
     bot.discord_edit = fake_edit
+
+    class Busy:                                          # no background thread: the test runs the queue itself
+        @staticmethod
+        def is_alive():
+            return True
+    bot._GIF_WORKER["t"] = Busy()
+
+    def drain():
+        while not bot._GIF_Q.empty():
+            bot._gif_swap(bot._GIF_Q.get())
     bot.render_card = lambda h, w=None: h.encode()
     bot.render_anim = lambda h, w=None: None
     bot.fetch = lambda path, tries=3: cur["s"] if "summary" in path else {"events": [event]}
     bot.NFL_HOOK = "sim"
+    bot.CONFIG["spoiler_delay_seconds"] = 60             # the timings below assume a 60s delay (live config may differ)
     bot._log_plain = lambda *a: None
     bot.alert = lambda *a, **k: None
     others = [str(p["id"]) for p in summary0["scoringPlays"][:i]]
@@ -220,6 +232,48 @@ def flow():
     edits = [x for x in log if x[0] == "edit"]
     if len(edits) != 1 or edits[0][3] is not None or edits[0][2] != "10-18":
         problems.append("give-up should edit once to remove 'to come' and keep 10-18")
+    # 5) still first, animation swapped in: the swap shows the latest state, never an older one
+    def fake_raw(hook, mid, png=None, name="", content=None):
+        log.append(("swap" if name.endswith(".gif") else "edit", round(clock["t"] - t_td), _score(png), _tag(png),
+                    content))
+        return True
+    bot.discord_edit, bot._discord_edit_raw = gif_edit, fake_raw
+    bot.render_anim = lambda h, w=None: b"GIF89a" + h.encode()
+
+    def scenario(drain_before_try):
+        log.clear()
+        while not bot._GIF_Q.empty():
+            bot._GIF_Q.get()
+        clock["t"] = t_td + 5
+        st = fresh_state()
+        run(st, t_td + 70, [(0, no_try)])
+        if drain_before_try:
+            drain()
+        run(st, t_td + 400, [(0, with_try)])
+        drain()
+        return st
+
+    st = scenario(True)
+    print("5a) still -> gif, try later:", log)
+    if [x[0] for x in log] != ["post", "swap", "edit", "swap"] or log[1][2:4] != ("10-18", "⏳ CONVERSION TO COME") \
+            or log[3][2:4] != ("10-19", "✓ EXTRA POINT GOOD") or log[2][2] != "10-19":
+        problems.append("still -> gif -> try still -> try gif sequence wrong")
+    if next(iter(st["td_posts"].values())).get("file") != "td.gif":
+        problems.append("post record not switched to td.gif after the swap")
+    st = scenario(False)
+    print("5b) try lands before the gif is built:", log)
+    if [x[0] for x in log] != ["post", "edit", "swap"] or log[2][2:4] != ("10-19", "✓ EXTRA POINT GOOD"):
+        problems.append("stale animation swapped in over the try edit")
+
+    log.clear()                                          # 5c) edited (overturned) while the animation was building
+    bot._GIF_VER.clear()
+    bot._gif_queue("sim", "77", "<b>old</b>", "td.png")
+    bot.render_anim = lambda h, w=None: (bot.discord_edit("sim", "77", b"OVERTURNED", "td.png"), b"GIF89a")[1]
+    drain()
+    print("5c) overturned mid-build:", log)
+    if [x[0] for x in log] != ["edit"]:
+        problems.append("animation swapped in after an overturn edit")
+    bot.discord_edit = fake_edit
     print("\nTRY FLOW OK" if not problems else "\nPROBLEMS:\n  " + "\n  ".join(problems))
     return not problems
 
