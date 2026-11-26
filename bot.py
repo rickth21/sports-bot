@@ -2483,7 +2483,7 @@ def nba_game_fantasy_html(event, summary, live, max_rows=7):
                   f"vs {H.escape(opp)}</div>")
         prs.append(f"<div class='pr2{' lead' if i == 0 else ''}'><img src='{H.escape(r['hs'])}'>"
                    f"<div><div class='nm2'>{H.escape(r['name'])}<span>{r['team']}</span></div><div class='ln'>{line}</div></div>"
-                   f"{pj_box(r['fp'], pregame_proj('nba', r, live), r['elite'])}"
+                   f"{pj_box(r['fp'], pregame_proj('nba', r, live, event), r['elite'], game_frac(event, 'nba'))}"
                    f"<div><div class='ow'>{H.escape(r['owner'])}</div>"
                    f"<span class='bd {'st' if r['starting'] else 'bn'}'>{'STARTING' if r['starting'] else 'BENCH'}</span></div>"
                    f"{mt}</div>")
@@ -2492,7 +2492,7 @@ def nba_game_fantasy_html(event, summary, live, max_rows=7):
         prs.append(f"<div class='pr2'><img src='{H.escape(fa['hs'])}'>"
                    f"<div><div class='nm2'>{H.escape(fa['name'])}<span>{fa['team']}</span></div>"
                    f"<div class='ln'>{raw['pts']} pts · {raw['reb']} reb · {raw['ast']} ast</div></div>"
-                   f"{pj_box(fa['fp'], pregame_proj('nba', fa, live))}"
+                   f"{pj_box(fa['fp'], pregame_proj('nba', fa, live, event), False, game_frac(event, 'nba'))}"
                    f"<div><div class='ow'>Nobody</div><span class='bd fa'>FREE AGENT</span></div>"
                    f"<div class='mt'>waiver pickup?</div></div>")
     n = len(prs)
@@ -2533,7 +2533,7 @@ def nba_batch_html(mode, events, summaries, live, title):
                 bits.append(f"{raw['tpm']} 3pm")
             tops.append(f"<div class='tpr{' one' if i == 0 else ''}'><span class='rk5'>{'⭐' if i == 0 else i + 1}</span>"
                         f"<span class='nm5'>{H.escape(r['name'])}<small>{H.escape(r.get('team', ''))}</small></span>"
-                        f"<span class='fp5'>{fmt_pts(r['fp'])}</span>{pj_small(r['fp'], pregame_proj('nba', r, live))}"
+                        f"<span class='fp5'>{fmt_pts(r['fp'])}</span>{pj_small(r['fp'], pregame_proj('nba', r, live, e), game_frac(e, 'nba'))}"
                         f"<span class='ow5'>{H.escape(r['owner'])}<em class='{'s' if r['starting'] else 'b'}'>"
                         f"{'STARTING' if r['starting'] else 'BENCH'}</em></span>"
                         f"<span class='ln5'>{' · '.join(bits)}</span></div>")
@@ -2632,16 +2632,16 @@ def post_nba_group(mode, events, live):
     t1 = parse_time(events[-1]["date"]).astimezone(UK).strftime("%H:%M")
     title = f"{t0}{'–' + t1 if t1 != t0 else ''} UK tip-offs · {len(events)} games"
     best = None
-    for s in sums:
+    for ev_, s in zip(events, sums):
         for r in (nba_league_rows(s) if s else []):
             if r["owner"] and (best is None or r["fp"] > best["fp"]):
-                best = r
+                best = dict(r, _event=ev_)
     embed = {"author": {"name": f"NBA · {CONFIG['nba'].get('league_name', 'League')} league", "icon_url": NBA_LOGO},
              "color": 0x17408B}
     if best:
         embed["title"] = f"Best {'so far' if mode == 'HALF-TIME' else 'of the bunch'}: {best['name']} " \
                          f"{fmt_pts(best['fp'])}" + \
-                         (lambda pj: f" (proj {pj:.1f})" if pj is not None else "")(pregame_proj('nba', best, live)) + \
+                         (lambda pj: f" (proj {pj:.1f})" if pj is not None else "")(pregame_proj('nba', best, live, best.get('_event'))) + \
                          f" · {best['owner']}"
     cl = closest_matchup_line(live)
     if cl:
@@ -3013,13 +3013,13 @@ def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=7):
         prs.append(f"<div class='pr2{' lead' if i == 0 else ''}'><img src='{H.escape(nfl_headshot(r.get('id')))}'>"
                    f"<div><div class='nm2'>{H.escape(r['name'])}<span>{r['team']} · {r.get('pos', '')}</span></div>"
                    f"<div class='ln'>{H.escape(r['line'])}</div></div>"
-                   f"{pj_box(r['pts'], pregame_proj('nfl', r, live), r['elite'])}"
+                   f"{pj_box(r['pts'], pregame_proj('nfl', r, live), r['elite'], game_frac(event, 'nfl'))}"
                    f"<div><div class='ow'>{H.escape(r['owner'])}</div>"
                    f"<span class='bd {'st' if r['starting'] else 'bn'}'>{'STARTING' if r['starting'] else 'BENCH'}</span></div>{mt}</div>")
     if fa and fa["pts"] >= 12:
         prs.append(f"<div class='pr2'><img src='{H.escape(nfl_headshot(fa.get('id')))}'>"
                    f"<div><div class='nm2'>{H.escape(fa['name'])}<span>{fa['team']} · {fa.get('pos', '')}</span></div>"
-                   f"<div class='ln'>{H.escape(fa['line'])}</div></div>{pj_box(fa['pts'], pregame_proj('nfl', fa, live))}"
+                   f"<div class='ln'>{H.escape(fa['line'])}</div></div>{pj_box(fa['pts'], pregame_proj('nfl', fa, live), False, game_frac(event, 'nfl'))}"
                    f"<div><div class='ow'>Nobody</div><span class='bd fa'>FREE AGENT</span></div><div class='mt'>waiver pickup?</div></div>")
     ca, ch = team_cols(away, home)
     strip = (f"<div class='sm'><img src='{H.escape(away['team'].get('logo', ''))}'>{away['team']['abbreviation']} "
@@ -5409,8 +5409,8 @@ RACE5_CSS = """
 """
 
 
-def nba_projections(week):
-    """Sleeper per-game projections scored with the league's settings: {pid: fpts per game}."""
+def _nba_projections_lastrow(week):
+    """Old version (kept for reference): kept whichever game came last."""
     if week in _NBA_PROJ:
         return _NBA_PROJ[week]
     out = {}
@@ -5811,11 +5811,20 @@ def nfl_defenses(summary, event=None, week=None):
 _PJIDX = {}
 
 
-def pregame_proj(sport, row, live=None):
-    """The player's pre-game Sleeper projection (league scoring), or None if Sleeper has none."""
+def pregame_proj(sport, row, live=None, event=None):
+    """The player's pre-game Sleeper projection (league scoring), or None if Sleeper has none.
+    NBA: the projection for that exact game date (Sleeper projects every game separately)."""
     try:
         week = (live or {}).get("week") or fetch_url(f"{SLEEPER}/state/{sport}").get("week")
-        proj = nfl_projections(week) if sport == "nfl" else nba_projections(week)
+        if sport == "nba" and event is not None:
+            gdate = parse_time(event["date"]).astimezone(ET).strftime("%Y-%m-%d")
+            proj = {}
+            for w in (week, int(week) - 1, int(week) + 1):
+                proj = {pid: v for pid, d, v in nba_rows(w) if d == gdate}
+                if proj:
+                    break
+        else:
+            proj = nfl_projections(week) if sport == "nfl" else nba_projections(week)
         if not proj:
             return None
         rid = str(row.get("id") or "")
@@ -5846,19 +5855,47 @@ def pregame_proj(sport, row, live=None):
         return None
 
 
-def pj_box(pts, pj, elite=False):
-    """Points box with the pre-game projection underneath; gold when the player beat it."""
+def game_frac(e, sport="nfl"):
+    """Share of the game played, or None once it's over."""
+    t = e["status"]["type"]
+    if t.get("completed") or t.get("state") == "post":
+        return None
+    if t.get("state") == "pre":
+        return 0.0
+    if sport == "nfl":
+        return game_elapsed(e)
+    per = e["status"].get("period", 1)
+    if per > 4:
+        return 0.97
+    try:
+        clk = float(e["status"].get("clock", 0))
+    except (TypeError, ValueError):
+        clk = 0.0
+    return min(0.99, ((per - 1) * 720 + (720 - clk)) / 2880)
+
+
+def pj_box(pts, pj, elite=False, frac=None):
+    """Points box with the pre-game projection underneath; gold when the player beat it.
+    While the game is on (e.g. half-time) the bottom line shows where he's heading: pace = points + projection for the rest."""
     if pj is None:
         return f"<div class='fp{' el' if elite else ''}'>{fmt_pts(pts)}<small>FPTS</small></div>"
     beat = pj > 0 and pts >= pj
+    if frac is not None and 0 < frac < 1:
+        pace = pts + pj * (1 - frac)
+        return (f"<div class='fp pjx{' beat' if beat else (' el' if elite else '')}'>{fmt_pts(pts)}"
+                f"<small>proj {pj:.1f}</small><i class='{'up' if pace >= pj else 'dn'}'>pace {pace:.1f}</i></div>")
     d = pts - pj
     return (f"<div class='fp pjx{' beat' if beat else (' el' if elite else '')}'>{fmt_pts(pts)}"
             f"<small>proj {pj:.1f}</small><i class='{'up' if d >= 0 else 'dn'}'>{'+' if d >= 0 else '−'}{abs(d):.1f}</i></div>")
 
 
-def pj_small(pts, pj):
+def pj_small(pts, pj, frac=None):
     if pj is None:
         return "<span class='pj5'></span>"
+    if frac is not None and 0 < frac < 1:
+        pace = pts + pj * (1 - frac)
+        return (f"<span class='pj5{' beat' if pj > 0 and pts >= pj else ''}'>proj {pj:.1f}"
+                f"<b class='{'up' if pace >= pj else 'dn'}'>pace {pace:.0f}</b></span>")
     d = pts - pj
     return (f"<span class='pj5{' beat' if pj > 0 and pts >= pj else ''}'>proj {pj:.1f}"
             f"<b class='{'up' if d >= 0 else 'dn'}'>{'+' if d >= 0 else '−'}{abs(d):.1f}</b></span>")
@@ -6008,6 +6045,999 @@ post_prime_final = _pinning(post_prime_final, _final_label)
 post_nfl_final = _pinning(post_nfl_final, _final_label)
 post_slot = _pinning(post_slot, lambda mode, slot, live: f"NFL full-time slate ({len(slot)} games)"
                      if mode == "FULL-TIME" else None)
+
+
+
+# ------------------------------------------------ trades: every Sleeper trade posted with a verdict
+
+_FC = {}
+_NBA_ROWS = {}
+_TR_CTX = {}
+
+SLOT_ELIG = {
+    "QB": {"QB"}, "RB": {"RB"}, "WR": {"WR"}, "TE": {"TE"}, "K": {"K"}, "DEF": {"DEF"},
+    "FLEX": {"RB", "WR", "TE"}, "SUPER_FLEX": {"QB", "RB", "WR", "TE"}, "REC_FLEX": {"WR", "TE"},
+    "WRRB_FLEX": {"WR", "RB"},
+    "PG": {"PG"}, "SG": {"SG"}, "SF": {"SF"}, "PF": {"PF"}, "C": {"C"},
+    "G": {"PG", "SG"}, "F": {"SF", "PF"}, "UTIL": {"PG", "SG", "SF", "PF", "C"},
+}
+
+
+def _ord(n):
+    return {1: "1st", 2: "2nd", 3: "3rd"}.get(int(n), f"{n}th")
+
+
+def fantasycalc_values():
+    """Dynasty trade values (players by Sleeper id, picks by name) from FantasyCalc, refreshed every 6 hours."""
+    hit = _FC.get("nfl")
+    if hit and time.time() - hit[0] < 6 * 3600:
+        return hit[1]
+    out = {"players": {}, "picks": {}}
+    try:
+        lg = league_settings("nfl") or {}
+        sf = 2 if "SUPER_FLEX" in (lg.get("roster_positions") or []) else 1
+        ppr = float((lg.get("scoring_settings") or {}).get("rec", 1) or 0)
+        rows = fetch_url(f"https://api.fantasycalc.com/values/current?isDynasty=true&numQbs={sf}"
+                         f"&numTeams={lg.get('total_rosters', 12)}&ppr={ppr:g}", tries=2)
+        for r in rows or []:
+            p = r.get("player") or {}
+            if p.get("position") == "PICK":
+                out["picks"][p.get("name", "")] = float(r.get("value") or 0)
+            elif p.get("sleeperId"):
+                out["players"][str(p["sleeperId"])] = {"value": float(r.get("value") or 0),
+                                                       "redraft": float(r.get("redraftValue") or 0),
+                                                       "rank": r.get("positionRank")}
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"FantasyCalc values unavailable: {e}")
+    _FC["nfl"] = (time.time(), out)
+    return out
+
+
+def pick_value(season, rnd, tier=None):
+    picks = fantasycalc_values()["picks"]
+    for k in ([f"{season} {_ord(rnd)} ({tier})"] if tier else []) + [f"{season} {_ord(rnd)}"]:
+        if k in picks:
+            return picks[k]
+    same = [v for k, v in picks.items() if k.split(" ")[1:2] == [_ord(rnd)] and "(" not in k]
+    if same:
+        return min(same)
+    if rnd >= 3:
+        two = pick_value(season, 2)
+        return two * 0.4 if two else 300.0
+    return {1: 2500.0, 2: 1000.0}.get(int(rnd), 300.0)
+
+
+def nba_rows(week):
+    """Sleeper's NBA projections for one week: one row per game -> [(pid, US date, league fpts)]."""
+    if week in _NBA_ROWS:
+        return _NBA_ROWS[week]
+    out = []
+    try:
+        season = fetch_url(f"{SLEEPER}/state/nba").get("season")
+        sc = league_scoring("nba")
+        for r in fetch_url(f"https://api.sleeper.app/projections/nba/{season}/{week}?season_type=regular") or []:
+            s = r.get("stats") or {}
+            if not s:
+                continue
+            pts = sum(float(v or 0) * float(sc[k]) for k, v in s.items() if k in sc and isinstance(v, (int, float)))
+            out.append((str(r.get("player_id")), r.get("date") or "", pts / (float(s.get("gp") or 1) or 1)))
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"NBA projections unavailable: {e}")
+    _NBA_ROWS[week] = out
+    return out
+
+
+def best_lineup(slots, pids, pts, sport):
+    """Best possible starting lineup points: fill the strictest slots first with the best eligible player."""
+    allp = sleeper_players(sport)
+    pos = {p: set((allp.get(p) or {}).get("fantasy_positions") or [(allp.get(p) or {}).get("position") or p]) for p in pids}
+    for p in pids:
+        if p.isalpha() and p.isupper() and sport == "nfl":
+            pos[p] = {"DEF"}
+    free = sorted((p for p in pids if pts.get(p, 0) > 0), key=lambda p: -pts.get(p, 0))
+    total = 0.0
+    for s in sorted(slots, key=lambda s: len(SLOT_ELIG.get(s, {s}))):
+        el = SLOT_ELIG.get(s, {s})
+        for p in free:
+            if pos[p] & el:
+                total += pts[p]
+                free.remove(p)
+                break
+    return total
+
+
+def _league_people(sport):
+    lid = str(CONFIG[sport].get("sleeper_league_id")).strip()
+    users = {u["user_id"]: u for u in fetch_url(f"{SLEEPER}/league/{lid}/users")}
+    rosters = fetch_url(f"{SLEEPER}/league/{lid}/rosters")
+    out = {}
+    for r in rosters:
+        u = users.get(r.get("owner_id")) or {}
+        s = r.get("settings") or {}
+        out[r["roster_id"]] = {
+            "manager": u.get("display_name", "?"), "avatar": u.get("avatar"),
+            "team_name": (u.get("metadata") or {}).get("team_name") or "",
+            "w": int(s.get("wins") or 0), "l": int(s.get("losses") or 0), "t": int(s.get("ties") or 0),
+            "pf": float(s.get("fpts") or 0) + float(s.get("fpts_decimal") or 0) / 100,
+            "players": list(r.get("players") or []),
+            "inactive": set(r.get("taxi") or []) | set(r.get("reserve") or []),
+        }
+    order = sorted(out, key=lambda k: (-(out[k]["w"] + 0.5 * out[k]["t"]), -out[k]["pf"]))
+    for i, k in enumerate(order, 1):
+        out[k]["rank"] = i
+    return out
+
+
+def trade_sides(t):
+    """{roster_id: {"players": [pid], "picks": [pick], "faab": n, "gives_players": [pid], ...}}"""
+    sides = {rid: {"players": [], "picks": [], "faab": 0, "gives": [], "gives_picks": [], "gives_faab": 0}
+             for rid in t.get("roster_ids") or []}
+    for pid, rid in (t.get("adds") or {}).items():
+        sides.setdefault(rid, {"players": [], "picks": [], "faab": 0, "gives": [], "gives_picks": [], "gives_faab": 0})
+        sides[rid]["players"].append(str(pid))
+    for pid, rid in (t.get("drops") or {}).items():
+        if rid in sides and str(pid) in (t.get("adds") or {}):
+            sides[rid]["gives"].append(str(pid))
+    for pk in t.get("draft_picks") or []:
+        if pk.get("owner_id") in sides:
+            sides[pk["owner_id"]]["picks"].append(pk)
+        if pk.get("previous_owner_id") in sides:
+            sides[pk["previous_owner_id"]]["gives_picks"].append(pk)
+    for wb in t.get("waiver_budget") or []:
+        if wb.get("receiver") in sides:
+            sides[wb["receiver"]]["faab"] += int(wb.get("amount") or 0)
+        if wb.get("sender") in sides:
+            sides[wb["sender"]]["gives_faab"] += int(wb.get("amount") or 0)
+    return sides
+
+
+def trade_eval(sport, t):
+    """Everything the trade card needs: assets, values, lineup impact, grades and Donald's take."""
+    lg = league_settings(sport) or {}
+    st_week = int(fetch_url(f"{SLEEPER}/state/{sport}").get("week") or 1)
+    week = max(int(t.get("leg") or st_week or 1), 1)
+    people = _league_people(sport)
+    allp = sleeper_players(sport)
+    slots = [s for s in (lg.get("roster_positions") or []) if s not in ("BN", "IR", "TAXI")]
+    po = int((lg.get("settings") or {}).get("playoff_week_start") or (15 if sport == "nfl" else 22))
+    last = po + 2
+    sides = trade_sides(t)
+    n_teams = len(people)
+
+    # ---- projections, week by week (NFL) or game by game (NBA), from the trade week to the end of the fantasy season
+    if sport == "nfl":
+        weeks = list(range(week, last + 1))
+        wk_pts = {w: nfl_projections(w) for w in weeks}
+
+        def ros(p):
+            return sum(wk_pts[w].get(p, 0) for w in weeks)
+        n_units = max(len(weeks), 1)
+    else:
+        weeks = list(range(week, last + 1))
+        days = {}
+        for w in weeks:
+            for pid, d, v in nba_rows(w):
+                days.setdefault(d, {})[pid] = v
+        games = {}
+        for d in days.values():
+            for pid in d:
+                games[pid] = games.get(pid, 0) + 1
+
+        def ros(p):
+            return sum(d.get(p, 0) for d in days.values())
+        n_units = max(len(weeks), 1)
+
+    def lineup_total(roster):
+        if sport == "nfl":
+            return sum(best_lineup(slots, roster, wk_pts[w], "nfl") for w in weeks) / n_units
+        return sum(best_lineup(slots, [p for p in roster if p in d], d, "nba") for d in days.values()) / n_units
+
+    fc = fantasycalc_values() if sport == "nfl" else {"players": {}}
+    standings = sorted(people, key=lambda k: people[k]["rank"])
+
+    def tier_of(orig_rid):
+        r = people.get(orig_rid, {}).get("rank", n_teams // 2)
+        third = max(n_teams // 3, 1)
+        return "Late" if r <= third else ("Early" if r > n_teams - third else "Mid")
+
+    next_draft = str(int(lg.get("season") or datetime.now().year) + 1)
+    out = []
+    for rid, s in sides.items():
+        pe = people.get(rid, {"manager": "?", "rank": 0, "w": 0, "l": 0, "t": 0, "players": [], "inactive": set()})
+        assets = []
+        for pid in s["players"]:
+            p = allp.get(pid) or {}
+            is_def = sport == "nfl" and p.get("position") == "DEF"
+            r_ = ros(pid)
+            per = r_ / (n_units if sport == "nfl" else max(games.get(pid, 0), 1))
+            val = (fc["players"].get(pid) or {}).get("value", 0.0) if sport == "nfl" else r_
+            assets.append({
+                "kind": "player", "pid": pid,
+                "name": (f"{p.get('last_name', pid)} D/ST" if is_def else p.get("full_name") or pid),
+                "pos": p.get("position") or "", "team": p.get("team") or "FA",
+                "age": p.get("age"), "injury": p.get("injury_status"),
+                "ros": r_, "per": per, "value": float(val or 0),
+                "img": (f"https://sleepercdn.com/images/team_logos/nfl/{pid.lower()}.png" if is_def else
+                        f"https://sleepercdn.com/content/{sport}/players/thumb/{pid}.jpg"),
+            })
+        for pk in s["picks"]:
+            season, rnd, orig = str(pk.get("season")), int(pk.get("round") or 1), pk.get("roster_id")
+            tier = tier_of(orig) if season == next_draft else None
+            v = pick_value(season, rnd, tier) if sport == "nfl" else 0.0
+            assets.append({"kind": "pick", "name": f"{season} {_ord(rnd)}", "tier": tier,
+                           "orig_name": people.get(orig, {}).get("manager"),
+                           "via": people.get(orig, {}).get("manager") if orig not in (rid, pk.get("previous_owner_id")) or True else None,
+                           "orig": orig, "value": v, "ros": 0.0, "per": 0.0})
+        if s["faab"]:
+            assets.append({"kind": "faab", "name": f"${s['faab']} FAAB", "value": s["faab"] * 8.0 if sport == "nfl" else 0.0,
+                           "ros": 0.0, "per": 0.0})
+        assets.sort(key=lambda a: -(a["value"] if sport == "nfl" else a["ros"]))
+        # roster after the trade = today's roster with the trade applied (works for live and past trades)
+        cur = [p for p in pe["players"] if p not in pe["inactive"]]
+        after = list(dict.fromkeys([p for p in cur if p not in s["gives"]] + s["players"]))
+        before = list(dict.fromkeys([p for p in cur if p not in s["players"]] + s["gives"]))
+        out.append({"rid": rid, "pe": pe, "assets": assets, "gives": s["gives"],
+                    "got_value": sum(a["value"] for a in assets),
+                    "got_ros": sum(a["ros"] for a in assets),
+                    "now": lineup_total(after) - lineup_total(before)})
+
+    tot_val = sum(x["got_value"] for x in out) or 1.0
+    po_spots = int((lg.get("settings") or {}).get("playoff_teams") or 6)
+    weeks_left = max(po - st_week, 0)
+    for x in out:
+        x["share"] = x["got_value"] / tot_val
+        fair = 1 / max(len(out), 1)
+        contender = x["pe"]["rank"] <= po_spots + 1 and weeks_left >= 0
+        rebuilding = x["pe"]["rank"] > n_teams - 3 and weeks_left <= 6
+        if sport == "nba":
+            w_now = 1.0
+        else:
+            w_now = 0.5 if contender else (0.15 if rebuilding else 0.35)
+        long_score = max(-1, min(1, (x["share"] - fair) / 0.25))
+        now_score = max(-1, min(1, x["now"] / (8.0 if sport == "nfl" else 30.0)))
+        if sport == "nfl":
+            x["score"] = (1 - w_now) * long_score + w_now * now_score
+        else:
+            x["score"] = 0.5 * max(-1, min(1, (x["share"] - fair) / 0.15)) + 0.5 * now_score
+        x["contender"], x["rebuilding"] = contender, rebuilding
+        g = 84 + 16 * x["score"]
+        x["grade"] = next(l for cut, l in ((97, "A+"), (93, "A"), (90, "A-"), (87, "B+"), (83, "B"), (80, "B-"),
+                                          (77, "C+"), (73, "C"), (70, "C-"), (64, "D"), (-999, "F")) if g >= cut)
+    best = max(out, key=lambda x: x["score"])
+    worst = min(out, key=lambda x: x["score"])
+    gap = best["score"] - worst["score"]
+    vw = max(out, key=lambda x: x["share"])
+    nw_ = max(out, key=lambda x: x["now"])
+    ev_split = (len(out) == 2 and vw is not nw_ and vw["share"] - min(x["share"] for x in out) >= 0.08
+                and nw_["now"] - min(x["now"] for x in out) >= (3 if sport == "nfl" else 12))
+    if gap < 0.25 and not ev_split:
+        verdict, vclass = "FAIR DEAL", "fair"
+    elif ev_split and gap < 0.6:
+        verdict, vclass = "NOW vs LATER", "split"
+    elif gap > 1.3 or max(x["share"] for x in out) > 0.7:
+        verdict, vclass = "FLEECE ALERT", "fleece"
+    else:
+        verdict, vclass = f"{best['pe']['manager'].upper()} WINS IT", "win"
+    ev = {"sport": sport, "week": week, "sides": out, "verdict": verdict, "vclass": vclass, "best": best,
+          "worst": worst, "gap": gap, "league": lg.get("name") or CONFIG[sport].get("league_name", "League"),
+          "created": t.get("created"), "dynasty": int((lg.get("settings") or {}).get("type") or 0) == 2,
+          "po_spots": po_spots, "n_teams": n_teams, "vw": vw, "nw": nw_}
+    ev["take"] = trade_take(ev)
+    return ev
+
+
+def _ordinal(n):
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def trade_take(ev):
+    """Donald's opinion, in plain words, built from the numbers."""
+    sport, sides = ev["sport"], ev["sides"]
+    out = []
+    unit = "a week" if sport == "nfl" else "a week"
+    for x in sides:
+        m, pe = x["pe"]["manager"], x["pe"]
+        star = next((a for a in x["assets"] if a["kind"] == "player"), None)
+        rec = f"{pe['w']}-{pe['l']}, {_ordinal(pe['rank'])}"
+        if x["now"] >= 1.5:
+            how = f"adds {x['now']:.1f} pts {unit} to their best lineup"
+        elif x["now"] <= -1.5:
+            how = f"loses {abs(x['now']):.1f} pts {unit} from their best lineup"
+        else:
+            how = "barely changes their lineup this season"
+        if star:
+            age = f", {star['age']}" if star.get("age") and sport == "nfl" else ""
+            got = f"lands {star['name']} ({star['pos']}{age})"
+        else:
+            np_ = len([a for a in x["assets"] if a["kind"] == "pick"])
+            got = "takes the pick" if np_ == 1 else (f"takes {np_} picks" if np_ else "takes the FAAB")
+        picks = [a for a in x["assets"] if a["kind"] == "pick"]
+        if star and picks:
+            got += f" plus {'a ' + picks[0]['name'] if len(picks) == 1 else str(len(picks)) + ' picks'}"
+        if sport == "nfl" and x["rebuilding"] and x["share"] > 0.5:
+            mood = "playing the long game"
+        elif sport == "nfl" and x["contender"] and x["now"] > 1.5:
+            mood = "going for it"
+        else:
+            mood = ""
+        out.append(f"{m} ({rec}) {got}" + (f", {mood}," if mood else "") + f" and {how}.")
+    best, worst, vw, nw = ev["best"], ev["worst"], ev["vw"], ev["nw"]
+    lo = min(sides, key=lambda x: x["share"])
+    pct = round(vw["share"] * 100)
+    what = "long-term value" if sport == "nfl" else "rest-of-season points"
+    if ev["vclass"] == "fair":
+        verb = "are" if sport == "nba" else "is"
+        if all(x["now"] >= 1.5 for x in sides):
+            out.append(f"{what.capitalize()} {verb} close ({pct}–{100 - pct}) and both lineups get better: a genuine win-win.")
+        else:
+            out.append(f"{what.capitalize()} {verb} close ({pct}–{100 - pct}) and neither side loses out, so this one works for both.")
+    elif ev["vclass"] == "split":
+        ctx = ""
+        if nw["pe"]["rank"] <= ev["po_spots"] + 1:
+            ctx = f", which is the right move for a {_ordinal(nw['pe']['rank'])}-placed team chasing the playoffs"
+        elif nw["pe"]["rank"] > ev["po_spots"] + 2:
+            ctx = f", though at {nw['pe']['w']}-{nw['pe']['l']} it may be too late to matter this year"
+        out.append(f"{vw['pe']['manager']} wins on {what} ({pct}–{100 - pct}), but {nw['pe']['manager']} gets the "
+                   f"instant boost (+{nw['now']:.1f} a week){ctx}.")
+    elif vw is best and best["now"] >= 1.5:
+        edge = f"a slight edge on {what} ({pct}–{100 - pct})" if pct < 56 else f"{pct}% of the {what}"
+        out.append(f"{best['pe']['manager']} wins on both counts: {edge} and a better lineup straight away.")
+    elif vw is best:
+        out.append(f"On {what} it's {pct}–{100 - pct} to {best['pe']['manager']}.")
+    else:
+        out.append(f"{best['pe']['manager']} gives up a little {what} ({round(best['share'] * 100)}–"
+                   f"{100 - round(best['share'] * 100)}) but the lineup boost (+{best['now']:.1f} a week) is worth more.")
+    if sport == "nba":
+        fits = max(x["now"] for x in sides) - min(x["now"] for x in sides) >= 12
+        if fits and ev["vclass"] != "fair" and abs(vw["share"] - lo["share"]) < 0.08:
+            f = max(sides, key=lambda x: x["now"])
+            out.append(f"The points are close, but the deal fits {f['pe']['manager']}'s lineup far better.")
+    flags = []
+    for x in sides:
+        for a in x["assets"]:
+            if a["kind"] != "player":
+                continue
+            word = {"Out": "is out", "IR": "is on IR", "Doubtful": "is doubtful", "PUP": "is on the PUP list",
+                    "Sus": "is suspended"}.get(a.get("injury") or "")
+            if word:
+                flags.append(f"{a['name']} {word}")
+            elif sport == "nfl" and a["pos"] == "RB" and (a.get("age") or 0) >= 28:
+                flags.append(f"{a['name']} is a {a['age']}-year-old RB, so the clock is ticking")
+    if flags:
+        out.append("Watch out: " + " and ".join(flags[:2]) + ".")
+    return " ".join(out)
+
+
+TRADE_CSS = """
+body,.card{width:1240px!important}
+.tw{display:grid;grid-template-columns:1fr 150px 1fr;gap:14px;margin-top:14px;align-items:stretch}
+.tw.n3{grid-template-columns:1fr 1fr 1fr}
+.ts{background:rgba(255,255,255,.06);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;
+ border:2px solid transparent}
+.ts.win{border-color:rgba(255,209,102,.75);box-shadow:0 0 24px rgba(255,190,70,.25)}
+.th{display:flex;align-items:center;gap:12px}
+.av{width:54px;height:54px;border-radius:50%;object-fit:cover;background:#2a3350;flex:none;display:flex;align-items:center;
+ justify-content:center;font-weight:900;font-size:22px}
+.th .mg{flex:1;min-width:0}.th .mg b{display:block;font-size:26px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th .mg small{font-size:14px;color:#aab3c5;font-weight:700}
+.gr{width:72px;height:72px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:900;
+ color:#10141f;flex:none}
+.gr.a{background:linear-gradient(160deg,#ffe08a,#f5b942)}.gr.b{background:linear-gradient(160deg,#a7f3c8,#4fd18b)}
+.gr.c{background:linear-gradient(160deg,#e3e7ef,#aab3c5)}.gr.d{background:linear-gradient(160deg,#ffb4a8,#f07a6a)}
+.rcv{font-size:12px;letter-spacing:2px;color:#9aa3b5;font-weight:800;margin-top:2px}
+.as{display:grid;grid-template-columns:52px 1fr auto;gap:12px;align-items:center;background:rgba(0,0,0,.22);border-radius:12px;padding:7px 10px}
+.as img{width:52px;height:52px;border-radius:50%;object-fit:cover;object-position:top;background:#1d2436}
+.as .an b{display:block;font-size:20px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.as .an small{font-size:13.5px;color:#aab3c5;font-weight:700}
+.as .an .inj{color:#ff9a9e}
+.as .av2{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+.as .pv{font-size:17px;font-weight:900;font-variant-numeric:tabular-nums}
+.as .pv small{font-size:11px;color:#aab3c5;font-weight:800;margin-left:3px}
+.as .vv{font-size:11.5px;font-weight:900;letter-spacing:.8px;background:rgba(255,255,255,.1);border-radius:5px;padding:1px 6px;color:#dfe5f1}
+.tk{width:52px;height:52px;border-radius:10px;background:repeating-linear-gradient(135deg,#f5b942 0 8px,#e8a52e 8px 16px);
+ display:flex;align-items:center;justify-content:center;font-size:26px}
+.imp{margin-top:auto;display:flex;justify-content:space-between;align-items:baseline;padding-top:4px}
+.imp span{font-size:12px;letter-spacing:1.6px;color:#9aa3b5;font-weight:800}
+.imp b{font-size:24px;font-weight:900;font-variant-numeric:tabular-nums}.imp b.up{color:#7ee2a8}.imp b.dn{color:#ff9a9e}.imp b.z{color:#cfd5e1}
+.mid{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px}
+.swap{width:96px;height:96px;border-radius:50%;background:rgba(255,255,255,.1);display:flex;align-items:center;justify-content:center;
+ font-size:46px;border:2px solid rgba(255,255,255,.18)}
+.vd{font-size:15px;font-weight:900;letter-spacing:1.6px;text-align:center;border-radius:8px;padding:6px 10px;line-height:1.2}
+.vd.fair{background:rgba(126,226,168,.16);color:#7ee2a8}.vd.win{background:rgba(255,209,102,.18);color:#ffd166}
+.vd.fleece{background:#ff5a5f;color:#fff;box-shadow:0 0 22px rgba(255,90,95,.55)}
+.vd.split{background:rgba(183,148,244,.2);color:#d6bcfa}
+.tbt{display:grid;grid-template-columns:1fr 420px;gap:14px;margin-top:14px}
+.take{background:rgba(255,255,255,.06);border-radius:16px;padding:14px 18px;border-left:5px solid #ffd166}
+.take .k{font-size:12px;letter-spacing:2px;color:#ffd166;font-weight:900;margin-bottom:6px}
+.take p{font-size:19px;line-height:1.45;color:#eef1f7;font-weight:600}
+.mtr{background:rgba(255,255,255,.06);border-radius:16px;padding:14px 18px;display:flex;flex-direction:column;gap:12px;justify-content:center}
+.mtr .k{font-size:12px;letter-spacing:1.8px;color:#9aa3b5;font-weight:900;display:flex;justify-content:space-between}
+.mtr .k b{color:#eef1f7}
+.sb{height:16px;border-radius:999px;overflow:hidden;display:flex;background:rgba(255,255,255,.08);margin-top:5px}
+.sb div{height:16px}
+.c0{background:linear-gradient(90deg,#f5b942,#ffd166)}.c1{background:linear-gradient(90deg,#4fd1c5,#7ee8dd)}.c2{background:linear-gradient(90deg,#b794f4,#d6bcfa)}
+.dot0{color:#ffd166}.dot1{color:#7ee8dd}.dot2{color:#d6bcfa}
+"""
+
+
+def _asset_short(a):
+    if a["kind"] == "pick":
+        return f"a {a['name']}"
+    return a["name"] if a["kind"] == "faab" else short_name(a["name"]) if len(a["name"]) > 16 else a["name"]
+
+
+def trade_headline(ev):
+    sides = ev["sides"]
+    if len(sides) != 2:
+        return " ⇄ ".join(x["pe"]["manager"] for x in sides) + f" · {len(sides)}-team trade"
+    top = max(sides, key=lambda x: max([a["value"] if ev["sport"] == "nfl" else a["ros"] for a in x["assets"]] or [0]))
+    oth = sides[1] if top is sides[0] else sides[0]
+    if not top["assets"]:
+        return " ⇄ ".join(x["pe"]["manager"] for x in sides)
+    lead = top["assets"][0]["name"] if top["assets"][0]["kind"] == "player" else _asset_short(top["assets"][0])
+    more = f" + {len(top['assets']) - 1} more" if len(top["assets"]) > 1 else ""
+    gets = [_asset_short(a) for a in oth["assets"]]
+    pay = ", ".join(gets[:-1]) + " and " + gets[-1] if len(gets) > 1 else (gets[0] if gets else "nothing")
+    return f"{top['pe']['manager']} lands {lead}{more} from {oth['pe']['manager']} for {pay}"
+
+
+def trade_card_html(ev):
+    import html as H
+    sport = ev["sport"]
+    sides = ev["sides"]
+    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
+    unit = "/wk" if sport == "nfl" else "/g"
+
+    def grade_cls(g):
+        return {"A": "a", "B": "b", "C": "c"}.get(g[0], "d")
+
+    cols = []
+    for i, x in enumerate(sides):
+        pe = x["pe"]
+        av = (f"<img class='av' src='https://sleepercdn.com/avatars/thumbs/{H.escape(pe['avatar'])}'>" if pe.get("avatar")
+              else f"<div class='av'>{H.escape(pe['manager'][:1].upper())}</div>")
+        rows = []
+        for a in x["assets"][:6]:
+            if a["kind"] == "player":
+                meta = f"{a['pos']} · {a['team']}" + (f" · {a['age']}" if a.get("age") and sport == "nfl" else "")
+                inj = f" · <span class='inj'>{H.escape(a['injury'])}</span>" if a.get("injury") else ""
+                vv = (f"<span class='vv'>VALUE {a['value']:,.0f}</span>" if sport == "nfl" else
+                      f"<span class='vv'>ROS {a['ros']:,.0f}</span>")
+                rows.append(f"<div class='as'><img src='{H.escape(a['img'])}'><div class='an'><b>{H.escape(a['name'])}</b>"
+                            f"<small>{H.escape(meta)}{inj}</small></div><div class='av2'><span class='pv'>{a['per']:.1f}"
+                            f"<small>PROJ{unit}</small></span>{vv}</div></div>")
+            elif a["kind"] == "pick":
+                orig = a.get("orig_name") or "?"
+                sub = f"{H.escape(orig)}'s pick" + (f" · projected {a['tier'].lower()} {a['name'].split(' ')[1]}"
+                                                    if a.get("tier") else "")
+                rows.append(f"<div class='as'><div class='tk'>🎟️</div><div class='an'><b>{H.escape(a['name'])}-round pick</b>"
+                            f"<small>{sub}</small></div><div class='av2'><span class='vv'>VALUE {a['value']:,.0f}</span></div></div>")
+            else:
+                rows.append(f"<div class='as'><div class='tk'>💰</div><div class='an'><b>{H.escape(a['name'])}</b>"
+                            f"<small>waiver budget</small></div><div class='av2'></div></div>")
+        if len(x["assets"]) > 6:
+            rows.append(f"<div class='rcv'>+ {len(x['assets']) - 6} more</div>")
+        nw = x["now"]
+        cls = "up" if nw >= 0.5 else ("dn" if nw <= -0.5 else "z")
+        imp_k = "BEST LINEUP, REST OF SEASON" if sport == "nfl" else "BEST LINEUP PER WEEK, REST OF SEASON"
+        cols.append(
+            f"<div class='ts{' win' if x is ev['best'] and ev['vclass'] != 'fair' else ''}'>"
+            f"<div class='th'>{av}<div class='mg'><b>{H.escape(pe['manager'])}</b>"
+            f"<small>{pe['w']}-{pe['l']}{'-' + str(pe['t']) if pe['t'] else ''} · {_ordinal(pe['rank'])} in the league</small></div>"
+            f"<div class='gr {grade_cls(x['grade'])}'>{x['grade']}</div></div>"
+            f"<div class='rcv'>RECEIVES</div>{''.join(rows)}"
+            f"<div class='imp'><span>{imp_k}</span><b class='{cls}'>{'+' if nw >= 0 else '−'}{abs(nw):.1f}"
+            f"<small style='font-size:13px;color:#aab3c5'> pts/wk</small></b></div></div>")
+
+    mid = (f"<div class='mid'><div class='swap'>⇄</div><div class='vd {ev['vclass']}'>"
+           f"{ {'fleece': '🚨 ', 'win': '🏆 ', 'split': '⏳ '}.get(ev['vclass'], '⚖️ ')}{H.escape(ev['verdict'])}</div></div>")
+    if len(sides) == 2:
+        grid = f"<div class='tw'>{cols[0]}{mid}{cols[1]}</div>"
+    else:
+        grid = f"<div class='tw n3'>{''.join(cols)}</div>"
+
+    def split(key, label, fmt):
+        tot = sum(max(x[key], 0) for x in sides) or 1
+        segs = "".join(f"<div class='c{i}' style='width:{max(x[key], 0) / tot * 100:.1f}%'></div>" for i, x in enumerate(sides))
+        lab = " · ".join(f"<b class='dot{i}'>{H.escape(x['pe']['manager'])} {fmt(x)}</b>" for i, x in enumerate(sides))
+        return f"<div><div class='k'><span>{label}</span></div><div class='sb'>{segs}</div><div class='k' style='margin-top:6px'>{lab}</div></div>"
+
+    if sport == "nfl":
+        meters = split("got_value", "LONG-TERM VALUE (DYNASTY)", lambda x: f"{x['share'] * 100:.0f}%")
+        meters += split("got_ros", "PROJECTED POINTS, REST OF SEASON", lambda x: f"{x['got_ros']:.0f}")
+    else:
+        for x in sides:
+            x["pos_now"] = max(x["now"], 0) + 0.001
+        meters = split("got_ros", "PROJECTED POINTS, REST OF SEASON", lambda x: f"{x['got_ros']:.0f}")
+        meters += split("pos_now", "LINEUP BOOST PER WEEK", lambda x: f"{x['now']:+.1f}")
+    bottom = (f"<div class='tbt'><div class='take'><div class='k'>🗣️ DONALD'S TAKE</div><p>{H.escape(ev['take'])}</p></div>"
+              f"<div class='mtr'>{meters}</div></div>")
+    names = trade_headline(ev)
+    when = ""
+    if ev.get("created"):
+        when = " · " + datetime.fromtimestamp(ev["created"] / 1000, UK).strftime("%a %-d %b %H:%M")
+    body = (f"<div class='top'><div class='lg'><img src='{logo}'>🤝 TRADE · {H.escape(ev['league'].upper())} · WEEK {ev['week']}"
+            f"{H.escape(when.upper())}</div><div class='pill'>{'DYNASTY' if ev['dynasty'] else 'REDRAFT'}</div></div>"
+            f"<div class='hl'><div class='h1'>{H.escape(names)}</div></div>{grid}{bottom}")
+    w = 1100 if max(len(x["assets"]) for x in sides) <= 2 and len(sides) == 2 else 1240
+    html_text = _card("--a:#d97757;--h:#5b7bd5" if sport == "nfl" else "--a:#ee6730;--h:#ffb347", body, None,
+                      HL_CSS + TRADE_CSS.replace("width:1240px", f"width:{w}px"), width=w)
+    if sport == "nba":
+        html_text = _nba_theme(html_text, None, "TRADE")
+    return html_text
+
+
+def post_trade(sport, t):
+    ev = trade_eval(sport, t)
+    html_text = trade_card_html(ev)
+    names = " ⇄ ".join(x["pe"]["manager"] for x in ev["sides"])
+    hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
+    if sport == "nba":
+        return _nba_post(html_text, f"🤝 **TRADE** · {names}", {}, "trade.png")
+    return _post_card(hook, html_text, f"🤝 **TRADE** · {names}", {}, "trade.png")
+
+
+def maybe_trades(st):
+    """Post every completed trade in both leagues exactly once (checked every few minutes)."""
+    for sport in ("nfl", "nba"):
+        cfg = (CONFIG.get(sport) or {}).get("trades") or {}
+        lid = str(CONFIG[sport].get("sleeper_league_id") or "").strip()
+        if not lid or not cfg.get("enabled", True):
+            continue
+        try:
+            week = int(fetch_url(f"{SLEEPER}/state/{sport}").get("week") or 0)
+            found = []
+            for w in sorted({max(week - 1, 0), week, week + 1}):
+                found += [t for t in (fetch_url(f"{SLEEPER}/league/{lid}/transactions/{w}") or [])
+                          if t.get("type") == "trade" and t.get("status") == "complete"]
+        except Exception as e:  # noqa: BLE001
+            _log_plain(f"{sport} trades unavailable: {e}")
+            continue
+        seen = st.setdefault("trades_seen", {})
+        first = sport not in seen
+        done = seen.setdefault(sport, [])
+        tries = st.setdefault("trade_tries", {})
+        for t in sorted(found, key=lambda t: t.get("created") or 0):
+            tid = str(t.get("transaction_id"))
+            if tid in done:
+                continue
+            if first:                                   # first run: remember existing trades, don't re-post them
+                done.append(tid)
+                continue
+            ok = False
+            try:
+                ok = post_trade(sport, t)
+            except Exception as e:  # noqa: BLE001
+                log(f"trade post error ({sport} {tid}): {e}")
+            if ok:
+                done.append(tid)
+                tries.pop(tid, None)
+            else:
+                tries[tid] = tries.get(tid, 0) + 1
+                if tries[tid] == 3:
+                    alert(f"⚠️ A {sport.upper()} trade ({tid}) has failed to post 3 times; I'll keep retrying.",
+                          f"trade-{tid}", 24)
+        seen[sport] = done[-400:]
+
+
+_maybe_daily_race_trades = maybe_daily_race
+
+
+def maybe_daily_race(st):
+    try:
+        maybe_trades(st)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"trades check failed: {ex}")
+    return _maybe_daily_race_trades(st)
+
+
+
+# ------------------------------------------------ owner lookup: fresh rosters + careful ESPN -> Sleeper matching
+
+_LEAGUE_T = {}
+_RPID = {}
+_PIDX = {}
+_SEEN_TEAM = {}
+_league_index_once = league_index
+_league_owner_simple = league_owner
+
+
+def league_index(sport="nfl"):
+    """Same as before, but re-read from Sleeper every 10 minutes so trades and waiver moves show up mid-run."""
+    if time.time() - _LEAGUE_T.get(sport, 0) > 600:
+        old = _LEAGUE.pop(sport, None)
+        _RPID.pop(sport, None)
+        _LEAGUE_T[sport] = time.time()
+        new = _league_index_once(sport)
+        if not new and old:                         # Sleeper hiccup: keep the last good copy
+            _LEAGUE[sport] = old
+            return old
+        return new
+    return _league_index_once(sport)
+
+
+def roster_pid_index(sport="nfl"):
+    """Sleeper player id -> who rosters him (same entries as league_index)."""
+    league_index(sport)
+    if sport in _RPID:
+        return _RPID[sport]
+    out = {}
+    lid = str(CONFIG[sport].get("sleeper_league_id") or "").strip()
+    if lid:
+        try:
+            users = {u["user_id"]: u for u in fetch_url(f"{SLEEPER}/league/{lid}/users")}
+            players = sleeper_players(sport)
+            for r in fetch_url(f"{SLEEPER}/league/{lid}/rosters"):
+                u = users.get(r.get("owner_id")) or {}
+                starters = set(r.get("starters") or [])
+                for pid in r.get("players") or []:
+                    p = players.get(pid) or {}
+                    out[pid] = {"manager": u.get("display_name", "?"),
+                                "team_name": (u.get("metadata") or {}).get("team_name") or "",
+                                "starting": pid in starters,
+                                "name": p.get("full_name") or f"{p.get('last_name', pid)} D/ST",
+                                "pos": p.get("position") or "", "team": p.get("team") or pid}
+        except Exception as e:  # noqa: BLE001
+            _log_plain(f"Sleeper rosters unavailable: {e}")
+    _RPID[sport] = out
+    return out
+
+
+def _player_index(sport):
+    if sport in _PIDX:
+        return _PIDX[sport]
+    ix = {"espn": {}, "name_team": {}, "name": {}, "last_team": {}}
+    for pid, p in sleeper_players(sport).items():
+        if p.get("espn_id"):
+            ix["espn"][str(p["espn_id"])] = pid
+        fn = p.get("full_name") or f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
+        if not fn or p.get("position") == "DEF":
+            continue
+        nk, tm = name_key(fn), p.get("team") or ""
+        ix["name_team"][(nk, tm)] = pid
+        ix["name"].setdefault(nk, []).append(pid)
+        ix["last_team"].setdefault((name_key(p.get("last_name", "")), tm), []).append(pid)
+    _PIDX[sport] = ix
+    return ix
+
+
+def league_owner(espn_id, name="", sport="nfl"):
+    """Who rosters this ESPN player: ESPN id, then name + team, then a unique name (traded players),
+    then surname + team (nicknames like Bam/Zonovan Knight)."""
+    eid = str(espn_id or "")
+    if eid.startswith("def:"):
+        return league_index(sport).get(eid)
+    rp = roster_pid_index(sport)
+    if not rp:
+        return _league_owner_simple(espn_id, name, sport)
+    ix = _player_index(sport)
+    pid = ix["espn"].get(eid) if eid else None
+    if pid:
+        return rp.get(pid)
+    team = _SEEN_TEAM.get((sport, eid)) or _SEEN_TEAM.get((sport, name_key(name)))
+    tm = (sl_team(team) if sport == "nfl" else NBA_ESPN_TO_SLEEPER.get(team, team)) if team else ""
+    nk = name_key(name)
+    if tm and (nk, tm) in ix["name_team"]:
+        return rp.get(ix["name_team"][(nk, tm)])
+    cands = ix["name"].get(nk, [])
+    if len(cands) == 1:
+        return rp.get(cands[0])
+    owned = [c for c in cands if c in rp]
+    if len(owned) == 1:
+        ptm = (sleeper_players(sport).get(owned[0]) or {}).get("team") or ""
+        if not tm or not ptm or ptm == tm:
+            return rp.get(owned[0])
+    if tm and name.split():
+        last = ix["last_team"].get((name_key(name.split()[-1]), tm), [])
+        if len(last) == 1:
+            return rp.get(last[0])
+    return None
+
+
+_nfl_fantasy_seen = nfl_fantasy
+
+
+def nfl_fantasy(summary, *a, **k):
+    rows = _nfl_fantasy_seen(summary, *a, **k)
+    for r in rows or []:
+        if r.get("team") and not str(r.get("id", "")).startswith("def:"):
+            _SEEN_TEAM[("nfl", str(r.get("id")))] = r["team"]
+            _SEEN_TEAM[("nfl", name_key(r.get("name", "")))] = r["team"]
+    return rows
+
+
+_nba_players_seen = nba_players
+
+
+def nba_players(summary, *a, **k):
+    rows = _nba_players_seen(summary, *a, **k)
+    for r in rows or []:
+        if r.get("team"):
+            _SEEN_TEAM[("nba", name_key(r.get("name", "")))] = r["team"]
+    return rows
+
+
+
+
+def nba_projections(week):
+    """Sleeper projections scored with the league's settings: {pid: average fpts per game this week}."""
+    if week in _NBA_PROJ:
+        return _NBA_PROJ[week]
+    tot, n = {}, {}
+    for pid, d, v in nba_rows(week):
+        tot[pid] = tot.get(pid, 0.0) + v
+        n[pid] = n.get(pid, 0) + 1
+    _NBA_PROJ[week] = {pid: tot[pid] / n[pid] for pid in tot}
+    return _NBA_PROJ[week]
+
+
+# ------------------------------------------------ weekly recap, landscape: (1) results + awards + lineup report, (2) title race
+
+def lineup_report(sport, week, live, settings):
+    """NFL: each manager's score vs their best possible lineup (hindsight), and whether it cost them the win."""
+    if sport != "nfl":
+        return []
+    slots = [s for s in (settings.get("roster_positions") or []) if s not in ("BN", "IR", "TAXI")]
+    lid = str(CONFIG[sport].get("sleeper_league_id")).strip()
+    inactive = {}
+    try:
+        for r in fetch_url(f"{SLEEPER}/league/{lid}/rosters"):
+            inactive[r["roster_id"]] = set(r.get("taxi") or []) | set(r.get("reserve") or [])
+    except Exception:  # noqa: BLE001
+        pass
+    opp = {}
+    for a, b in live["pairs"]:
+        opp[a], opp[b] = b, a
+    rows = []
+    for rid, x in live["rosters"].items():
+        if not x.get("matchup_id"):
+            continue
+        elig = list(dict.fromkeys(x["starters"] + [p for p in x["players"] if p not in inactive.get(rid, set())]))
+        pts = {p: float(x["pp"].get(p) or 0) for p in elig}
+        best = max(best_lineup(slots, elig, pts, "nfl"), x["points"])
+        o = live["rosters"].get(opp.get(rid), {})
+        lost = o and x["points"] < o.get("points", 0)
+        bench = [p for p in elig if p not in x["starters"]]
+        top_b = max(bench, key=lambda p: pts.get(p, 0), default=None)
+        rows.append({"rid": rid, "manager": x["manager"], "pts": x["points"], "best": best,
+                     "eff": 100 * x["points"] / best if best else 100.0, "left": best - x["points"],
+                     "cost": bool(lost and best > o.get("points", 0)), "opp": o.get("manager", ""),
+                     "top_bench": top_b, "top_bench_pts": pts.get(top_b, 0) if top_b else 0})
+    rows.sort(key=lambda r: (-r["eff"], -r["pts"]))
+    return rows
+
+
+RECAP2_CSS = """
+.rw{display:grid;grid-template-columns:520px 1fr;gap:16px;margin-top:12px}
+.sec2{font-size:13px;letter-spacing:2px;color:#9aa3b5;font-weight:800;margin-bottom:8px}
+.rs{display:flex;flex-direction:column;gap:7px}
+.r2{display:grid;grid-template-columns:1fr 74px 16px 74px 1fr;align-items:center;gap:8px;background:rgba(255,255,255,.06);
+ border-radius:12px;padding:9px 14px;font-variant-numeric:tabular-nums}
+.r2 .n{font-size:19px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.r2 .n.r{text-align:right}
+.r2 .lo{color:#8b95a8!important;font-weight:700}.r2 .p{font-size:24px;font-weight:900;text-align:center}
+.r2 i{color:#5d6679;font-style:normal;text-align:center}
+.r2 .n small{display:block;font-size:12px;color:#7ee2a8;font-weight:800;letter-spacing:.5px}
+.aw2{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+.t2{background:rgba(255,255,255,.06);border-radius:12px;padding:11px 13px;min-height:104px}
+.t2 .k{font-size:12px;letter-spacing:1.4px;color:#9aa3b5;font-weight:800}
+.t2 .v{font-size:20px;font-weight:900;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.t2 .x{font-size:14px;color:#cfd5e1;margin-top:3px;line-height:1.3}
+.lr{margin-top:14px}
+.lrg{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px}
+.l2{display:grid;grid-template-columns:28px 1fr 64px 64px 150px 64px;align-items:center;gap:10px;background:rgba(255,255,255,.05);
+ border-radius:10px;padding:6px 12px;font-size:16px;font-variant-numeric:tabular-nums}
+.l2.h{background:none;font-size:11px;letter-spacing:1.3px;color:#9aa3b5;font-weight:800;padding:0 12px}
+.l2 .m{font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.l2 .m em{font-style:normal;margin-left:6px}
+.l2 .e{display:grid;grid-template-columns:46px 1fr;align-items:center;gap:6px;font-weight:900}
+.l2 .bar{height:8px;border-radius:4px;background:rgba(255,255,255,.08);overflow:hidden}.l2 .bar div{height:8px;border-radius:4px}
+.l2 .lf{color:#ff9a9e;font-weight:800;text-align:right}.l2 .lf.z{color:#7ee2a8}
+.tr2{display:grid;grid-template-columns:34px 1fr 70px 70px 200px 200px;align-items:center;gap:12px;height:44px;
+ font-size:18px;font-variant-numeric:tabular-nums;border-radius:9px;padding:0 12px}
+.tr2:nth-child(odd){background:rgba(255,255,255,.04)}
+.tr2.h{height:28px;font-size:12px;letter-spacing:1.4px;color:#9aa3b5;font-weight:800;background:none}
+.tr2.cut{box-shadow:inset 0 -2px 0 rgba(255,209,102,.6)}
+.tr2 .rk{color:#9aa3b5;font-weight:900}.tr2 .m{font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tr2 .o{display:grid;grid-template-columns:52px 1fr;align-items:center;gap:8px;font-weight:900}
+.tr2 .bar{height:9px;border-radius:5px;background:rgba(255,255,255,.08);overflow:hidden}.tr2 .bar div{height:9px;border-radius:5px}
+.tw2{display:grid;grid-template-columns:1fr 330px;gap:16px;margin-top:12px}
+.sd{display:flex;flex-direction:column;gap:10px}
+.sd .col{background:rgba(255,255,255,.06);border-radius:12px;padding:12px 14px;font-size:16px;line-height:1.45;color:#dfe5f1}
+.sd .col b{color:#fff}.sd .ch{font-size:12px;letter-spacing:1.6px;color:#9aa3b5;font-weight:800;margin-bottom:6px}
+.fav{font-size:30px;font-weight:900;color:#ffd166;line-height:1.1}
+"""
+
+
+def recap_wide_html(sport, week, live, settings):
+    """Two landscape recap cards (results + awards, then the title race) and the headline lines."""
+    import html as H
+    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
+    league = CONFIG[sport].get("league_name", "League")
+    players = sleeper_players(sport)
+    names = {rid: x["manager"] for rid, x in live["rosters"].items()}
+    games, starters, bench = [], [], []
+    for ra, rb in live["pairs"]:
+        A, B = live["rosters"][ra], live["rosters"][rb]
+        games.append((A, B) if A["points"] >= B["points"] else (B, A))
+    for rid, x in live["rosters"].items():
+        for pid in x["players"]:
+            p = players.get(pid) or {}
+            nm = p.get("full_name") or (f"{p.get('last_name', pid)} D/ST" if p.get("position") == "DEF" else pid)
+            row = {"name": nm, "pts": float(x["pp"].get(pid) or 0), "manager": x["manager"]}
+            (starters if pid in x["starters"] else bench).append(row)
+    scores, rec = season_history(sport, week)
+    odds, po_start, n_po = simulate_odds(sport, settings, scores, rec, week)
+    table = sorted(rec.keys(), key=lambda r: (-(rec[r]["w"] + 0.5 * rec[r]["t"]), -rec[r]["pf"]))
+    allr = [x for x in live["rosters"].values() if x.get("matchup_id")]
+    allpts = sorted((x["points"] for x in allr), reverse=True)
+
+    def allplay(p):                                      # how many of the other teams this score would have beaten
+        return sum(1 for q in allpts if q < p), len(allpts) - 1
+
+    top = max(allr, key=lambda x: x["points"])
+    blow = max(games, key=lambda g: g[0]["points"] - g[1]["points"])
+    close = min(games, key=lambda g: g[0]["points"] - g[1]["points"])
+    lucky = min((w for w, _ in games), key=lambda x: x["points"])
+    unlucky = max((l for _, l in games), key=lambda x: x["points"])
+    pow_ = max(starters, key=lambda p: p["pts"], default=None)
+    bb = max(bench, key=lambda p: p["pts"], default=None)
+    lw, ln_ = allplay(lucky["points"])
+    uw, un = allplay(unlucky["points"])
+    tiles = [
+        ("🏆 TOP SCORE", top["manager"], f"{top['points']:.1f} pts"),
+        ("⭐ PLAYER OF THE WEEK", pow_["name"] if pow_ else "—", f"{pow_['pts']:.1f} pts for {pow_['manager']}" if pow_ else ""),
+        ("💥 BIGGEST WIN", blow[0]["manager"], f"by {blow[0]['points'] - blow[1]['points']:.1f} over {blow[1]['manager']}"),
+        ("😬 CLOSEST FINISH", close[0]["manager"], f"by {close[0]['points'] - close[1]['points']:.1f} over {close[1]['manager']}"),
+        ("🍀 LUCKIEST WIN", lucky["manager"], f"won with {lucky['points']:.1f}, which beats only {lw} of {ln_} teams"),
+        ("🥶 UNLUCKIEST LOSS", unlucky["manager"], f"lost with {unlucky['points']:.1f}, which beats {uw} of {un} teams"),
+    ]
+    lr = lineup_report(sport, week, live, settings)
+    if lr:
+        mgr = lr[0]
+        tiles.append(("🧠 MANAGER OF THE WEEK", mgr["manager"], f"{mgr['eff']:.0f}% of their best possible lineup"))
+        costly = [r for r in lr if r["cost"]]
+        worst = max(costly or lr, key=lambda r: r["left"])
+        bp = players.get(worst["top_bench"]) or {}
+        bname = bp.get("full_name") or (f"{bp.get('last_name', '')} D/ST" if bp else "")
+        tiles.append(("💔 COSTLY CALL" if worst["cost"] else "🪑 BENCH BLUNDER", worst["manager"],
+                      f"left {worst['left']:.1f} on the bench" + (f" ({H.escape(bname)} {worst['top_bench_pts']:.1f})" if bname else "")
+                      + (f" and lost to {worst['opp']}" if worst["cost"] else "")))
+    else:
+        low = min(allr, key=lambda x: x["points"])
+        tiles.append(("🪑 BENCH BLUNDER", bb["name"] if bb else "—", f"{bb['pts']:.1f} pts on {bb['manager']}'s bench" if bb else ""))
+        tiles.append(("📉 LOW SCORE", low["manager"], f"{low['points']:.1f} pts"))
+
+    res = "".join(
+        f"<div class='r2'><span class='n'>{H.escape(w['manager'])}</span><span class='p'>{w['points']:.1f}</span><i>·</i>"
+        f"<span class='p lo'>{l['points']:.1f}</span><span class='n r lo'>{H.escape(l['manager'])}</span></div>"
+        for w, l in games)
+    aw = "".join(f"<div class='t2'><div class='k'>{k}</div><div class='v'>{H.escape(v)}</div><div class='x'>{x}</div></div>"
+                 for k, v, x in tiles)
+    lr_html = ""
+    if lr:
+        hdr = ("<div class='l2 h'><span>#</span><span>MANAGER</span><span>SCORED</span><span>BEST</span>"
+               "<span>LINEUP IQ</span><span style='text-align:right'>LEFT</span></div>")
+        cells = []
+        for i, r in enumerate(lr, 1):
+            col = "#7ee2a8" if r["eff"] >= 95 else ("#ffd166" if r["eff"] >= 88 else "#ff9a9e")
+            cells.append(f"<div class='l2'><span class='rk5'>{i}</span><span class='m'>{H.escape(r['manager'])}"
+                         f"{'<em>💔</em>' if r['cost'] else ''}</span><span>{r['pts']:.1f}</span><span>{r['best']:.1f}</span>"
+                         f"<span class='e'><span>{r['eff']:.0f}%</span><div class='bar'><div style='width:{r['eff']:.0f}%;"
+                         f"background:{col}'></div></div></span><span class='lf{' z' if r['left'] < 0.05 else ''}'>"
+                         f"{'—' if r['left'] < 0.05 else '−' + format(r['left'], '.1f')}</span></div>")
+        half = (len(cells) + 1) // 2
+        lr_html = (f"<div class='lr'><div class='sec2'>LINEUP REPORT · SCORE VS BEST POSSIBLE LINEUP · 💔 = THE BENCH COST THEM THE WIN</div>"
+                   f"<div class='lrg'><div class='rs' style='gap:5px'>{hdr}{''.join(cells[:half])}</div>"
+                   f"<div class='rs' style='gap:5px'>{hdr}{''.join(cells[half:])}</div></div></div>")
+    head = (f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape(league.upper())} · WEEK {week}</div>"
+            f"<div class='pill'>WEEKLY RECAP · 1 OF 2</div></div>"
+            f"<div class='hl'><div class='h1'>Week {week}: {H.escape(top['manager'])} top-scores with {top['points']:.1f}</div>"
+            f"<div class='h2'>😬 Closest: <b>{H.escape(close[0]['manager'])}</b> beat {H.escape(close[1]['manager'])} by "
+            f"{close[0]['points'] - close[1]['points']:.1f}</div></div>")
+    body_a = (f"{head}<div class='rw'><div><div class='sec2'>RESULTS</div><div class='rs'>{res}</div></div>"
+              f"<div><div class='sec2'>AWARDS</div><div class='aw2'>{aw}</div></div></div>{lr_html}")
+
+    # ---- card 2: title race
+    def bar(pct, col):
+        return f"<div class='bar'><div style='width:{max(pct, 1.5):.1f}%;background:{col}'></div></div>"
+    trs = ["<div class='tr2 h'><span>#</span><span>MANAGER</span><span>W-L</span><span>PF</span>"
+           "<span>PLAYOFFS</span><span>TITLE</span></div>"]
+    for i, r in enumerate(table, 1):
+        x = rec[r]
+        wl = f"{x['w']}-{x['l']}" + (f"-{x['t']}" if x["t"] else "")
+        po, ti = odds[r]
+        trs.append(f"<div class='tr2{' cut' if i == n_po else ''}'><span class='rk'>{i}</span>"
+                   f"<span class='m'>{H.escape(names.get(r, '?'))}</span><span>{wl}</span><span>{x['pf']:.0f}</span>"
+                   f"<span class='o'><span>{po:.0f}%</span>{bar(po, 'linear-gradient(90deg,#d97757,#f2a77f)')}</span>"
+                   f"<span class='o'><span>{ti:.0f}%</span>{bar(ti * 2.5, 'linear-gradient(90deg,#e8b13c,#ffe08a)')}</span></div>")
+    fav = max(odds, key=lambda r: odds[r][1])
+    nxt = ""
+    try:
+        lid = str(CONFIG[sport].get("sleeper_league_id")).strip()
+        ms = fetch_url(f"{SLEEPER}/league/{lid}/matchups/{week + 1}", tries=2) if week + 1 < po_start else []
+        by = {}
+        for m in ms:
+            if m.get("matchup_id"):
+                by.setdefault(m["matchup_id"], []).append(m["roster_id"])
+        pairs = [p for p in by.values() if len(p) == 2]
+        if pairs:
+            a, b = max(pairs, key=lambda p: min(odds[p[0]][0], odds[p[1]][0]) + 0.3 * (odds[p[0]][0] + odds[p[1]][0]))
+            wl = lambda r: f"{rec[r]['w']}-{rec[r]['l']}"  # noqa: E731
+            nxt = (f"<b>{H.escape(names[a])}</b> ({wl(a)}) vs <b>{H.escape(names[b])}</b> ({wl(b)})<br>"
+                   f"playoff odds {odds[a][0]:.0f}% and {odds[b][0]:.0f}%")
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"recap next week unavailable: {e}")
+    left = max(0, po_start - week - 1)
+    ctx = (f"Playoffs start week <b>{po_start}</b>. Top <b>{n_po}</b> of {len(table)} qualify, "
+           f"<b>{left}</b> regular-season week{'s' if left != 1 else ''} left.") if left else \
+          f"Playoffs start week <b>{po_start}</b>. Top <b>{n_po}</b> qualify."
+    side = (f"<div class='sd'><div class='col'><div class='ch'>TITLE FAVOURITE</div><div class='fav'>{H.escape(names[fav])}</div>"
+            f"{odds[fav][1]:.0f}% to win it all</div>"
+            + (f"<div class='col'><div class='ch'>GAME TO WATCH NEXT WEEK</div>{nxt}</div>" if nxt else "")
+            + f"<div class='col'><div class='ch'>THE RACE</div>{ctx} The gold line is the playoff cut.</div></div>")
+    body_b = (f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape(league.upper())} · WEEK {week}</div>"
+              f"<div class='pill'>TITLE RACE · 2 OF 2</div></div>"
+              f"<div class='tw2'><div><div class='sec2'>STANDINGS · SIMULATED 4,000 TIMES</div>{''.join(trs)}</div>{side}</div>")
+    css_vars = "--a:#1faa59;--h:#5b7bd5"
+    a = _card(css_vars, body_a, None, HL_CSS + RECAP2_CSS + "body,.card{width:1400px!important}", width=1400)
+    b = _card(css_vars, body_b, None, RECAP2_CSS + "body,.card{width:1300px!important}", width=1300)
+    if sport == "nba":
+        a, b = _nba_theme(a, None, "WEEKLY RECAP"), _nba_theme(b, None, "TITLE RACE")
+    return a, b
+
+
+def post_weekly_recap_wide(sport, week, live, settings):
+    a, b = recap_wide_html(sport, week, live, settings)
+    league = CONFIG[sport].get("league_name", "League")
+    hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
+    emoji = "🏈" if sport == "nfl" else "🏀"
+    ok = _post_card(hook, a, f"📊 **WEEK {week} RECAP** · {emoji} {league}", {}, "recap.png")
+    if ok:
+        if not _post_card(hook, b, f"🏁 **TITLE RACE** · {emoji} {league}", {}, "race.png"):
+            log(f"{sport} recap error: the title-race card did not post")
+    return ok
+
+
+_post_weekly_recap_named = post_weekly_recap_wide
+
+
+# ------------------------------------------------ landscape game cards (readable in Discord without opening)
+
+WIDE_GAME_CSS = """
+body,.card{width:1640px!important}
+.in{display:grid;grid-template-columns:1fr 1fr;column-gap:16px;align-items:stretch}
+.in>.top,.in>.nbar,.in>.hd,.in>.pl2,.in>.lg2,.in>.more{grid-column:1/-1}
+.in>.hl{grid-column:1;margin-top:12px!important;margin-bottom:0!important}
+.in>.sb5,.in>.sbx{grid-column:2;margin-top:12px!important}
+.in>.top+.sb5,.in>.top+.sbx{grid-column:1/-1}
+.pl2{display:grid!important;grid-auto-flow:column;column-gap:12px}
+.pr2{grid-template-columns:44px 1fr 90px 135px 138px!important}
+.pr2 .mt{font-size:12px!important}.pr2 .mt b{font-size:14px!important}
+.pr2>div{min-width:0}
+.pr2 .nm2,.pr2 .ln{white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important}
+.pr2 .ln{font-size:14px!important}.pr2 .nm2{font-size:18px!important}
+"""
+
+
+def _widen(html_text):
+    n = html_text.count("class='pr2")
+    rows = (n + 1) // 2
+    extra = WIDE_GAME_CSS + (f".pl2{{grid-template-rows:repeat({rows},auto)}}" if n > 3 else
+                             ".pl2{display:flex!important}")
+    return html_text.replace("</style>", extra + "</style>", 1)
+
+
+_nfl_game_fantasy_html_tall = nfl_game_fantasy_html
+
+
+def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=30):
+    return _widen(_nfl_game_fantasy_html_tall(event, summary, live, ol, base, max_rows))
+
+
+_nba_game_fantasy_html_tall = nba_game_fantasy_html
+
+
+def nba_game_fantasy_html(event, summary, live, max_rows=7):
+    return _widen(_nba_game_fantasy_html_tall(event, summary, live, max_rows))
 
 
 # ===================================================================== main
