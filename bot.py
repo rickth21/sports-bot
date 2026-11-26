@@ -2264,8 +2264,8 @@ def recap_card_html(sport, week, live, settings):
         po, ti = odds[r]
         trs.append(f"<div class='tr{' cut' if i == n_po else ''}'><span class='rk'>{i}</span>"
                    f"<span class='m'>{H.escape(names.get(r, '?'))}</span><span>{wl}</span><span>{x['pf']:.0f}</span>"
-                   f"<span class='o'><span>{po:.0f}%</span>{bar(po, '#5b7bd5')}</span>"
-                   f"<span class='o'><span>{ti:.0f}%</span>{bar(ti * 2.5, '#f5c542')}</span></div>")
+                   f"<span class='o'><span>{po:.0f}%</span>{bar(po, 'linear-gradient(90deg,#d97757,#f2a77f)')}</span>"
+                   f"<span class='o'><span>{ti:.0f}%</span>{bar(ti * 2.5, 'linear-gradient(90deg,#e8b13c,#ffe08a)')}</span></div>")
 
     # ---- next week + context
     nxt = ""
@@ -2974,18 +2974,19 @@ def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=7):
 
 # ------------------------------------------------ v2: auto-height cards + Sunday live updates
 
-def _card(css_vars, body, height=None, extra_css=""):
+def _card(css_vars, body, height=None, extra_css="", width=880):
     """Card page that measures itself (no cropping). height is ignored, kept for old callers."""
+    wide = f"body,.card{{width:{width}px!important}}" if width != 880 else ""
     return (f"<!doctype html><html><head><meta charset='utf-8'>"
             f"<link href='https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800;900&display=swap' rel='stylesheet'>"
-            f"<style>{NFL_CSS}{SLOT_CSS}{FAN_CSS}{RECAP_CSS}{OUT_CSS}{V2_CSS}{extra_css}"
-            f"body,.card{{height:auto!important}}.card{{padding-bottom:6px}}</style></head><body>"
+            f"<style>{NFL_CSS}{SLOT_CSS}{FAN_CSS}{RECAP_CSS}{OUT_CSS}{V2_CSS}{globals().get('V4_CSS', '')}{extra_css}"
+            f"body,.card{{height:auto!important}}.card{{padding-bottom:6px}}{wide}</style></head><body>"
             f"<div class='card' style='{css_vars}'><div class='bg'></div><div class='in'>{body}</div></div>"
             f"<script>addEventListener('load',()=>document.body.setAttribute('data-h',"
             f"Math.ceil(document.querySelector('.card').getBoundingClientRect().height)))</script></body></html>")
 
 
-def render_card(html_text, width=880):
+def render_card(html_text, width=None):
     """Render a self-measuring card: measure its height first, then screenshot exactly that."""
     import subprocess
     import tempfile
@@ -2993,6 +2994,9 @@ def render_card(html_text, width=880):
     if not chrome:
         log("No Chrome found: posting without the image card")
         return None
+    if width is None:
+        m = re.search(r"body,\.card\{width:(\d+)px", html_text)
+        width = int(m.group(1)) if m else 880
     with tempfile.TemporaryDirectory() as d:
         src, out = Path(d) / "card.html", Path(d) / "card.png"
         src.write_text(html_text)
@@ -3022,7 +3026,8 @@ V2_CSS = """
 .mrw.hot2{background:rgba(245,197,66,.10)!important;box-shadow:inset -3px 0 0 #f5c542}
 .mrw.hot.hot2{box-shadow:inset 3px 0 0 #f5c542,inset -3px 0 0 #f5c542}
 .mrw .st2{letter-spacing:0!important}
-.mrw{grid-template-columns:1fr 230px 1fr!important;align-items:center!important;padding:12px 16px!important;border-radius:12px!important}
+.rows.mu2{display:grid!important;grid-template-columns:1fr 1fr;gap:10px!important}
+.mrw{grid-template-columns:1fr 300px 1fr!important;align-items:center!important;padding:12px 16px!important;border-radius:12px!important}
 .mrw .mn{font-size:19px!important;letter-spacing:0!important}
 .pps{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}.mg.r .pps{justify-content:flex-end}
 .pp{font-size:11.5px;font-weight:700;letter-spacing:.6px;color:#aab3c5;background:rgba(255,255,255,.07);border-radius:6px;padding:3px 7px}
@@ -3033,7 +3038,17 @@ V2_CSS = """
 .wcb{display:grid;grid-template-columns:42px 1fr 42px;align-items:center;gap:7px;margin-top:8px}
 .wc2{display:flex;height:12px;border-radius:6px;overflow:hidden;background:rgba(255,255,255,.08)}
 .wc2 div{height:12px}
-.wa{color:#8fa4ff;font-weight:900;font-size:15px;text-align:right}.wb{color:#ff8a8d;font-weight:900;font-size:15px;text-align:left}
+.wa{color:#9cb3ff;font-weight:900;font-size:16px;text-align:right}.wb{color:#ffc56b;font-weight:900;font-size:16px;text-align:left}
+.wcb.big3{grid-template-columns:58px 1fr 58px}.wcb.big3 .wa,.wcb.big3 .wb{font-size:24px}.wcb.big3 .wc2{height:14px}
+.po3{font-size:22px;font-weight:900;margin-top:8px;letter-spacing:0}.po3 .lbl{font-size:11px;letter-spacing:1.4px;color:#9aa3b5;font-weight:700}
+.po3.out{font-size:13px;font-weight:600;color:#6f788b;font-style:italic}
+.wl{font-size:13.5px;color:#aab3c5;margin-top:2px;font-weight:600}.wl .g{color:#7ee2a8;font-weight:800}.wl .b{color:#ff9a9e;font-weight:800}
+.pps{display:block!important}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;margin-top:6px}
+.cm{display:grid;grid-template-columns:1fr 46px 90px 46px 1fr;gap:8px;align-items:center;font-size:14px;color:#cfd5e1;
+ background:rgba(255,255,255,.045);border-radius:8px;padding:6px 10px}
+.cm .n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700}.cm .n.r{text-align:right}
+.cm .a{color:#9cb3ff;font-weight:800;text-align:right}.cm .b2{color:#ffc56b;font-weight:800}
 .mid .wcl{font-size:10.5px!important;letter-spacing:1.4px;color:#8b95a8;margin-top:5px;font-weight:700}
 .mrw .st2{font-size:12.5px!important;white-space:normal!important;margin-top:4px}
 .mrw .sc3{font-size:22px!important}.wcl{font-size:11.5px!important}
@@ -3085,10 +3100,13 @@ def matchup_rows_html(live, ol, base=None, delta=None, players_label="playing", 
                 d = o["po"] - base[rid]["po"]
                 if abs(d) >= 1:
                     mv = f"<span class='dl {'u' if d > 0 else 'dn'}'>{'▲' if d > 0 else '▼'}{abs(d):.0f}</span>"
-            pills = f"<span class='pp'>PLAYOFFS <b>{o['po']:.0f}%</b>{mv}</span>"
-            if o["po_w"] is not None and o["po_l"] is not None and abs(o["po_w"] - o["po_l"]) >= 3:
-                pills += (f"<span class='pp w'>WIN → <b>{_pct(o['po_w'])}</b></span>"
-                          f"<span class='pp l'>LOSE → <b>{_pct(o['po_l'])}</b></span>")
+            if o["po"] < 0.5 and (o["po_w"] or 0) < 0.5:
+                pills = "<div class='po3 out'>out of the playoff race</div>"
+            else:
+                pills = f"<div class='po3'><span class='lbl'>PLAYOFFS</span> <b>{o['po']:.0f}%</b>{mv}</div>"
+                if o["po_w"] is not None and o["po_l"] is not None and abs(o["po_w"] - o["po_l"]) >= 3:
+                    pills += (f"<div class='wl'>win → <span class='g'>{_pct(o['po_w'])}</span> · "
+                              f"lose → <span class='b'>{_pct(o['po_l'])}</span></div>")
             return (f"<div class='mg{' r' if right else ''}'><div class='mn'>{H.escape(x['manager'])}</div>"
                     f"{pl}<div class='pps'>{pills}</div></div>")
         lead_a = oa["cur"] >= ob["cur"]
@@ -3098,12 +3116,11 @@ def matchup_rows_html(live, ol, base=None, delta=None, players_label="playing", 
             dw = oa["win"] - base[a]["win"]
             if abs(dw) >= 3:
                 wca += f" · {'▲' if dw > 0 else '▼'}{abs(dw):.0f} / {'▼' if dw > 0 else '▲'}{abs(dw):.0f}"
-        mid = (f"<div class='mid'><div class='sc3'><span class='{'' if lead_a else 'lo'}'>{oa['cur']:.1f}</span>"
-               f"<span class='dash'>–</span><span class='{'lo' if lead_a else ''}'>{ob['cur']:.1f}</span></div>"
-               f"<div class='wcb'><span class='wa'>{oa['win']:.0f}%</span><div class='wc2'>"
-               f"<div style='width:{oa['win']:.1f}%;background:#6f8cff'></div>"
-               f"<div style='width:{100 - oa['win']:.1f}%;background:#ff6b6e'></div></div>"
-               f"<span class='wb'>{ob['win']:.0f}%</span></div>"
+        any_pts = oa["cur"] > 0 or ob["cur"] > 0
+        score = (f"<div class='sc3'><span class='{'' if lead_a else 'lo'}'>{oa['cur']:.1f}</span>"
+                 f"<span class='dash'>–</span><span class='{'lo' if lead_a else ''}'>{ob['cur']:.1f}</span></div>") if any_pts else ""
+        mid = (f"<div class='mid'>{score}"
+               f"{meter_html(oa['win'], '' if any_pts else 'big')}"
                f"<div class='wcl'>{wca}</div>{da}</div>")
         left_html, right_html = blk(A, oa, a, False), blk(B, ob, b, True)
         cls = ("hot" if hot.get(a) else "") + (" hot2" if hot.get(b) else "")
@@ -3132,6 +3149,36 @@ def games_strip_html(events, state_at=None, pre=False):
     return f"<div class='gstrip'>{''.join(out)}</div>"
 
 
+def _preview_rows(live, ol, show_teams, league):
+    """Matchups with players in this window as full rows; the rest compact."""
+    import html as H
+    players = sleeper_players("nfl")
+
+    def n_in(r):
+        return sum(1 for p in ol[r]["left"] if show_teams is None or (players.get(p) or {}).get("team") in show_teams)
+    pairs = sorted(live["pairs"], key=lambda p: -(n_in(p[0]) + n_in(p[1])))
+    hot = [p for p in pairs if n_in(p[0]) + n_in(p[1]) > 0]
+    cold = [p for p in pairs if p not in hot]
+    sub = dict(live, pairs=hot)
+    html_rows = (f"<div class='sec'>{H.escape(league.upper())} · MATCHUPS WITH PLAYERS IN THIS GAME</div>"
+                 f"<div class='rows' style='gap:8px;margin-top:8px'>"
+                 f"{matchup_rows_html(sub, ol, max_names=None, show_teams=show_teams, players_label='playing' if show_teams is None else 'in this game')}</div>")
+    if cold:
+        html_rows += f"<div class='sec'>OTHER MATCHUPS · WIN CHANCE</div>{compact_matchups_html(live, ol, cold)}"
+    return html_rows
+
+
+def compact_matchups_html(live, ol, pairs):
+    import html as H
+    out = []
+    for a, b in pairs:
+        A, B = live["rosters"][a], live["rosters"][b]
+        w = ol[a]["win"]
+        out.append(f"<div class='cm' style='grid-template-columns:1fr 200px 1fr'><span class='n'>{H.escape(A['manager'])}</span>"
+                   f"{meter_html(w, 'sm')}<span class='n r'>{H.escape(B['manager'])}</span></div>")
+    return f"<div class='cmp'>{''.join(out)}</div>"
+
+
 def nfl_preview_fantasy_html(events, live, ol, title, show_teams=None):
     """v2 preview (30 min before kick-off) — same layout for every window."""
     import html as H
@@ -3142,13 +3189,12 @@ def nfl_preview_fantasy_html(events, live, ol, title, show_teams=None):
     body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL · WEEK {live['week']} · {H.escape(title.upper())}</div>"
             f"<div class='pill'>{'KICK-OFF IMMINENT' if now_utc() > parse_time(events[0]['date']) else 'KICK-OFF ' + k.strftime('%H:%M') + ' UK'}</div></div>"
             f"{games_strip_html(events, pre=True)}"
-            f"<div class='sec'>{H.escape(league.upper())} MATCHUPS · POINTS SO FAR · STARTERS STILL TO PLAY · WHAT'S AT STAKE</div>"
-            f"<div class='rows' style='gap:6px;margin-top:6px'>{matchup_rows_html(live, ol, max_names=None, show_teams=show_teams, players_label='playing' if show_teams is None else 'in this game')}</div>"
+            + _preview_rows(live, ol, show_teams, league) +
             f"<div class='sw'><div class='col'><div class='ch'>BIGGEST STAKES</div><b>{H.escape(live['rosters'][stakes]['manager'])}</b>"
             f" — playoffs {_pct(ol[stakes]['po_w'])} with a win, {_pct(ol[stakes]['po_l'])} with a loss</div>"
             f"<div class='col'><div class='ch'>SAFEST LEAD</div><b>{H.escape(live['rosters'][fav[0] if ol[fav[0]]['win'] > 50 else fav[1]]['manager'])}</b>"
             f" — {max(ol[fav[0]]['win'], ol[fav[1]]['win']):.0f}% to win this week</div></div>")
-    return _card("--a:#5b7bd5;--h:#d50a0a", body)
+    return _card("--a:#5b7bd5;--h:#d50a0a", body, width=1000)
 
 
 def kicker_fpts(yds):
@@ -3187,12 +3233,12 @@ def nfl_live_update_html(stamp, title, events, state_at, scoring, live, ol, base
             f"<div class='pill' style='border-color:#ff9a9e;color:#ffb4b6'>LIVE · {stamp} UPDATE</div></div>"
             f"{games_strip_html(events, state_at)}"
             f"<div class='sec'>EVERY SCORE IN THE LAST 30 MINUTES · FANTASY POINTS TO {H.escape(league.upper())}</div>"
-            f"<div class='rows' style='gap:5px;margin-top:6px'>{sc_html}</div>"
-            f"<div class='sec'>MATCHUPS NOW</div><div class='rows' style='gap:6px;margin-top:6px'>"
+            f"<div class='rows mu2' style='gap:6px!important;margin-top:6px'>{sc_html}</div>"
+            f"<div class='sec'>MATCHUPS NOW</div><div class='rows mu2' style='margin-top:8px'>"
             f"{matchup_rows_html(live, ol, base, delta, 'still to play')}</div>"
             f"<div class='sw'><div class='col'><div class='ch'>WIN CHANCE SWINGS (LAST 30 MIN)</div>{sw}</div>"
             f"<div class='col'><div class='ch'>PLAYOFF ODDS MOVERS (LAST 30 MIN)</div>{pm}</div></div>")
-    return _card("--a:#d9534f;--h:#5b7bd5", body)
+    return _card("--a:#d9534f;--h:#5b7bd5", body, width=1560)
 
 
 # ------------------------------------------------ live wiring: NFL fantasy posts + NBA playoff odds
@@ -3279,7 +3325,8 @@ def post_prime_preview(events, st, ctx):
                                     f"{ol[s]['po_w']:.0f}% with a win, {ol[s]['po_l']:.0f}% with a loss")
     html_text = nfl_preview_fantasy_html(events, live, ol, f"{day} night" if len(events) == 1 else f"{day} {k:%H:%M}",
                                          show_teams=teams)
-    return _post_card(NFL_HOOK, html_text, f"🏈 **PRE-GAME** · {title_bits} · kick-off {k:%H:%M} UK", embed, "preview.png")
+    when = "kick-off imminent" if now_utc() > parse_time(events[0]["date"]) else f"kick-off {k:%H:%M} UK"
+    return _post_card(NFL_HOOK, html_text, f"🏈 **PRE-GAME** · {title_bits} · {when}", embed, "preview.png")
 
 
 def post_td_fantasy(event, play, summary, ctx):
@@ -3302,8 +3349,15 @@ def post_td_fantasy(event, play, summary, ctx):
     call = commentary(td, (detail or {}).get("text", ""), down_text, nick, lead_txt, seed)
     q = play.get("period", {}).get("number", 0)
     qtxt = f"Q{q}" if q <= 4 else "OT"
-    who = f"{td['scorer']} +{gain:.1f}" + (f" for {o['manager']}" + ("" if o["starting"] else " (bench)") if o
-                                           else " — unrostered!")
+    now = player_now(summary, td["scorer"])
+    who = (f"{td['scorer']} +{gain:.1f}" + (f" (now {fmt_pts(now)})" if now is not None else "") +
+           (f" for {o['manager']}" + ("" if o["starting"] else " (bench)") if o else " — unrostered!"))
+    if td.get("qb"):
+        qo = league_owner(boxscore_id(summary, td["qb"]), td["qb"])
+        qn = player_now(summary, td["qb"])
+        _, qg = play_fpts(td)
+        who += (f" · QB {short_name(td['qb'])} +{qg:.1f}" + (f" (now {fmt_pts(qn)})" if qn is not None else "") +
+                (f" for {qo['manager']}" if qo else ""))
     embed = {"author": AU_NFL(), "color": color(team["team"].get("color")), "title": who}
     if call:
         embed["description"] = call
@@ -3478,11 +3532,13 @@ def scoring_since(events, since, until):
                     q = next((c for c in cr if c[2] == "qb"), None)
                     if q:
                         qo = league_owner("", td["qb"])
-                        what += f"  ·  QB +{q[1]:.1f}" + (f" → {qo['manager']}" if qo else "")
+                        qn = player_now(s, td["qb"])
+                        what += (f"  ·  QB {short_name(td['qb'])} +{q[1]:.1f}" + (f" (now {fmt_pts(qn)})" if qn is not None else "")
+                                 + (f" → {qo['manager']}" if qo else ""))
                 o = league_owner("", who)
                 out.append({"t": t, "logo": team["team"].get("logo", ""), "who": who, "what": what,
                             "pts": main[1] if main else (3.0 if fg else 6.0), "owner": o["manager"] if o else None,
-                            "starting": bool(o and o["starting"])})
+                            "starting": bool(o and o["starting"]), "now": player_now(s, who) if not fg else None})
     return sorted(out, key=lambda x: x["t"])
 
 
@@ -3675,6 +3731,213 @@ def run_nba(st, dates=None, force=False):
     return _run_nba_v1(st, dates, force)
 
 
+# ------------------------------------------------ v4: win-chance meter, running totals, QB pairing
+
+V4_CSS = """
+.meter{display:grid;grid-template-columns:52px 1fr 52px;align-items:center;gap:10px;margin-top:8px}
+.meter .pa,.meter .pb{font-size:17px;font-weight:900;font-variant-numeric:tabular-nums}
+.meter .pa{text-align:right}.meter .pb{text-align:left}
+.meter .fav{color:#ffffff}.meter .dog{color:#6f788b}
+.track{position:relative;height:10px;border-radius:999px;background:linear-gradient(90deg,rgba(255,255,255,.07),rgba(255,255,255,.12),rgba(255,255,255,.07))}
+.track .mid0{position:absolute;left:50%;top:-3px;width:2px;height:16px;margin-left:-1px;background:rgba(255,255,255,.25);border-radius:1px}
+.track .fill{position:absolute;top:0;height:10px;border-radius:999px;background:linear-gradient(90deg,#d97757,#f2a77f)}
+.track .fill.r{background:linear-gradient(90deg,#f2a77f,#d97757)}
+.track .knob{position:absolute;top:50%;width:20px;height:20px;margin:-10px 0 0 -10px;border-radius:50%;background:#fff;
+ box-shadow:0 0 0 4px rgba(217,119,87,.45),0 0 16px 4px rgba(242,167,127,.55)}
+.meter.big .pa,.meter.big .pb{font-size:26px}.meter.big{grid-template-columns:70px 1fr 70px}
+.meter.sm{grid-template-columns:40px 1fr 40px;gap:8px;margin:0}.meter.sm .pa,.meter.sm .pb{font-size:14px}
+.meter.sm .track{height:6px}.meter.sm .track .fill{height:6px}.meter.sm .knob{width:12px;height:12px;margin:-6px 0 0 -6px}
+.meter.sm .mid0{top:-2px;height:10px}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+.pair.one{grid-template-columns:1fr}
+.pp2{display:grid;grid-template-columns:96px 1fr;gap:14px;align-items:center;background:rgba(255,255,255,.06);border-radius:14px;padding:12px}
+.pp2 img{width:96px;height:96px;border-radius:12px;object-fit:cover;object-position:top;background:rgba(255,255,255,.08)}
+.pp2 .role{font-size:11px;letter-spacing:1.5px;color:#9aa3b5;font-weight:700}
+.pp2 .nm{font-size:21px;font-weight:900;margin-top:2px;line-height:1.1}
+.pp2 .gn{display:flex;align-items:baseline;gap:10px;margin-top:6px}
+.pp2 .gn b{font-size:30px;font-weight:900;color:#7ee2a8}.pp2 .gn span{font-size:15px;color:#cfd5e1;font-weight:700}
+.pp2 .gn span em{font-style:normal;color:#fff;font-size:19px;font-weight:900}
+.pp2 .ow3{font-size:13.5px;color:#cfd5e1;margin-top:5px}.pp2 .ow3 b{color:#fff}
+.spl .now{display:block;font-size:11.5px;color:#cfd5e1;font-weight:700;margin-top:2px;text-align:center}
+"""
+
+
+def meter_html(win_a, size=""):
+    """Win-chance meter: soft track, glowing marker that slides toward the favourite."""
+    wa = max(0.0, min(100.0, win_a))
+    pos = 100 - wa                                  # knob near the left when the left manager is favoured
+    lo, hi = sorted((50.0, pos))
+    fav_left = wa >= 50
+    return (f"<div class='meter {size}'><span class='pa {'fav' if fav_left else 'dog'}'>{wa:.0f}%</span>"
+            f"<div class='track'><div class='mid0'></div>"
+            f"<div class='fill{' r' if not fav_left else ''}' style='left:{lo:.1f}%;width:{hi - lo:.1f}%'></div>"
+            f"<div class='knob' style='left:{pos:.1f}%'></div></div>"
+            f"<span class='pb {'dog' if fav_left else 'fav'}'>{100 - wa:.0f}%</span></div>")
+
+
+def player_now(summary, name):
+    p = player_tonight(summary, name) if summary else None
+    return p["pts"] if p else None
+
+
+def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
+    """v4 touchdown card: scorer + QB as a pairing, points gained and running totals."""
+    import html as H
+    away, home = teams_of(event)
+    td = td_parse(play)
+    pid = boxscore_id(summary, td["scorer"])
+    o = league_owner(pid, td["scorer"])
+    gain, qb_gain = play_fpts(td, (o or {}).get("pos", ""))
+    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    q = play.get("period", {}).get("number", 0)
+    scorer_team = away if play["team"]["abbreviation"] == away["team"]["abbreviation"] else home
+
+    def panel(role, name, pid_, gain_, owner):
+        hs = nfl_headshot(pid_) or scorer_team["team"].get("logo", "")
+        now = player_now(summary, name)
+        own = (f"<b>{H.escape(owner['manager'])}</b> {'⭐ starting' if owner['starting'] else '· bench'}" if owner
+               else "<b>Unrostered</b> — free agent")
+        tot = f"<span>now <em>{fmt_pts(now)}</em> pts</span>" if now is not None else ""
+        return (f"<div class='pp2'><img src='{H.escape(hs)}'><div><div class='role'>{role}</div>"
+                f"<div class='nm'>{H.escape(name)}</div><div class='gn'><b>+{gain_:.1f}</b>{tot}</div>"
+                f"<div class='ow3'>{own}</div></div></div>")
+
+    if td["kind"] == "pass":
+        what = f"{td['yds']}-yard touchdown pass"
+        qpid = boxscore_id(summary, td["qb"])
+        qo = league_owner(qpid, td["qb"])
+        panels = (panel("RECEIVER", td["scorer"], pid, gain, o) + panel("QUARTERBACK", td["qb"], qpid, qb_gain, qo))
+        pair_cls = "pair"
+    else:
+        what = (f"{td['yds']}-yard touchdown run" if td["kind"] == "rush" else "defensive / return touchdown")
+        panels = panel("SCORER", td["scorer"], pid, gain, o)
+        pair_cls = "pair one"
+
+    mu = ""
+    rid = next((r for r, x in live["rosters"].items() if o and x["manager"] == o["manager"]), None)
+    if rid:
+        opp = next((b if a == rid else a for a, b in live["pairs"] if rid in (a, b)), None)
+        if opp:
+            me, op = ol[rid], ol[opp]
+            d = me["po"] - base[rid]["po"]
+            mv = f" ({'▲' if d > 0 else '▼'}{abs(d):.0f} this week)" if abs(d) >= 1 else ""
+            mu = (f"<div class='lg2'><div class='ch'>{H.escape(o['manager'].upper())}'S MATCHUP</div>"
+                  f"<div class='mrw' style='background:none!important;padding:4px 0 0!important'>"
+                  f"<div class='mg'><div class='mn'>{H.escape(live['rosters'][rid]['manager'])}</div>"
+                  f"<div class='po3'><span class='lbl'>PLAYOFFS</span> <b>{me['po']:.0f}%</b>"
+                  f"<span style='font-size:13px;color:#9aa3b5;font-weight:600'>{mv}</span></div></div>"
+                  f"<div class='mid'><div class='sc3'><span>{me['cur']:.1f}</span><span class='dash'>–</span>"
+                  f"<span class='lo'>{op['cur']:.1f}</span></div>{meter_html(me['win'])}"
+                  f"<div class='wcl'>WIN CHANCE</div></div>"
+                  f"<div class='mg r'><div class='mn'>{H.escape(live['rosters'][opp]['manager'])}</div>"
+                  f"<div class='wl'>{len(op['left'])} starters still to play</div></div></div></div>")
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>TOUCHDOWN · Q{q} "
+            f"{play.get('clock', {}).get('displayValue', '')} · {away['team']['abbreviation']} {a_s}–{h_s} "
+            f"{home['team']['abbreviation']}</div><div class='pill'>{H.escape(tag)}</div></div>"
+            f"<div class='sec' style='margin-top:10px'>{H.escape(what.upper())}</div>"
+            f"<div class='{pair_cls}'>{panels}</div>{mu}")
+    return _card("--a:#1faa59;--h:#5b7bd5", body, extra_css=V4_CSS)
+
+
+def scoring_line_html(p):
+    """v4: points gained plus the player's total now."""
+    import html as H
+    own = (f"{H.escape(p['owner'])}<small>{'starting' if p['starting'] else 'bench'}</small>" if p["owner"]
+           else "Unrostered<small>free agent</small>")
+    now = f"<span class='now'>now {fmt_pts(p['now'])}</span>" if p.get("now") is not None else ""
+    return (f"<div class='spl'><img src='{H.escape(p['logo'])}'><div><div class='w1'>{H.escape(p['who'])}</div>"
+            f"<div class='w2'>{H.escape(p['what'])}</div></div>"
+            f"<div><div class='gp{'' if p['owner'] and p['starting'] else ' z'}'>+{p['pts']:.1f}</div>{now}</div>"
+            f"<div class='o2'>{own}</div></div>")
+
+
+# ------------------------------------------------ NFL daily playoff race (14:00 UK, day after games, not Tue)
+
+RACE_CSS = """
+.rt{margin-top:10px;background:rgba(255,255,255,.05);border-radius:12px;padding:8px 14px}
+.rr2{display:grid;grid-template-columns:30px 1fr 64px 64px 260px 200px;align-items:center;gap:12px;height:40px;
+ font-size:16px;font-variant-numeric:tabular-nums}
+.rr2.h{height:26px;font-size:11px;letter-spacing:1.4px;color:#9aa3b5;font-weight:700}
+.rr2.cut{border-bottom:2px dashed rgba(245,197,66,.55)}
+.rr2 .k{color:#9aa3b5;font-weight:800}.rr2 .m{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rr2 .o{display:grid;grid-template-columns:48px 1fr 46px;align-items:center;gap:8px;font-weight:900}
+.rr2 .o2{display:grid;grid-template-columns:44px 1fr;align-items:center;gap:8px;font-weight:900}
+.rb{height:8px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden}
+.rb div{height:8px;border-radius:999px}
+.mv{font-size:13px;font-weight:800}.mv.u{color:#7ee2a8}.mv.dn{color:#ff9a9e}.mv.z{color:#5d6679}
+.race-note{font-size:13px;color:#9aa3b5;margin-top:8px}
+"""
+
+
+def playoff_race_html(ctx, prev, title_date):
+    import html as H
+    live, ol, base, week = ctx["live"], ctx["ol"], ctx["base"], ctx["week"]
+    league = CONFIG["nfl"].get("league_name", "League")
+    settings = league_settings("nfl").get("settings", {})
+    po_start, n_po = int(settings.get("playoff_week_start") or 15), int(settings.get("playoff_teams") or 6)
+    _, rec = _history("nfl", week - 1)
+    order = sorted(ol, key=lambda r: -ol[r]["po"])
+    rows = ["<div class='rr2 h'><span>#</span><span>MANAGER</span><span>W-L</span><span>PF</span>"
+            "<span>PLAYOFF CHANCE · SINCE YESTERDAY</span><span>TITLE CHANCE</span></div>"]
+    for i, r in enumerate(order, 1):
+        x = rec.get(r, {"w": 0, "l": 0, "t": 0, "pf": 0})
+        po, ti = ol[r]["po"], ol[r]["title"]
+        d = po - prev.get(str(r), po)
+        mv = (f"<span class='mv u'>▲{d:.0f}</span>" if d >= 1 else f"<span class='mv dn'>▼{abs(d):.0f}</span>" if d <= -1
+              else "<span class='mv z'>–</span>")
+        rows.append(f"<div class='rr2{' cut' if i == n_po else ''}'><span class='k'>{i}</span>"
+                    f"<span class='m'>{H.escape(live['rosters'][r]['manager'])}</span>"
+                    f"<span>{x['w']}-{x['l']}{'-' + str(x['t']) if x['t'] else ''}</span><span>{x['pf']:.0f}</span>"
+                    f"<span class='o'><span>{po:.0f}%</span><div class='rb'><div style='width:{max(po, 1.5):.1f}%;"
+                    f"background:linear-gradient(90deg,#d97757,#f2a77f)'></div></div>{mv}</span>"
+                    f"<span class='o2'><span>{ti:.0f}%</span><div class='rb'><div style='width:{min(100, max(ti * 2.5, 1.5)):.1f}%;"
+                    f"background:linear-gradient(90deg,#e8b13c,#ffe08a)'></div></div></span></div>")
+    left = max(0, po_start - week)
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>{H.escape(league.upper())} · PLAYOFF RACE · "
+            f"{H.escape(title_date.upper())}</div><div class='pill'>WEEK {week} IN PROGRESS</div></div>"
+            f"<div class='rt'>{''.join(rows)}</div>"
+            f"<div class='race-note'>Top {n_po} make the playoffs (dashed line) · playoffs start week {po_start} · "
+            f"{left} regular-season week{'s' if left != 1 else ''} to go, including this one · "
+            f"odds simulate the rest of this week and every week after, 4,000 times</div>"
+            f"<div class='sec'>THIS WEEK'S MATCHUPS · WIN CHANCE RIGHT NOW</div>{compact_matchups_html(live, ol, live['pairs'])}")
+    return _card("--a:#d97757;--h:#5b7bd5", body, extra_css=RACE_CSS, width=1100)
+
+
+def maybe_daily_race(st):
+    """14:00 UK on the day after NFL games (never Tuesday — the weekly recap covers that)."""
+    cfg = CONFIG["nfl"].get("daily_race") or {}
+    if not cfg.get("enabled", True):
+        return
+    now = datetime.now(UK)
+    if WEEKDAYS[now.weekday()] == cfg.get("skip_weekday", "Tuesday") or now.hour < cfg.get("hour_uk", 14):
+        return
+    today = now.strftime("%Y-%m-%d")
+    if st.get("race_day") == today:
+        return
+    events = fetch("football/nfl/scoreboard").get("events", [])
+    since = now_utc() - timedelta(hours=36)
+    played = [e for e in events if e["status"]["type"].get("completed") and parse_time(e["date"]) >= since]
+    if not played:
+        return
+    ctx = nfl_ctx(st, events)
+    if not ctx:
+        return
+    prev = st.get("race_snap") or {}
+    ol, live = ctx["ol"], ctx["live"]
+    mover = max(ol, key=lambda r: abs(ol[r]["po"] - prev.get(str(r), ol[r]["po"])))
+    d = ol[mover]["po"] - prev.get(str(mover), ol[mover]["po"])
+    fav = max(ol, key=lambda r: ol[r]["title"])
+    embed = {"author": AU_NFL(), "color": 0xD97757,
+             "title": (f"Biggest mover: {live['rosters'][mover]['manager']} {'▲' if d >= 0 else '▼'}{abs(d):.0f} "
+                       f"to {ol[mover]['po']:.0f}%") if abs(d) >= 1 else "Playoff race update",
+             "description": f"🏆 Title favourite: **{live['rosters'][fav]['manager']}** {ol[fav]['title']:.0f}%"}
+    html_text = playoff_race_html(ctx, prev, now.strftime("%a %-d %b"))
+    if _post_card(NFL_HOOK, html_text, f"📈 **PLAYOFF RACE** · {CONFIG['nfl'].get('league_name', 'League')} · "
+                                       f"{now:%A %-d %B}", embed, "race.png"):
+        st["race_day"] = today
+        st["race_snap"] = {str(r): v["po"] for r, v in ol.items()}
+
+
 # ===================================================================== main
 
 def send_test():
@@ -3721,12 +3984,16 @@ def main():
     last_nba = last_recap = last_push = 0.0
     saved = json.dumps(st, sort_keys=True)
     while True:
-        if time.time() - last_recap >= 600:       # weekly Sleeper recaps (NFL Tue, NBA Mon, 13:00 UK)
+        if time.time() - last_recap >= 600:       # weekly recaps (NFL Tue, NBA Mon 13:00) + NFL daily race (14:00)
             for sport in ("nfl", "nba"):
                 try:
                     maybe_weekly_recap(st, sport)
                 except Exception as ex:  # noqa: BLE001
                     log(f"{sport} weekly recap error: {ex}")
+            try:
+                maybe_daily_race(st)
+            except Exception as ex:  # noqa: BLE001
+                log(f"daily playoff race error: {ex}")
             last_recap = time.time()
         active = False
         try:
