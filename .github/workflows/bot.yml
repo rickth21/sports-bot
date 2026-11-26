@@ -46,6 +46,7 @@ jobs:
           NFL_WEBHOOK_URL: ${{ secrets.NFL_WEBHOOK_URL }}
           NBA_WEBHOOK_URL: ${{ secrets.NBA_WEBHOOK_URL }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           MAX_RUNTIME_MIN: "340"
           POLL_SECONDS: "45"
           IDLE_SECONDS: "300"
