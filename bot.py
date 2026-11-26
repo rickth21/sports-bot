@@ -357,7 +357,7 @@ def nfl_fantasy(summary):
                 pts += v(key)
         for key, n in two_pt.get(p["name"], {}).items():
             pts += n * v(key)
-        if pts <= 0:
+        if pts == 0:
             continue
 
         parts = []
@@ -4305,7 +4305,7 @@ def nfl_fantasy(summary):
     """Players + kickers + team defences, best first."""
     out = _nfl_fantasy_k(summary)
     try:
-        out = out + [d for d in nfl_defenses(summary) if d["pts"]]
+        out = out + [d for d in nfl_defenses(summary, None, summary.get("_week")) if d["pts"]]
     except Exception as e:  # noqa: BLE001
         log(f"defence points unavailable: {e}")
     out.sort(key=lambda x: -x["pts"])
@@ -5500,6 +5500,295 @@ def nba_race_html(events, summaries, live):
     return (f"<div class='rc'><div class='ih'>🏀 {H.escape(league.upper())} · WEEK {live['week']} RACE · CLOSEST FIRST</div>"
             f"{hdr}{''.join(out)}<div class='note'>Games left = starters' games still to play this week (injured players left out) · "
             f"projected final = points so far + Sleeper per-game projections</div></div><style>{RACE5_CSS}</style>")
+
+
+# ------------------------------------------------ health alerts (errors and missed posts) to a private channel
+
+ALERT_HOOK = os.environ.get("ALERT_WEBHOOK_URL", "").strip()
+_ALERTED = {}
+_IN_ALERT = {"on": False}
+_log_plain = log
+
+
+def alert(msg, key=None, every_h=3.0):
+    """Post a short plain-text warning to the alert channel (rate-limited per key)."""
+    if not ALERT_HOOK or SILENT or DRY_RUN or CAPTURE is not None or _IN_ALERT["on"]:
+        return
+    k = key or msg[:60]
+    if time.time() - _ALERTED.get(k, 0) < every_h * 3600:
+        return
+    _ALERTED[k] = time.time()
+    _IN_ALERT["on"] = True
+    _POSTER["name"] = "Donald 🩺"
+    try:
+        discord(ALERT_HOOK, [], "alert", content=f"⚠️ **sports-bot** · {msg}"[:1900])
+    finally:
+        _POSTER.clear()
+        _IN_ALERT["on"] = False
+
+
+def log(*a):
+    """Normal log line; anything that looks like a failure also goes to the alert channel."""
+    _log_plain(*a)
+    text = " ".join(str(x) for x in a)
+    low = text.lower()
+    if " error" in low or "discord rejected" in low or "discord post failed" in low or "traceback" in low:
+        alert(text, key=re.sub(r"[0-9]+", "#", text)[:70])
+
+
+def watchdog(st):
+    """Flag posts that should have gone out by now (prime-time TDs/full-times, NBA full-times)."""
+    now = time.time()
+    try:
+        for e in fetch("football/nfl/scoreboard").get("events", []):
+            g = st.get("nfl", {}).get(e["id"])
+            if not g or not g.get("preview"):          # only games the prime-time posting handles
+                continue
+            name = e.get("shortName", e["id"])
+            t = e["status"]["type"]
+            if t.get("completed") and not g.get("final") and g.get("ft_seen") and now - g["ft_seen"] > 20 * 60:
+                alert(f"{name} finished 20+ min ago but no full-time post yet", key=f"ft{e['id']}", every_h=24)
+            if t["state"] == "in":
+                s = fetch(f"football/nfl/summary?event={e['id']}")
+                for p in s.get("scoringPlays", []):
+                    if (p.get("type") or {}).get("abbreviation") != "TD" or p["id"] in g.get("tds", []):
+                        continue
+                    _, d = play_detail(s, p.get("id"))
+                    wc = (d or {}).get("wallclock")
+                    if wc and now - _wallclock_ts(wc) > 10 * 60:
+                        alert(f"{name}: touchdown not posted after 10 min — {p.get('text', '')[:80]}",
+                              key=f"td{p['id']}", every_h=24)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"watchdog (NFL) failed: {ex}")
+    try:
+        for gid, g in (st.get("nba") or {}).items():
+            if isinstance(g, dict) and g.get("ft_seen") and not g.get("posted") and now - g["ft_seen"] > 45 * 60:
+                alert(f"NBA game {gid} finished 45+ min ago but no full-time post yet", key=f"nba{gid}", every_h=24)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"watchdog (NBA) failed: {ex}")
+
+
+_maybe_daily_race_wd = maybe_daily_race
+
+
+def maybe_daily_race(st):
+    """(runs every 10 min from the main loop) daily race + the missed-post watchdog."""
+    try:
+        return _maybe_daily_race_wd(st)
+    finally:
+        watchdog(st)
+
+
+# ------------------------------------------------ Sunday window / previews: big score tiles instead of small chips
+
+TILE_CSS = """
+.gtiles{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+.gt{display:grid;grid-template-columns:48px 1fr auto 1fr 48px;align-items:center;gap:8px;background:rgba(9,12,22,.66);
+ border-radius:14px;padding:10px 14px}
+.gt .dz{width:48px;height:48px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center}
+.gt .dz img{width:36px;height:36px;object-fit:contain}
+.gt .s{font-size:40px;font-weight:900;line-height:1;font-variant-numeric:tabular-nums;color:#8b95a8}
+.gt .s.l{color:#fff}.gt .s.r{text-align:right}
+.gt .ab{font-size:12px;font-weight:900;letter-spacing:1px;color:#c3cad8}
+.gt .gmid{text-align:center;min-width:70px}
+.gt .gclk{font-size:12px;font-weight:900;letter-spacing:1.2px;color:#ffd166;white-space:nowrap}
+.gt .gclk.f{color:#c3cad8}
+.gt .gko{font-size:22px;font-weight:900;color:#fff}
+.spl .w2 b.yd{color:#fff;font-weight:900;font-size:13.5px}
+"""
+
+
+def games_strip_html(events, state_at=None, pre=False):
+    """Big score tiles for every game in a window (kick-off times before the start)."""
+    import html as H
+    out = []
+    for e in events:
+        aw, hm = teams_of(e)
+        if state_at and e["id"] in state_at:
+            a_s, h_s, stt = state_at[e["id"]]
+        elif pre or state_at is not None or e["status"]["type"]["state"] == "pre":
+            a_s = h_s = None
+            stt = parse_time(e["date"]).astimezone(UK).strftime("%H:%M")
+        else:
+            a_s, h_s, stt = int(num(aw.get("score"))), int(num(hm.get("score"))), game_status(e)
+
+        def disc(t):
+            return f"<div class='dz'><img src='{H.escape(t['team'].get('logo', ''))}'></div>"
+        if a_s is None:
+            mid = f"<div class='gmid'><div class='gko'>{H.escape(str(stt))}</div><div class='ab'>KICK-OFF</div></div>"
+            left = f"<div class='ab'>{aw['team']['abbreviation']}</div>"
+            right = f"<div class='ab' style='text-align:right'>{hm['team']['abbreviation']}</div>"
+        else:
+            fin = str(stt).upper().startswith("FINAL")
+            mid = (f"<div class='gmid'><div class='gclk{' f' if fin else ''}'>{H.escape(str(stt))}</div>"
+                   f"<div class='ab'>{aw['team']['abbreviation']} · {hm['team']['abbreviation']}</div></div>")
+            left = f"<div class='s{' l' if a_s >= h_s else ''}'>{a_s}</div>"
+            right = f"<div class='s r{' l' if h_s >= a_s else ''}'>{h_s}</div>"
+        out.append(f"<div class='gt'>{disc(aw)}{left}{mid}{right}{disc(hm)}</div>")
+    return f"<div class='gtiles'>{''.join(out)}</div><style>{TILE_CSS}</style>"
+
+
+_scoring_line_html_tiles = scoring_line_html
+
+
+def scoring_line_html(p):
+    """Scoring line with the yardage in bold."""
+    h = _scoring_line_html_tiles(p)
+    return re.sub(r"(<div class='w2'>)(\d+-yd)", r"\1<b class='yd'>\2</b>", h, count=1)
+
+
+# ------------------------------------------------ weekly accuracy check: bot's points vs Sleeper's finals (NFL)
+
+def nfl_accuracy(week, tol=0.5):
+    """(checked, [(player, manager, ours, sleeper)]) for every rostered player who played in `week`."""
+    live = league_live("nfl", week)
+    npid = nfl_name_pid()
+    allp = sleeper_players("nfl")
+    by_espn = {str(v.get("espn_id")): k for k, v in allp.items() if v.get("espn_id")}
+    by_name, by_last = {}, {}
+    for k, v in allp.items():
+        if v.get("full_name") and v.get("team"):
+            by_name.setdefault(name_key(v["full_name"]), []).append(k)
+            by_last.setdefault((name_key(v.get("last_name", "")), v["team"]), []).append(k)
+
+    def match(p):
+        if str(p.get("id", "")).startswith("def:"):
+            return p["id"][4:]
+        hit = by_espn.get(str(p.get("id"))) or npid.get((name_key(p["name"]), sl_team(p["team"])))
+        if hit:
+            return hit
+        one = by_name.get(name_key(p["name"]), [])
+        if len(one) == 1:                                    # traded player: same name, new team
+            return one[0]
+        last = by_last.get((name_key(p["name"].split()[-1]), sl_team(p["team"])), [])
+        return last[0] if len(last) == 1 else None           # nickname: same surname + team
+    ours = {}
+    for e in fetch(f"football/nfl/scoreboard?seasontype=2&week={week}").get("events", []):
+        if not e["status"]["type"].get("completed"):
+            continue
+        s = fetch(f"football/nfl/summary?event={e['id']}")
+        s["_week"] = week
+        played = set()
+        for p in nfl_fantasy(s):
+            pid = match(p)
+            if pid:
+                ours[pid] = (p["name"], p["pts"])
+        for t in teams_of(e):
+            played.add(sl_team(t["team"]["abbreviation"]))
+        ours.setdefault("_teams", set()).update(played)
+    teams = ours.pop("_teams", set())
+    players = sleeper_players("nfl")
+    checked, bad = 0, []
+    for x in live["rosters"].values():
+        for pid in x["players"]:
+            pp = players.get(pid) or {}
+            team = pp.get("team") or pid
+            if team not in teams or pid not in x["pp"]:
+                continue
+            slp = float(x["pp"].get(pid) or 0)
+            name, mine = ours.get(pid, (pp.get("full_name") or f"{pid} D/ST", 0.0))
+            checked += 1
+            if abs(mine - slp) > tol:
+                bad.append((name, x["manager"], mine, slp))
+    bad.sort(key=lambda z: -abs(z[2] - z[3]))
+    return checked, bad
+
+
+def maybe_accuracy_check(st):
+    """Tuesday 12:00 UK (before the 13:00 recap): last week's check goes to the alert channel."""
+    now = datetime.now(UK)
+    if WEEKDAYS[now.weekday()] != "Tuesday" or now.hour < 12:
+        return
+    try:
+        week = int(fetch_url(f"{SLEEPER}/state/nfl").get("week") or 0) - 1
+    except Exception:  # noqa: BLE001
+        return
+    if week < 1 or st.get("acc_week") == week:
+        return
+    checked, bad = nfl_accuracy(week)
+    st["acc_week"] = week
+    if not bad:
+        msg = f"✅ Week {week} accuracy: all {checked} rostered players match Sleeper (within 0.5)."
+    else:
+        lines = "\n".join(f"• {n} ({m}): bot {a:.1f} vs Sleeper {b:.1f}" for n, m, a, b in bad[:12])
+        msg = f"Week {week} accuracy: {len(bad)} of {checked} players differ from Sleeper by more than 0.5\n{lines}"
+    alert(msg, key=f"acc{week}", every_h=0)
+
+
+_maybe_daily_race_acc = maybe_daily_race
+
+
+def maybe_daily_race(st):
+    try:
+        maybe_accuracy_check(st)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"accuracy check failed: {ex}")
+    return _maybe_daily_race_acc(st)
+
+
+# ------------------------------------------------ team defences scored from Sleeper's own stats (exact match)
+
+_SLP_STATS = {}
+
+
+def sleeper_week_stats(week=None):
+    """Sleeper's NFL stats for the week (live during games), cached for a minute."""
+    try:
+        if week is None:
+            week = int(fetch_url(f"{SLEEPER}/state/nfl").get("week") or 0)
+        hit = _SLP_STATS.get(week)
+        if hit and time.time() - hit[0] < 60:
+            return hit[1]
+        season = fetch_url(f"{SLEEPER}/state/nfl").get("season")
+        data = fetch_url(f"{SLEEPER}/stats/nfl/regular/{season}/{week}") or {}
+        _SLP_STATS[week] = (time.time(), data)
+        return data
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"Sleeper stats unavailable: {e}")
+        return {}
+
+
+def sleeper_def_points(s):
+    sc = league_scoring("nfl")
+    v = lambda k: float(sc.get(k) or 0)  # noqa: E731
+    pts = sum(float(s.get(k) or 0) * v(k) for k in ("sack", "int", "fum_rec", "ff", "safe", "def_td", "blk_kick",
+                                                       "def_st_td", "def_st_ff", "def_st_fum_rec"))
+    if "pts_allow" in s:
+        a = float(s["pts_allow"])
+        for lo, hi, k in ((0, 0, "pts_allow_0"), (1, 6, "pts_allow_1_6"), (7, 13, "pts_allow_7_13"),
+                          (14, 20, "pts_allow_14_20"), (21, 27, "pts_allow_21_27"), (28, 34, "pts_allow_28_34"),
+                          (35, 999, "pts_allow_35p")):
+            if lo <= a <= hi:
+                pts += v(k)
+    return pts
+
+
+_nfl_defenses_espn = nfl_defenses
+
+
+def nfl_defenses(summary, event=None, week=None):
+    """ESPN-based defences, corrected with Sleeper's own stats when it has them (they match Sleeper exactly)."""
+    out = _nfl_defenses_espn(summary, event)
+    stats = sleeper_week_stats(week)
+    for d in out:
+        s = stats.get(d["id"][4:]) if stats else None
+        if not s or "pts_allow" not in s:
+            continue
+        d["pts"] = sleeper_def_points(s)
+        bits = []
+        if s.get("sack"):
+            bits.append(f"{s['sack']:g} sack{'s' if s['sack'] != 1 else ''}")
+        if s.get("int"):
+            bits.append(f"{int(s['int'])} INT")
+        if s.get("fum_rec") or s.get("def_st_fum_rec"):
+            bits.append(f"{int((s.get('fum_rec') or 0) + (s.get('def_st_fum_rec') or 0))} fumble rec")
+        if s.get("def_td") or s.get("def_st_td"):
+            bits.append(f"{int((s.get('def_td') or 0) + (s.get('def_st_td') or 0))} TD")
+        if s.get("safe"):
+            bits.append(f"{int(s['safe'])} safety")
+        bits.append(f"{int(s['pts_allow'])} pts allowed")
+        d["line"] = " · ".join(bits)
+    return out
 
 
 # ===================================================================== main
