@@ -174,7 +174,11 @@ def discord(hook, embed, label="", content=None, files=None):
         ctype = f"multipart/form-data; boundary={boundary}"
     else:
         body, ctype = json.dumps(payload).encode(), "application/json"
+    timed = hook != globals().get("ALERT_HOOK")          # health alerts never wait for a game's send slot
+    if timed:
+        _wait_for_send_slot()
     for _ in range(5):
+        _t_up = time.time()
         req = urllib.request.Request(
             hook + ("&" if "?" in hook else "?") + "wait=true", data=body, method="POST",
             headers={"Content-Type": ctype,
@@ -187,6 +191,10 @@ def discord(hook, embed, label="", content=None, files=None):
                     _LAST_MSG.update({"id": m.get("id"), "channel_id": m.get("channel_id")})
                 except Exception:  # noqa: BLE001
                     pass
+                if timed:
+                    _UPLOAD_SECS.append(time.time() - _t_up)
+                    del _UPLOAD_SECS[:-10]
+                    _record_send(True)
                 time.sleep(1)
                 return True
         except urllib.error.HTTPError as e:
@@ -1937,6 +1945,25 @@ def clock_secs(e):
         return 0.0
 
 
+def nba_moment(g, e, kind):
+    """When the game (kind 'ft') or the first half ('ht') really ended: ESPN's play-by-play time, else first seen."""
+    key = f"{kind}_at"
+    if not g.get(key):
+        seen = g.setdefault(f"{kind}_seen", time.time())
+        t0 = seen
+        try:
+            plays = fetch(f"basketball/nba/summary?event={e['id']}").get("plays") or []
+            if kind == "ht":
+                plays = [p for p in plays if (p.get("period") or {}).get("number") == 2]
+            wcs = [_wallclock_ts(p["wallclock"]) for p in plays if p.get("wallclock")]
+            if wcs:
+                t0 = min(seen, max(wcs))
+        except Exception:  # noqa: BLE001
+            pass
+        g[key] = t0
+    return g[key]
+
+
 _NBA_LIVE = {"on": False}       # any NBA game live (or just finished and not posted): check every 20s, not every 5 min
 
 
@@ -1969,7 +1996,7 @@ def run_nba(st, dates=None, force=False):
         if not t.get("completed") or (age_h > STALE_HOURS and not force):
             G(e).update(posted=True, ht=True)        # postponed / too old
             continue
-        if not force and now_s < G(e).setdefault("ft_seen", now_s) + spoiler_delay():
+        if not force and not due(nba_moment(G(e), e, "ft"), "NBA full-time"):
             continue
         finals.append(e)
     if finals:
@@ -1999,7 +2026,7 @@ def run_nba(st, dates=None, force=False):
             continue
         per, name = e["status"].get("period", 0), e["status"]["type"].get("name")
         if name == "STATUS_HALFTIME" or (per == 3 and clock_secs(e) >= 360):
-            if now_s >= g.setdefault("ht_seen", now_s) + spoiler_delay():
+            if due(nba_moment(g, e, "ht"), "NBA half-time"):
                 at_half.append(e)
             else:
                 approaching.append(e)
@@ -3498,12 +3525,56 @@ def spoiler_delay():
     return float(CONFIG.get("spoiler_delay_seconds", 120))
 
 
+# Exact timing: every in-game post should land spoiler_delay() seconds after the real moment (ESPN's
+# timestamp of the play). The card is built PREP seconds early, then discord() waits for the exact second.
+PREP_SECONDS = 14
+_SEND_AT = {"t": None, "t0": None, "label": ""}      # target send time for the post being built right now
+_NEXT_WAKE = {"t": None}                              # earliest upcoming "start building" time (main loop wakes for it)
+_TIMING = []                                          # (label, moment, sent) for the last posts, saved to state
+
+
+def due(t0, label=""):
+    """True when it's time to start building the post for a moment at t0; remembers when it must be sent."""
+    target = t0 + spoiler_delay()
+    if time.time() >= target - PREP_SECONDS:
+        _SEND_AT.update(t=target, t0=t0, label=label)
+        return True
+    w = target - PREP_SECONDS
+    if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
+        _NEXT_WAKE["t"] = w
+    return False
+
+
+def _wait_for_send_slot():
+    """Called just before a webhook post: sleep until the exact target second (minus typical upload time)."""
+    t = _SEND_AT.get("t")
+    if not t:
+        return
+    lead = sum(_UPLOAD_SECS[-5:]) / len(_UPLOAD_SECS[-5:]) if _UPLOAD_SECS else 0.8
+    wait = t - lead - time.time()
+    if 0 < wait < PREP_SECONDS + 30:
+        time.sleep(wait)
+
+
+def _record_send(ok):
+    if _SEND_AT.get("t0") and ok:
+        _TIMING.append({"what": _SEND_AT.get("label") or "post", "moment": round(_SEND_AT["t0"], 1),
+                        "sent": round(time.time(), 1), "after": round(time.time() - _SEND_AT["t0"], 1)})
+        del _TIMING[:-40]
+        _log_plain(f"posted {_SEND_AT.get('label') or 'post'} {time.time() - _SEND_AT['t0']:.1f}s after the moment "
+                   f"(target {spoiler_delay():.0f}s)")
+    _SEND_AT.update(t=None, t0=None, label="")
+
+
+_UPLOAD_SECS = []
+
+
 def _wallclock_ts(wc):
     return datetime.strptime(wc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
 
 
 def td_ready(summary, play, first_seen):
-    """True once the touchdown is at least spoiler_delay() old (ESPN's time of the play, else first seen)."""
+    """True when it's time to build the post for this play (it then lands spoiler_delay() after ESPN's time of the play)."""
     t0 = first_seen
     try:
         _, d = play_detail(summary, play.get("id"))
@@ -3511,7 +3582,7 @@ def td_ready(summary, play, first_seen):
             t0 = _wallclock_ts(d["wallclock"])
     except Exception:  # noqa: BLE001
         pass
-    return time.time() >= t0 + spoiler_delay()
+    return due(t0, (play.get("type") or {}).get("text") or "play")
 
 
 def event_ready(g, key, summary=None, period=None):
@@ -3527,7 +3598,7 @@ def event_ready(g, key, summary=None, period=None):
             t0 = min(t0, max(wcs))
     except Exception:  # noqa: BLE001
         pass
-    return time.time() >= t0 + spoiler_delay()
+    return due(t0, key.replace("_seen", ""))
 
 
 # ------------------------------------------------ v5 touchdown card: conversion strip, projections, win swing
@@ -5101,6 +5172,8 @@ _save_state_nopins = save_state
 
 
 def save_state(st):
+    if _TIMING:
+        st["post_timing"] = list(_TIMING)            # how many seconds after the real moment each post landed
     try:
         pins_tick(st)
     except Exception as ex:  # noqa: BLE001
@@ -6303,12 +6376,13 @@ def main():
             active = run_nfl(st)
         except Exception as ex:  # noqa: BLE001
             log(f"NFL error: {ex}")
-        if time.time() - last_nba >= (20 if _NBA_LIVE["on"] else NBA_EVERY):
+        if time.time() - last_nba >= (20 if _NBA_LIVE["on"] else NBA_EVERY) or _NBA_LIVE.get("wake"):
             try:
                 run_nba(st)
             except Exception as ex:  # noqa: BLE001
                 log(f"NBA error: {ex}")
             last_nba = time.time()
+            _NBA_LIVE["wake"] = False
         active = active or _NBA_LIVE["on"]
         save_state(st)
         now_saved = json.dumps(st, sort_keys=True)
@@ -6319,6 +6393,10 @@ def main():
         if elapsed > MAX_RUNTIME or (not active and not keepalive):
             break
         wait = min(POLL_SECONDS, int(CONFIG.get("live_poll_seconds", 15))) if active else idle
+        if _NEXT_WAKE["t"]:                          # a post is due to be built soon: wake up exactly then
+            wait = min(wait, max(1, _NEXT_WAKE["t"] - time.time()))
+            _NEXT_WAKE["t"] = None
+            _NBA_LIVE["wake"] = True
         time.sleep(max(5, min(wait, MAX_RUNTIME - elapsed + 1)))
     log("Done.")
 
