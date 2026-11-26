@@ -175,7 +175,7 @@ def load_state():
 def save_state(st):
     # keep it small: drop games older than 21 days
     cutoff = (now_utc() - timedelta(days=21)).strftime("%Y-%m-%d")
-    for league in ("nfl", "nba"):
+    for league in ("nfl", "nba", "nfl_slots"):
         games = st.get(league, {})
         for gid in [g for g, v in games.items() if v.get("date", "9999") < cutoff]:
             del games[gid]
@@ -459,7 +459,7 @@ def league_index(sport="nfl"):
         try:
             users = {u["user_id"]: u for u in fetch_url(f"{SLEEPER}/league/{lid}/users")}
             rosters = fetch_url(f"{SLEEPER}/league/{lid}/rosters")
-            players = fetch_url(f"{SLEEPER}/players/{sport}", tries=2)
+            players = sleeper_players(sport)
             for r in rosters:
                 u = users.get(r.get("owner_id")) or {}
                 starters = set(r.get("starters") or [])
@@ -907,11 +907,17 @@ def run_nfl(st, date=None, force=False):
     path = "football/nfl/scoreboard" + (f"?dates={date}" if date else "")
     events = fetch(path).get("events", [])
     active = False
-    for e in sorted(events, key=lambda x: x["date"]):
+    for slot in nfl_slots(events):
+        if len(slot) >= 2:               # games kicking off together: grouped slate posts
+            try:
+                active |= bool(nfl_slot(slot, st, force=force))
+            except Exception as ex:  # noqa: BLE001
+                log(f"NFL slate {slot[0].get('date')} error: {ex}")
+            continue
         try:
-            active |= bool(nfl_game(e, st, force=force))
+            active |= bool(nfl_game(slot[0], st, force=force))
         except Exception as ex:  # noqa: BLE001
-            log(f"NFL game {e.get('id')} error: {ex}")
+            log(f"NFL game {slot[0].get('id')} error: {ex}")
     return active
 
 
@@ -1753,6 +1759,335 @@ def nfl_headline(event):
     if m >= 4:
         return f"{wn} hold off the {ln}", f"{wn.upper()} HOLD ON"
     return f"{wn} edge the {ln} in a thriller", f"{m}-POINT THRILLER"
+
+
+# ------------------------------------------------------ NFL slates (grouped)
+# Several games kicking off together (e.g. Sunday 18:00 UK) get 3 posts in total:
+# pre-game, half-time and full-time graphics, built around the Sleeper league.
+
+_SLP = {}
+
+
+def sleeper_players(sport="nfl"):
+    if sport not in _SLP:
+        _SLP[sport] = fetch_url(f"{SLEEPER}/players/{sport}", tries=2)
+    return _SLP[sport]
+
+
+def sl_team(espn_abbr):
+    return SLEEPER_TEAM.get(espn_abbr, espn_abbr)
+
+
+def short_name(full):
+    parts = [w for w in (full or "").split(" ") if w.rstrip(".").lower() not in ("jr", "sr", "ii", "iii", "iv", "v")]
+    return parts[-1] if parts else full
+
+
+def league_live(sport="nfl", week=None):
+    """Live Sleeper league data: week, rosters (manager, starters) and this week's matchups with points."""
+    lid = str(CONFIG[sport].get("sleeper_league_id") or "").strip()
+    if not lid:
+        return None
+    try:
+        week = week or fetch_url(f"{SLEEPER}/state/{sport}").get("week")
+        users = {u["user_id"]: u for u in fetch_url(f"{SLEEPER}/league/{lid}/users")}
+        rosters = fetch_url(f"{SLEEPER}/league/{lid}/rosters")
+        mus = fetch_url(f"{SLEEPER}/league/{lid}/matchups/{week}") if week else []
+    except Exception as e:  # noqa: BLE001
+        log(f"Sleeper live data unavailable: {e}")
+        return None
+    rmap = {}
+    for r in rosters:
+        u = users.get(r.get("owner_id")) or {}
+        rmap[r["roster_id"]] = {"manager": u.get("display_name", "?"), "starters": [], "players": [], "pp": {},
+                                "points": 0.0}
+    for m in mus:
+        if m.get("roster_id") in rmap:
+            x = rmap[m["roster_id"]]
+            x["starters"] = [p for p in (m.get("starters") or []) if p and p != "0"]
+            x["players"] = m.get("players") or []
+            x["pp"] = m.get("players_points") or {}
+            x["points"] = float(m.get("points") or 0)
+            x["matchup_id"] = m.get("matchup_id")
+    pairs = {}
+    for rid, x in rmap.items():
+        if x.get("matchup_id"):
+            pairs.setdefault(x["matchup_id"], []).append(rid)
+    return {"week": week, "rosters": rmap, "pairs": [v for k, v in sorted(pairs.items()) if len(v) == 2]}
+
+
+def slot_players(live, teams):
+    """Every league-rostered player on the given NFL teams: (name, pos, team, pts, manager, starting)."""
+    players = sleeper_players()
+    out = []
+    for rid, x in live["rosters"].items():
+        for pid in x["players"]:
+            p = players.get(pid) or {}
+            if p.get("team") in teams:
+                nm = p.get("full_name") or (f"{p.get('last_name', pid)} D/ST" if p.get("position") == "DEF" else pid)
+                out.append({"pid": pid, "name": nm, "pos": p.get("position", ""),
+                            "team": p.get("team"), "pts": float(x["pp"].get(pid) or 0), "manager": x["manager"],
+                            "starting": pid in x["starters"], "rid": rid})
+    return out
+
+
+def nfl_slots(events):
+    gap = CONFIG["nfl"].get("slot_minutes", 30) * 60
+    slots, cur, first = [], [], None
+    for e in sorted(events, key=lambda x: x["date"]):
+        t = parse_time(e["date"])
+        if cur and (t - first).total_seconds() > gap:
+            slots.append(cur)
+            cur = []
+        if not cur:
+            first = t
+        cur.append(e)
+    if cur:
+        slots.append(cur)
+    return slots
+
+
+def game_status(e):
+    st = e["status"]
+    t = st["type"]
+    if t.get("completed"):
+        return "FINAL" + (" · OT" if ot_tag(e) else "")
+    if t.get("state") == "pre":
+        return parse_time(e["date"]).astimezone(UK).strftime("%H:%M")
+    if t.get("name") == "STATUS_HALFTIME":
+        return "HALF"
+    q = st.get("period", 0)
+    return f"{'Q' + str(q) if q <= 4 else 'OT'} {st.get('displayClock', '')}".strip()
+
+
+SLOT_CSS = """
+.rows{margin-top:12px;display:flex;flex-direction:column;gap:6px}
+.grow{display:grid;grid-template-columns:318px 74px 1fr;align-items:center;gap:12px;background:rgba(255,255,255,.055);
+ border-radius:10px;padding:7px 12px;height:52px}
+.gm{display:grid;grid-template-columns:30px 44px 1fr 18px 1fr 44px 30px;align-items:center;gap:4px;font-variant-numeric:tabular-nums}
+.gm img{width:30px;height:30px;object-fit:contain}
+.gm .ab{font-weight:800;font-size:16px}.gm .ab.r{text-align:right}
+.gm .s{font-size:24px;font-weight:800;text-align:center}.gm .s.lo{color:#8b95a8}
+.gm .d{color:#5d6679;text-align:center}
+.gm .rc{font-size:12.5px;color:#9aa3b5;text-align:center}
+.st{font-size:11px;font-weight:700;letter-spacing:1px;text-align:center;border-radius:6px;padding:4px 0;background:rgba(255,255,255,.08);color:#e6e9ef}
+.st.live{background:rgba(229,72,77,.22);color:#ffb4b6}.st.fin{background:rgba(255,255,255,.14)}
+.info{font-size:15px;color:#cfd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.info b{color:#fff}.info .m{color:#9aa3b5}
+.lg2{margin-top:12px;background:rgba(255,255,255,.055);border-radius:10px;padding:9px 12px}
+.mus{display:grid;grid-template-columns:repeat(2,1fr);gap:6px 28px;margin-top:7px}
+.mu{display:grid;grid-template-columns:1fr auto auto 12px auto auto 1fr;gap:6px;align-items:center;font-size:14px;font-variant-numeric:tabular-nums}
+.mu .c{font-size:10.5px;font-weight:700;color:#cfd5e1;background:rgba(255,255,255,.1);border-radius:5px;padding:1px 5px}
+.mu .n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#cfd5e1}.mu .n.r{text-align:right}
+.mu .p{font-weight:800}.mu .p.lo{color:#8b95a8;font-weight:600}.mu i{color:#5d6679;font-style:normal;text-align:center}
+.mu .w{color:#fff;font-weight:700}
+.foot{display:flex;gap:10px;margin-top:10px}
+.foot .col{flex:1;font-size:14px;color:#cfd5e1}.foot b{color:#fff}
+"""
+
+
+def slot_card_html(mode, slot, rows_info, live, foot=None, title=""):
+    """mode: PRE-GAME / HALF-TIME / FULL-TIME. rows_info: per event a short HTML fantasy line."""
+    import html as H
+    rows = []
+    for e, info in zip(slot, rows_info):
+        away, home = teams_of(e)
+        a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+        stt = game_status(e)
+        cls = "fin" if stt.startswith("FINAL") else ("" if e["status"]["type"].get("state") == "pre" else "live")
+        if mode == "PRE-GAME":
+            mid = (f"<span class='rc'>{H.escape(record_of(away) or '')}</span><span class='d'>@</span>"
+                   f"<span class='rc'>{H.escape(record_of(home) or '')}</span>")
+        else:
+            mid = (f"<span class='s{' lo' if a_s < h_s else ''}'>{a_s}</span><span class='d'>–</span>"
+                   f"<span class='s{' lo' if h_s < a_s else ''}'>{h_s}</span>")
+        rows.append(f"<div class='grow'><div class='gm'><img src='{H.escape(away['team'].get('logo', ''))}'>"
+                    f"<span class='ab'>{away['team']['abbreviation']}</span>{mid}"
+                    f"<span class='ab r'>{home['team']['abbreviation']}</span>"
+                    f"<img src='{H.escape(home['team'].get('logo', ''))}'></div>"
+                    f"<div class='st {cls}'>{H.escape(stt)}</div><div class='info'>{info}</div></div>")
+
+    lg = ""
+    if live and live["pairs"]:
+        league = CONFIG["nfl"].get("league_name", "League")
+        teams = {sl_team(t["team"]["abbreviation"]) for e in slot for t in teams_of(e)}
+        players = sleeper_players()
+        cells = []
+        for ra, rb in live["pairs"]:
+            A, B = live["rosters"][ra], live["rosters"][rb]
+            if mode == "PRE-GAME":
+                la = sum(1 for p in A["starters"] if (players.get(p) or {}).get("team") in teams)
+                lb = sum(1 for p in B["starters"] if (players.get(p) or {}).get("team") in teams)
+                cells.append(f"<div class='mu'><span class='n'>{H.escape(A['manager'])}</span>"
+                             f"<span class='c'>{la}</span><span class='p'>{A['points']:.1f}</span><i>·</i>"
+                             f"<span class='p'>{B['points']:.1f}</span><span class='c'>{lb}</span>"
+                             f"<span class='n r'>{H.escape(B['manager'])}</span></div>")
+            else:
+                aw = A["points"] >= B["points"]
+                cells.append(f"<div class='mu'><span class='n{' w' if aw else ''}'>{H.escape(A['manager'])}</span><span></span>"
+                             f"<span class='p{'' if aw else ' lo'}'>{A['points']:.1f}</span><i>·</i>"
+                             f"<span class='p{' lo' if aw else ''}'>{B['points']:.1f}</span><span></span>"
+                             f"<span class='n r{'' if aw else ' w'}'>{H.escape(B['manager'])}</span></div>")
+        head = (f"{H.escape(league.upper())} · WEEK {live['week']} MATCHUPS"
+                + (" · LIVE" if mode == "HALF-TIME" else (" · POINTS SO FAR  ·  BADGE = STARTERS IN THIS SLATE" if mode == "PRE-GAME" else "")))
+        lg = f"<div class='lg2'><div class='ch'>{head}</div><div class='mus'>{''.join(cells)}</div></div>"
+
+    foot_html = ""
+    if foot:
+        foot_html = "<div class='foot'>" + "".join(f"<div class='col'><div class='ch'>{H.escape(k)}</div>{v}</div>"
+                                                   for k, v in foot) + "</div>"
+    n = len(slot)
+    pairs = len(live["pairs"]) if live else 0
+    mu_rows = (pairs + 1) // 2
+    height = 70 + n * 58 + (44 + mu_rows * 26 if lg else 0) + (80 if foot else 0) - 4
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL{' · WEEK ' + str(live['week']) if live else ''}"
+            f" · {H.escape(title.upper())}</div><div class='pill'>{mode}</div></div>"
+            f"<div class='rows'>{''.join(rows)}</div>{lg}{foot_html}")
+    html_text = (f"<!doctype html><html><head><meta charset='utf-8'>"
+                 f"<link href='https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800;900&display=swap' rel='stylesheet'>"
+                 f"<style>{NFL_CSS}{SLOT_CSS}body,.card{{height:{height}px}}</style></head><body>"
+                 f"<div class='card' style='--a:#5b7bd5;--h:#d50a0a'><div class='bg'></div>"
+                 f"<div class='in'>{body}</div></div></body></html>")
+    return html_text, height
+
+
+def slot_title(slot):
+    k = parse_time(slot[0]["date"]).astimezone(UK)
+    return f"{k.strftime('%A')} {k.strftime('%H:%M')} slate"
+
+
+def best_line(e, live, summary=None):
+    """One fantasy line for a game: best league-rostered player so far (Sleeper points), with owner."""
+    import html as H
+    away, home = teams_of(e)
+    teams = {sl_team(away["team"]["abbreviation"]), sl_team(home["team"]["abbreviation"])}
+    if live:
+        ps = sorted(slot_players(live, teams), key=lambda p: -p["pts"])
+        if ps and ps[0]["pts"] > 0:
+            p = ps[0]
+            return (f"⭐ <b>{H.escape(p['name'])}</b> {p['pts']:.1f} <span class='m'>· {H.escape(p['manager'])}"
+                    f"{'' if p['starting'] else ' (bench)'}</span>")
+    if summary:
+        ff = nfl_fantasy(summary)
+        if ff:
+            p = ff[0]
+            o = league_owner(p.get("id"), p["name"])
+            return (f"⭐ <b>{H.escape(p['name'])}</b> {fmt_pts(p['pts'])} <span class='m'>· "
+                    f"{H.escape(o['manager']) if o else 'unrostered'}</span>")
+    return "<span class='m'>No fantasy points yet</span>"
+
+
+def pre_line(e, live):
+    import html as H
+    away, home = teams_of(e)
+    teams = {sl_team(away["team"]["abbreviation"]), sl_team(home["team"]["abbreviation"])}
+    odds = ""
+    try:
+        o = (e["competitions"][0].get("odds") or [{}])[0]
+        odds = o.get("details") or ""
+    except (IndexError, AttributeError):
+        pass
+    starters = [p for p in slot_players(live, teams) if p["starting"]] if live else []
+    starters.sort(key=lambda p: p["pos"] == "DEF")
+    names = ", ".join(H.escape(p["name"] if p["pos"] == "DEF" else short_name(p["name"])) for p in starters[:4]) + ("…" if len(starters) > 4 else "")
+    s = f"<span class='m'>{H.escape(odds)}</span>" if odds else ""
+    if starters:
+        s += f"{' · ' if s else ''}<b>{len(starters)}</b> <span class='m'>starters:</span> {names}"
+    return s or "<span class='m'>No league starters</span>"
+
+
+def post_slot(mode, slot, live):
+    title = slot_title(slot)
+    if mode == "PRE-GAME":
+        infos = [pre_line(e, live) for e in slot]
+        foot = None
+    else:
+        infos, sums = [], []
+        for e in slot:
+            try:
+                summ = fetch(f"football/nfl/summary?event={e['id']}")
+            except Exception:  # noqa: BLE001
+                summ = None
+            sums.append(summ)
+            infos.append(best_line(e, live, summ))
+        foot = None
+        if mode == "FULL-TIME" and live:
+            import html as H
+            teams = {sl_team(t["team"]["abbreviation"]) for e in slot for t in teams_of(e)}
+            ps = slot_players(live, teams)
+            mvp = max(ps, key=lambda p: p["pts"], default=None)
+            bench = max((p for p in ps if not p["starting"]), key=lambda p: p["pts"], default=None)
+            foot = []
+            if mvp and mvp["pts"] > 0:
+                foot.append(("SLATE MVP", f"<b>{H.escape(mvp['name'])}</b> {mvp['pts']:.1f} fpts · {H.escape(mvp['manager'])}"))
+            if bench and bench["pts"] >= 10:
+                foot.append(("BENCH BLUNDER", f"<b>{H.escape(bench['name'])}</b> {bench['pts']:.1f} fpts left on "
+                                              f"{H.escape(bench['manager'])}'s bench"))
+            foot = foot or None
+    html_text, height = slot_card_html(mode, slot, infos, live, foot, title)
+    png = render_png(html_text, 880, height)
+    emoji = {"PRE-GAME": "🏈", "HALF-TIME": "⏸️", "FULL-TIME": "🏁"}[mode]
+    content = f"{emoji} **{mode}** · {title} · {len(slot)} games"
+    lines = []
+    if live and live["pairs"] and mode != "PRE-GAME":
+        diffs = []
+        for ra, rb in live["pairs"]:
+            A, B = live["rosters"][ra], live["rosters"][rb]
+            diffs.append((abs(A["points"] - B["points"]), A, B))
+        close = min(diffs, key=lambda d: d[0])
+        lines.append(f"🔥 Closest matchup: **{close[1]['manager']}** {close[1]['points']:.1f} – "
+                     f"{close[2]['points']:.1f} **{close[2]['manager']}**")
+    if not png:
+        for e in slot:
+            away, home = teams_of(e)
+            lines.append(f"{away['team']['abbreviation']} {away.get('score', '')} – {home.get('score', '')} "
+                         f"{home['team']['abbreviation']} ({game_status(e)})")
+    embed = {"color": 0x013369, "author": {"name": f"NFL · {title}", "icon_url": NFL_LOGO}}
+    if lines:
+        embed["description"] = "\n".join(lines)
+    if png:
+        embed["image"] = {"url": "attachment://slate.png"}
+    return discord(NFL_HOOK, embed, f"NFL slate {mode}", content=content, files={"slate.png": png} if png else None)
+
+
+def passed_half(e):
+    t = e["status"]["type"]
+    return t.get("state") == "post" or t.get("name") == "STATUS_HALFTIME" or e["status"].get("period", 0) >= 3
+
+
+def nfl_slot(slot, st, force=False):
+    """Handle a group of games kicking off together. Returns True when fast polling is needed."""
+    key = slot[0]["date"]
+    s = st.setdefault("nfl_slots", {}).setdefault(key, {"date": key[:10]})
+    for e in slot:                      # keep per-game state so single-game logic never double-posts
+        st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})["final"] = True
+    age = (now_utc() - parse_time(key)).total_seconds() / 3600
+    if age > STALE_HOURS and not force:
+        s.update(pre=True, half=True, ft=True)
+        return False
+    states = [e["status"]["type"]["state"] for e in slot]
+    live = None
+
+    def L():
+        nonlocal live
+        if live is None:
+            live = league_live("nfl") or {}
+        return live or None
+
+    if not s.get("pre"):
+        if force or (-0.8 <= age < -0.03 and all(x == "pre" for x in states)):
+            if post_slot("PRE-GAME", slot, L()):
+                s["pre"] = True
+        elif age >= -0.03:
+            s["pre"] = True
+    done = all(e["status"]["type"].get("completed") or e["status"]["type"]["state"] == "post" for e in slot)
+    if not s.get("half") and not done and all(x != "pre" for x in states) and all(passed_half(e) for e in slot):
+        if post_slot("HALF-TIME", slot, L()):
+            s["half"] = True
+    if not s.get("ft") and done:
+        if post_slot("FULL-TIME", slot, L()):
+            s.update(ft=True, half=True)
+    return any(x == "in" for x in states) or -0.8 <= age < 0.2
 
 
 # ===================================================================== main

@@ -2,6 +2,8 @@
   "nfl": {
     "standard_window_note": "Games kicking off Sunday 18:00-23:59 UK time get FT score + fantasy only. Every other game is 'prime time' and also gets live touchdown posts.",
     "standard_window": { "weekday": "Sunday", "start_hour_uk": 18, "end_hour_uk": 24 },
+    "slot_note": "Games kicking off within this many minutes of each other are grouped: one pre-game, one half-time and one full-time graphic for the whole slate.",
+    "slot_minutes": 30,
 
     "scoring_note": "Fantasy points use the Sleeper league's own scoring settings, read live each run. fallback_scoring is only used if Sleeper can't be reached.",
     "league_name": "Rickth21 League",
