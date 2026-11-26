@@ -56,7 +56,8 @@
     "trades": {
       "enabled": true,
       "mention_role_id": "1410731373425197250"
-    }
+    },
+    "season_high_min": 20
   },
   "nba": {
     "batch_note": "-1 = one post per game as soon as it finishes. Set e.g. 60 to group games that tip off within 60 minutes of each other into one post.",
@@ -97,7 +98,8 @@
     "trades": {
       "enabled": true,
       "mention_role_id": ""
-    }
+    },
+    "season_high_min": 40
   },
   "spoiler_delay_seconds": 60,
   "live_poll_seconds": 15

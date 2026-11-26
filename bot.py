@@ -906,7 +906,7 @@ def nba_players(summary):
                 tag = " · triple-double" if doubles >= 3 else ""
                 elite = (fp >= cfg["elite_threshold"] or pts >= cfg["always_flag_points"]
                          or (cfg["always_flag_triple_double"] and doubles >= 3))
-                out.append({"name": a["athlete"]["displayName"], "team": abbr, "fp": fp,
+                out.append({"name": a["athlete"]["displayName"], "team": abbr, "fp": fp, "eid": str(a["athlete"].get("id") or ""),
                             "raw": {"pts": int(pts), "reb": int(reb), "ast": int(ast), "stl": int(stl),
                                     "blk": int(blk), "tpm": int(tpm)},
                             "line": " · ".join(parts) + tag + f" · **{fmt_pts(fp)} fpts**",
@@ -6312,6 +6312,250 @@ def nba_batch_html(mode, events, summaries, live, title):
         ".tpr{grid-template-columns:28px 250px 64px 128px 300px 1fr!important}"
         ".tpr .ow5{display:flex;align-items:center;gap:8px;min-width:0}.tpr .ow5 em{flex:none}"
         ".tpr .ln5{font-size:14px!important}</style>", 1)
+
+
+
+# ------------------------------------------------ season highs: 40+ fantasy points AND the player's best game of the season
+
+SEASON_HIGH_MIN = None          # set a number here only to override both sports (e.g. for a mock-up)
+
+
+def season_high_min(sport):
+    """Minimum fantasy points for the season-high effect: NFL 20+, NBA 40+ (config <sport>.season_high_min)."""
+    if SEASON_HIGH_MIN is not None:
+        return float(SEASON_HIGH_MIN)
+    return float((CONFIG.get(sport) or {}).get("season_high_min", 20 if sport == "nfl" else 40))
+_SH_WEEKS = {}
+_SH_NBA = {}
+
+
+def nfl_week_points(week):
+    """Every NFL player's fantasy points for one week, in the league's scoring (from Sleeper's stats)."""
+    if week in _SH_WEEKS:
+        return _SH_WEEKS[week]
+    out = {}
+    try:
+        season = fetch_url(f"{SLEEPER}/state/nfl").get("season")
+        sc = dict(league_scoring("nfl"))
+        for pid, st in (fetch_url(f"{SLEEPER}/stats/nfl/regular/{season}/{week}") or {}).items():
+            if isinstance(st, dict) and not pid.isalpha():
+                out[pid] = sum(float(v or 0) * float(sc[k]) for k, v in st.items()
+                               if k in sc and isinstance(v, (int, float)))
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"season-high data unavailable for week {week}: {e}")
+    _SH_WEEKS[week] = out
+    return out
+
+
+def _nfl_sleeper_pid(row):
+    ix = _player_index("nfl")
+    rid = str(row.get("id") or "")
+    pid = ix["espn"].get(rid) if rid else None
+    if not pid:
+        team = sl_team(row.get("team") or "")
+        pid = ix["name_team"].get((name_key(row.get("name", "")), team))
+    if not pid:
+        c = ix["name"].get(name_key(row.get("name", "")), [])
+        pid = c[0] if len(c) == 1 else None
+    return pid
+
+
+def prev_season_best(sport, row, event=None):
+    """The player's best fantasy game this season BEFORE this one, or None if unknown."""
+    try:
+        if sport == "nfl":
+            pid = _nfl_sleeper_pid(row)
+            if not pid:
+                return None
+            week = int(fetch_url(f"{SLEEPER}/state/nfl").get("week") or 1)
+            vals = [nfl_week_points(w).get(pid) for w in range(1, week)]
+            vals = [v for v in vals if v is not None]
+            return max(vals) if vals else 0.0
+        eid = str(row.get("eid") or "")
+        if not eid:
+            return None
+        if eid not in _SH_NBA:
+            g = fetch_url(f"https://site.web.api.espn.com/apis/common/v3/sports/basketball/nba/athletes/{eid}/gamelog")
+            names = g.get("names") or g.get("labels") or []
+            games = {}
+            st = next((x for x in g.get("seasonTypes") or [] if "Regular" in (x.get("displayName") or "")), None)
+            for cat in (st or {}).get("categories") or []:
+                for ev in cat.get("events") or []:
+                    games[ev["eventId"]] = dict(zip(names, ev.get("stats") or []))
+            _SH_NBA[eid] = games
+        sc = league_scoring("nba")
+        v = lambda k: float(sc.get(k) or 0)  # noqa: E731
+        best = 0.0
+        for gid, s_ in _SH_NBA[eid].items():
+            if event is not None and str(gid) == str(event.get("id")):
+                continue
+            n = lambda k: num(str(s_.get(k, "0")).split("-")[0])  # noqa: E731
+            pts, reb, ast, stl, blk, tov, tpm = (n("points") or n("PTS"), n("rebounds") or n("REB"), n("assists") or n("AST"),
+                                                 n("steals") or n("STL"), n("blocks") or n("BLK"),
+                                                 n("turnovers") or n("TO"), n("threePointFieldGoalsMade-threePointFieldGoalsAttempted") or n("3PT"))
+            doubles = sum(1 for x in (pts, reb, ast, stl, blk) if x >= 10)
+            fp = pts * v("pts") + reb * v("reb") + ast * v("ast") + stl * v("stl") + blk * v("blk") + tov * v("to") + tpm * v("tpm")
+            fp += v("dd") if doubles >= 2 else 0
+            fp += v("td") if doubles >= 3 else 0
+            fp += v("qd") if doubles >= 4 else 0
+            fp += (v("bonus_pt_40p") if pts >= 40 else 0) + (v("bonus_pt_50p") if pts >= 50 else 0)
+            fp += (v("bonus_reb_20p") if reb >= 20 else 0) + (v("bonus_ast_15p") if ast >= 15 else 0)
+            best = max(best, fp)
+        return best
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"season best unavailable for {row.get('name')}: {e}")
+        return None
+
+
+def season_highs(sport, rows, event=None, key="fp"):
+    """{player name: previous best} for every player in `rows` who just set a 40+ season high."""
+    out = {}
+    for r in rows or []:
+        pts = float(r.get(key) or 0)
+        if pts < season_high_min(sport) or str(r.get("id", "")).startswith("def:"):
+            continue
+        prev = prev_season_best(sport, r, event)
+        if prev is not None and pts > prev:
+            out[r["name"]] = prev
+    return out
+
+
+SH_CSS = """
+.pp5.sh{position:relative;overflow:visible!important;isolation:isolate;margin-top:10px;padding-top:20px!important;
+ background:linear-gradient(100deg,rgba(255,94,0,.42),rgba(255,184,40,.26) 42%,rgba(255,61,0,.36))!important;
+ box-shadow:0 0 0 2px #ffb000,0 0 26px rgba(255,140,0,.75)!important}
+.pp5 .shr{left:96px}
+.pr2.sh,.tpr.sh{position:relative;overflow:visible!important;
+ background:linear-gradient(100deg,rgba(255,94,0,.42),rgba(255,184,40,.26) 42%,rgba(255,61,0,.36))!important;
+ box-shadow:0 0 0 2px #ffb000,0 0 26px rgba(255,140,0,.75),inset 6px 0 0 #ff5e00!important}
+.pr2.sh,.tpr.sh{isolation:isolate}
+.pr2.sh::before,.tpr.sh::before{content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:.9;z-index:-1;
+ background-image:radial-gradient(circle,#ffe066 1.6px,transparent 2.2px),radial-gradient(circle,#ff6b6b 1.6px,transparent 2.2px),
+ radial-gradient(circle,#7ee2a8 1.4px,transparent 2px),radial-gradient(circle,#8ab4ff 1.4px,transparent 2px),
+ radial-gradient(circle,#ffffff 1.2px,transparent 1.8px);
+ background-size:37px 29px,53px 41px,61px 23px,43px 47px,29px 31px;background-position:0 0,11px 7px,23px 13px,5px 19px,17px 3px;
+ -webkit-mask-image:linear-gradient(180deg,#000 0,#000 16%,transparent 30%,transparent 70%,#000 84%,#000 100%)}
+.pr2.sh .fp{background:linear-gradient(160deg,#fff1a8,#ffb000 45%,#ff5e00)!important;color:#1b0a00!important;
+ box-shadow:0 0 22px rgba(255,140,0,.95)!important}
+.pr2.sh .fp i{color:#1b0a00!important}
+.tpr.sh .fp5{background:linear-gradient(90deg,#fff1a8,#ffb000,#ff5e00)!important;box-shadow:0 0 16px rgba(255,140,0,.9)}
+.shr{position:absolute;top:-13px;left:64px;z-index:5;white-space:nowrap;font-size:13px;font-weight:900;letter-spacing:1.3px;
+ color:#1b0a00;padding:3px 12px;border-radius:999px;background:linear-gradient(90deg,#ff3d00,#ff9100,#ffd600);
+ box-shadow:0 0 16px rgba(255,110,0,.9),0 0 0 2px rgba(255,255,255,.35)}
+.shr em{font-style:normal;font-weight:800;opacity:.85;margin-left:6px}
+.tpr .shr{left:44px;top:-12px;font-size:11.5px}
+.pr2.sh,.tpr.sh{margin-top:8px}
+.card.shc .in{z-index:2}
+.card.shc::after{content:'';position:absolute;left:0;right:0;top:0;height:260px;pointer-events:none;opacity:.45;z-index:1;
+ background-image:radial-gradient(circle,#ffd166 2px,transparent 2.6px),radial-gradient(circle,#ff6b6b 2px,transparent 2.6px),
+ radial-gradient(circle,#7ee2a8 1.8px,transparent 2.4px),radial-gradient(circle,#8ab4ff 1.8px,transparent 2.4px);
+ background-size:71px 53px,97px 61px,83px 47px,59px 67px;background-position:0 0,31px 17px,13px 29px,47px 7px;
+ -webkit-mask-image:linear-gradient(180deg,#000,transparent)}
+"""
+
+
+def _mark_season_highs(html_text, highs, name_tag, row_cls):
+    """Light up each season-high row: fire/confetti styling + a SEASON HIGH ribbon with the old best."""
+    import html as H
+    if not highs:
+        return html_text
+    for name, prev in highs.items():
+        i = html_text.find(f"{name_tag}{H.escape(name)}")
+        if i < 0:
+            continue
+        j = html_text.rfind(f"<div class='{row_cls}", 0, i)
+        if j < 0:
+            continue
+        k = html_text.find(">", j)
+        opening = html_text[j:k]
+        new_open = opening.replace(f"class='{row_cls}", f"class='{row_cls} sh", 1)
+        ribbon = f"<span class='shr'>🔥 SEASON HIGH<em>old best {prev:.1f}</em></span>"
+        html_text = html_text[:j] + new_open + ">" + ribbon + html_text[k + 1:]
+    html_text = html_text.replace("<div class='card'", "<div class='card shc'", 1)
+    _SH_HEAD.update(highs)
+    return html_text.replace("</style>", SH_CSS + "</style>", 1)
+
+
+_SH_HEAD = {}
+
+
+_nfl_game_html_nosh = nfl_game_fantasy_html
+
+
+def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=30):
+    h = _nfl_game_html_nosh(event, summary, live, ol, base, max_rows)
+    try:
+        rows = [r for r in nfl_fantasy(summary)]
+        h = _mark_season_highs(h, season_highs("nfl", rows, event, key="pts"), "<div class='nm2'>", "pr2")
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"season highs skipped: {e}")
+    return h
+
+
+_nba_game_html_nosh = nba_game_fantasy_html
+
+
+def nba_game_fantasy_html(event, summary, live, max_rows=7):
+    h = _nba_game_html_nosh(event, summary, live, max_rows)
+    try:
+        h = _mark_season_highs(h, season_highs("nba", nba_league_rows(summary), event), "<div class='nm2'>", "pr2")
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"season highs skipped: {e}")
+    return h
+
+
+_nba_batch_html_nosh = nba_batch_html
+
+
+def nba_batch_html(mode, events, summaries, live, title):
+    h = _nba_batch_html_nosh(mode, events, summaries, live, title)
+    try:
+        highs = {}
+        for e, summ in zip(events, summaries):
+            if summ:
+                top3 = [r for r in nba_league_rows(summ) if r["owner"]][:3]
+                highs.update(season_highs("nba", top3, e))
+        h = _mark_season_highs(h, highs, "<span class='nm5'>", "tpr")
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"season highs skipped: {e}")
+    return h
+
+
+_post_card_nosh = _post_card
+
+
+def _post_card(hook, html_text, content, embed, name):
+    """Headline gets a 🔥 SEASON HIGH call-out when it names a player who just set one."""
+    try:
+        for nm in list(_SH_HEAD):
+            for k in ("img_title", "title"):
+                t = embed.get(k)
+                if t and nm in t and "SEASON HIGH" not in t:
+                    embed[k] = f"🔥 SEASON HIGH! {t}"
+    finally:
+        _SH_HEAD.clear()
+    return _post_card_nosh(hook, html_text, content, embed, name)
+
+
+
+_nfl_td_html_nosh = nfl_td_fantasy_html
+
+
+def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
+    """Touchdown card: the scorer (or passer) lights up when this score takes him to a 40+ season high."""
+    h = _nfl_td_html_nosh(event, play, summary, live, ol, base, *a, **k)
+    try:
+        td = td_parse(play)
+        rows = []
+        for nm in (td.get("scorer"), td.get("qb")):
+            now = player_now(summary, nm) if nm else None
+            if now is not None and now >= season_high_min("nfl"):
+                pid = boxscore_id(summary, nm)
+                rows.append({"name": nm, "id": pid, "team": play["team"]["abbreviation"], "fp": now})
+        h = _mark_season_highs(h, season_highs("nfl", rows, event), "<div class='nm'>", "pp5")
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"season highs skipped: {e}")
+    return h
 
 
 # ===================================================================== main
