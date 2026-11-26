@@ -155,8 +155,20 @@ def discord(hook, embed, label="", content=None, files=None):
             if em.get("footer"):
                 print(f"({em['footer']['text']})")
         return True
+    kind = (next(iter(files)) if files else (label or "post")).rsplit(".", 1)[0]
+    main_chan = hook in (NFL_HOOK, NBA_HOOK) and hook != globals().get("ALERT_HOOK")
+    if main_chan and CONFIG.get("paused"):
+        _HELD[kind] = _HELD.get(kind, 0) + 1                    # held: the caller simply tries again later
+        return False
+    tm = CONFIG.get("test_mode") or {}
+    if main_chan and tm.get("enabled") and kind in (tm.get("kinds") or []) and globals().get("ALERT_HOOK"):
+        hook = ALERT_HOOK                                        # try a feature in #rick-only before everyone sees it
+        content = "🧪 **TEST MODE** · this would have gone to the main channel" + (f"\n{content}" if content else "")
     who = CONFIG.get("bot") or {}
     payload = {"username": _POSTER.get("name") or who.get("name", "Donald Claude"), "embeds": embeds[:10]}
+    sh = CONFIG.get("silent_hours_uk") or [0, 8]
+    if main_chan and hook != globals().get("ALERT_HOOK") and sh and sh[0] <= datetime.now(UK).hour < sh[1]:
+        payload["flags"] = 4096                                  # overnight: in the channel, but no phone notification
     if who.get("avatar_url"):
         payload["avatar_url"] = who["avatar_url"]
     if content:
@@ -191,6 +203,9 @@ def discord(hook, embed, label="", content=None, files=None):
                     _LAST_MSG.update({"id": m.get("id"), "channel_id": m.get("channel_id")})
                 except Exception:  # noqa: BLE001
                     pass
+                _POSTLOG.append({"t": round(time.time()), "kind": kind,
+                                 "where": "nfl" if hook == NFL_HOOK else ("nba" if hook == NBA_HOOK else "alert")})
+                del _POSTLOG[:-600]
                 if timed:
                     _UPLOAD_SECS.append(time.time() - _t_up)
                     del _UPLOAD_SECS[:-10]
@@ -3531,6 +3546,8 @@ PREP_SECONDS = 30                    # animated cards take ~15-25s to build
 _SEND_AT = {"t": None, "t0": None, "label": ""}      # target send time for the post being built right now
 _NEXT_WAKE = {"t": None}                              # earliest upcoming "start building" time (main loop wakes for it)
 _TIMING = []                                          # (label, moment, sent) for the last posts, saved to state
+_POSTLOG = []                                         # every successful post (time, kind, channel) for the daily report
+_HELD = {}                                            # posts held back while paused
 _ANIM_CHECK = {}
 
 
@@ -7166,6 +7183,527 @@ def maybe_daily_race(st):
     except Exception as ex:  # noqa: BLE001
         _log_plain(f"self-test failed to run: {ex}")
     return _maybe_daily_race_st(st)
+
+
+
+# ------------------------------------------------ quality of life: live switches, catch-up, live scoreboard, corrections, report
+
+# ---- pause / test mode switches, re-read from GitHub every 2 minutes (no restart needed)
+_LIVE_CFG = {"t": 0.0, "paused": None}
+
+
+def refresh_switches():
+    """Pick up "paused" and "test_mode" from config.json on GitHub (edit it there; takes effect within ~2 minutes)."""
+    if time.time() - _LIVE_CFG["t"] < 120 or os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    _LIVE_CFG["t"] = time.time()
+    import subprocess
+    try:
+        subprocess.run(["git", "fetch", "-q", "origin", "main"], cwd=ROOT, capture_output=True, timeout=30)
+        txt = subprocess.run(["git", "show", "origin/main:config.json"], cwd=ROOT, capture_output=True, text=True,
+                             timeout=15).stdout
+        fresh = json.loads(txt)
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"switch refresh skipped: {e}")
+        return
+    was = bool(CONFIG.get("paused"))
+    CONFIG["paused"] = bool(fresh.get("paused"))
+    CONFIG["test_mode"] = fresh.get("test_mode") or {}
+    if CONFIG["paused"] != was:
+        held = sum(_HELD.values())
+        _ALERTED.pop("pause", None)
+        alert("⏸️ Posting PAUSED: nothing goes to the main channel until you switch it back" if CONFIG["paused"] else
+              f"▶️ Posting RESUMED · {held} held post{'s' if held != 1 else ''} going out now", "pause", 0)
+        if not CONFIG["paused"]:
+            _HELD.clear()
+
+
+def _avatar_or_head(url):
+    import html as H
+    return f"<img src='{H.escape(url or '')}'>"
+
+
+# ---- 2) morning catch-up (09:00 UK): everything that finished overnight
+CUP_CSS = """
+.cg{display:grid;grid-template-columns:1fr 1.15fr;gap:16px;margin-top:12px}
+.sec2{font-size:12.5px;letter-spacing:2px;color:#9aa3b5;font-weight:900;margin-bottom:8px}
+.cts{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.ct{display:grid;grid-template-columns:30px 1fr 10px 1fr 30px;align-items:center;gap:4px;background:rgba(255,255,255,.06);border-radius:10px;padding:8px}
+.ct img{width:30px;height:30px;object-fit:contain}.ct b{font-size:20px;font-weight:900;text-align:center}.ct b.lo{color:#8b95a8}.ct i{color:#6f7788;font-style:normal}
+.cr{display:grid;grid-template-columns:46px 1fr 78px 140px;align-items:center;gap:10px;background:rgba(255,255,255,.06);border-radius:10px;padding:6px 10px;margin-bottom:6px}
+.cr img{width:46px;height:46px;border-radius:50%;object-fit:cover;object-position:top;background:#1d2436}
+.cr b{display:block;font-size:17px;font-weight:900}.cr small{font-size:13px;color:#aab3c5;font-weight:700}
+.cr .fp{font-size:22px;font-weight:900;text-align:center;background:linear-gradient(160deg,#ffe08a,#f5b942);color:#1b1305;border-radius:8px;padding:3px 0}
+.cr em{font-style:normal;font-size:11px;font-weight:900;letter-spacing:1px;color:#ffb000}
+.cr.sh{box-shadow:0 0 0 2px #ffb000,0 0 18px rgba(255,140,0,.5)}
+.mg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.mg div{background:rgba(255,255,255,.06);border-radius:10px;padding:10px 12px}.mg small{font-size:11.5px;letter-spacing:1.5px;color:#9aa3b5;font-weight:900}
+.mg b{display:block;font-size:19px;font-weight:900;margin-top:4px}
+"""
+
+
+def overnight_games(sport):
+    """Finished games that tipped / kicked off between 21:00 last night and 06:00 this morning (UK)."""
+    now = datetime.now(UK)
+    lo = (now - timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0)
+    hi = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    out = []
+    days = {(now - timedelta(days=1)).astimezone(ET).strftime("%Y%m%d"), now.astimezone(ET).strftime("%Y%m%d"),
+            (now - timedelta(days=1)).strftime("%Y%m%d"), now.strftime("%Y%m%d")}
+    path = "football/nfl/scoreboard?dates=" if sport == "nfl" else "basketball/nba/scoreboard?dates="
+    seen = set()
+    for d in sorted(days):
+        for e in fetch(path + d).get("events", []):
+            if e["id"] in seen:
+                continue
+            seen.add(e["id"])
+            if e["status"]["type"].get("completed") and lo <= parse_time(e["date"]).astimezone(UK) < hi:
+                out.append(e)
+    return sorted(out, key=lambda e: e["date"])
+
+
+def catchup_html(sport, events):
+    import html as H
+    rows = []
+    for e in events:
+        summ = fetch(f"{'football/nfl' if sport == 'nfl' else 'basketball/nba'}/summary?event={e['id']}")
+        if sport == "nba":
+            for r in nba_league_rows(summ):
+                rows.append(dict(r, _e=e, _pts=r["fp"], _img=r.get("hs")))
+        else:
+            for p in nfl_fantasy(summ):
+                o = league_owner(p.get("id"), p["name"])
+                rows.append(dict(p, owner=o["manager"] if o else None, starting=bool(o and o["starting"]), _e=e,
+                                 _pts=p["pts"], _img=nfl_headshot(p.get("id"))))
+    owned = sorted([r for r in rows if r.get("owner")], key=lambda r: -r["_pts"])
+    if not owned:
+        return None, None
+    highs = {}
+    for r in owned[:8]:
+        r2 = dict(r, fp=r["_pts"])
+        highs.update(season_highs(sport, [r2], r["_e"]))
+    night = {}
+    for r in owned:
+        if r["starting"]:
+            night[r["owner"]] = night.get(r["owner"], 0) + r["_pts"]
+    tiles = "".join(
+        f"<div class='ct'><img src='{H.escape(a['team'].get('logo', ''))}'><b class='{'lo' if int(num(a.get('score'))) < int(num(h.get('score'))) else ''}'>"
+        f"{a.get('score')}</b><i>–</i><b class='{'lo' if int(num(h.get('score'))) < int(num(a.get('score'))) else ''}'>{h.get('score')}</b>"
+        f"<img src='{H.escape(h['team'].get('logo', ''))}'></div>" for e in events for a, h in [teams_of(e)])
+    tops = "".join(
+        f"<div class='cr{' sh' if r['name'] in highs else ''}'>{_avatar_or_head(r.get('_img'))}<div><b>{H.escape(r['name'])}</b>"
+        f"<small>{H.escape(r['owner'])} · {'starting' if r['starting'] else 'bench'}</small></div>"
+        f"<span class='fp'>{fmt_pts(r['_pts'])}</span><em>{'🔥 SEASON HIGH' if r['name'] in highs else ''}</em></div>"
+        for r in owned[:6])
+    best = max(night, key=night.get) if night else None
+    quiet = min(night, key=night.get) if night else None
+    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
+    league = CONFIG[sport].get("league_name", "League")
+    n = len(events)
+    head = f"🌙 While you were asleep: {n} game{'s' if n != 1 else ''}" + (f", {len(highs)} season high{'s' if len(highs) != 1 else ''}" if highs else "")
+    mgr = ""
+    if best:
+        mgr = (f"<div class='mg'><div><small>🏆 BEST NIGHT</small><b>{H.escape(best)} · {night[best]:.1f}</b></div>"
+               + (f"<div><small>🥶 QUIET NIGHT</small><b>{H.escape(quiet)} · {night[quiet]:.1f}</b></div>" if quiet != best else "<div></div>")
+               + "</div>")
+    body = (f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape(league.upper())} · OVERNIGHT</div>"
+            f"<div class='pill'>🌙 WHILE YOU WERE ASLEEP</div></div>"
+            f"<div class='hl'><div class='h1'>{H.escape(head)}</div>"
+            f"<div class='h2'>Top of the night: <b>{H.escape(owned[0]['name'])}</b> {fmt_pts(owned[0]['_pts'])} for {H.escape(owned[0]['owner'])}</div></div>"
+            f"<div class='cg'><div><div class='sec2'>FINAL SCORES</div><div class='cts'>{tiles}</div>{mgr}</div>"
+            f"<div><div class='sec2'>TOP FANTASY PERFORMANCES</div>{tops}</div></div>")
+    html_text = _card("--a:#ee6730;--h:#ffb347" if sport == "nba" else "--a:#1faa59;--h:#5b7bd5", body, None,
+                      HL_CSS + CUP_CSS + "body,.card{width:1400px!important}", width=1400)
+    return (_nba_theme(html_text, None, "MORNING CATCH-UP") if sport == "nba" else html_text), head
+
+
+def maybe_catchup(st):
+    now = datetime.now(UK)
+    hour = int((CONFIG.get("catchup") or {}).get("hour_uk", 9))
+    if not (CONFIG.get("catchup") or {}).get("enabled", True) or not (hour <= now.hour < 12):
+        return
+    for sport in ("nfl", "nba"):
+        key = f"{sport}-{now:%Y-%m-%d}"
+        done = st.setdefault("catchups", [])
+        if key in done:
+            continue
+        try:
+            evs = overnight_games(sport)
+            html_text, head = catchup_html(sport, evs) if evs else (None, None)
+            if not html_text:
+                done.append(key)
+                continue
+            ok = (_nba_post(html_text, "🌙 **MORNING CATCH-UP**", {}, "catchup.png") if sport == "nba"
+                  else _post_card(NFL_HOOK, html_text, "🌙 **MORNING CATCH-UP**", {}, "catchup.png"))
+            if ok:
+                done.append(key)
+        except Exception as ex:  # noqa: BLE001
+            log(f"{sport} morning catch-up error: {ex}")
+        st["catchups"] = done[-30:]
+
+
+# ---- 3) live scoreboard: one message per game night, edited in place every 5 minutes
+LIVE_CSS = """
+.lms{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.lm{display:grid;grid-template-columns:1fr 76px 100px 76px 1fr;grid-template-rows:auto auto;align-items:center;gap:2px 10px;background:rgba(255,255,255,.06);border-radius:12px;padding:10px 14px}
+.lm b{font-size:18px;font-weight:900;color:#cfd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lm b.w{color:#fff}.lm b.r{text-align:right}
+.lm .p{font-size:24px;font-weight:900;text-align:center;font-variant-numeric:tabular-nums}
+.wb{height:10px;border-radius:5px;background:#3b4152;overflow:hidden}.wb i{display:block;height:10px;background:linear-gradient(90deg,#ffd166,#ee6730)}
+.lm small{grid-row:2;font-size:12.5px;font-weight:800;color:#aab3c5}.lm small:nth-of-type(1){grid-column:1}.lm small.r{grid-column:5;text-align:right}
+.lv{display:inline-block;background:#ff3d3d;color:#fff;font-weight:900;font-size:12px;letter-spacing:1.5px;padding:2px 8px;border-radius:5px;margin-right:8px}
+.lv.f{background:#4b5563}
+"""
+
+
+def live_board_html(sport, live, ol, final):
+    import html as H
+    rows = []
+    for ra, rb in live["pairs"]:
+        A, B = live["rosters"][ra], live["rosters"][rb]
+        wa = float((ol.get(ra) or {}).get("win", 50))
+        rows.append(
+            f"<div class='lm'><b class='{'w' if wa >= 50 else ''}'>{H.escape(A['manager'])}</b><span class='p'>{A['points']:.1f}</span>"
+            f"<div class='wb'><i style='width:{wa:.0f}%'></i></div><span class='p'>{B['points']:.1f}</span>"
+            f"<b class='r {'w' if wa < 50 else ''}'>{H.escape(B['manager'])}</b>"
+            f"<small>{wa:.0f}% to win</small><small class='r'>{100 - wa:.0f}%</small></div>")
+    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
+    stamp = datetime.now(UK).strftime("%H:%M")
+    pill = ("<span class='lv f'>FINAL</span>TONIGHT'S GAMES ARE DONE" if final else
+            f"<span class='lv'>● LIVE</span>UPDATED {stamp} · REFRESHES EVERY 5 MIN")
+    body = (f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape(CONFIG[sport].get('league_name', 'League').upper())}"
+            f" · WEEK {live['week']} MATCHUPS</div><div class='pill'>{pill}</div></div><div class='lms'>{''.join(rows)}</div>")
+    html_text = _card("--a:#ee6730;--h:#ffb347" if sport == "nba" else "--a:#1faa59;--h:#5b7bd5", body, None,
+                      LIVE_CSS + "body,.card{width:1300px!important}", width=1300)
+    return _nba_theme(html_text, None, "LIVE SCOREBOARD") if sport == "nba" else html_text
+
+
+def discord_edit(hook, message_id, png=None, name="live.png", content=None):
+    """Edit one of our own webhook messages: swap its image and/or text."""
+    payload = {}
+    if content is not None:
+        payload["content"] = content
+    if png:
+        payload["attachments"] = [{"id": 0, "filename": name}]
+    boundary = "----sportsbotedit" + str(int(time.time() * 1000))
+    parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n".encode()
+             + json.dumps(payload).encode() + b"\r\n"]
+    if png:
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"{name}\"\r\n"
+                     f"Content-Type: {'image/gif' if name.endswith('.gif') else 'image/png'}\r\n\r\n".encode() + png + b"\r\n")
+    body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+    req = urllib.request.Request(f"{hook}/messages/{message_id}", data=body, method="PATCH",
+                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                                          "User-Agent": "DiscordBot (sports-bot, 1.0)"})
+    try:
+        with urllib.request.urlopen(req, timeout=30):
+            return True
+    except urllib.error.HTTPError as e:
+        _log_plain(f"message edit failed ({e.code}): {e.read().decode()[:200]}")
+        return e.code == 404 and None
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"message edit failed: {e}")
+        return False
+
+
+def _games_live(sport):
+    """(any game live now, any game finished tonight, key for tonight's board)."""
+    if sport == "nfl":
+        evs = [e for e in fetch("football/nfl/scoreboard").get("events", []) if is_prime(parse_time(e["date"]))]
+        if any(e["status"]["type"]["state"] == "in" and not is_prime(parse_time(e["date"]))
+               for e in fetch("football/nfl/scoreboard").get("events", [])):
+            return False, False, None                     # Sunday window already has its 30-minute updates
+    else:
+        d = datetime.now(ET) - timedelta(hours=6)          # an NBA "night" runs into the early hours
+        evs = fetch(f"basketball/nba/scoreboard?dates={d:%Y%m%d}").get("events", [])
+    live_now = any(e["status"]["type"]["state"] == "in" for e in evs)
+    today = [e for e in evs if (now_utc() - parse_time(e["date"])).total_seconds() < 14 * 3600]
+    started = [e for e in today if e["status"]["type"]["state"] != "pre"]
+    all_done = bool(started) and all(e["status"]["type"]["state"] == "post" for e in today)
+    key = f"{sport}-{(datetime.now(ET) - timedelta(hours=6)):%Y-%m-%d}"
+    return live_now, all_done, key
+
+
+_BOARD_PENDING = {}
+
+
+def maybe_live_board(st):
+    """Post tonight's live scoreboard when the first game starts and edit it every 5 minutes; mark it FINAL at the end.
+    Spoiler-safe: each snapshot is only shown once it's spoiler_delay() seconds old."""
+    for sport in ("nfl", "nba"):
+        cfg = (CONFIG.get(sport) or {}).get("live_scoreboard") or {}
+        if not cfg.get("enabled", True):
+            continue
+        try:
+            live_now, done, key = _games_live(sport)
+            if not key:
+                continue
+            boards = st.setdefault("live_boards", {})
+            b = boards.get(key) or {}
+            pend = _BOARD_PENDING.get(key)
+            # 1) publish a waiting snapshot once it's old enough
+            if pend and time.time() < pend["t"] + spoiler_delay():
+                w = pend["t"] + spoiler_delay()
+                if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
+                    _NEXT_WAKE["t"] = w
+            if pend and time.time() >= pend["t"] + spoiler_delay():
+                hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
+                if b.get("msg"):
+                    r = discord_edit(hook, b["msg"], pend["png"])
+                    if r is None:
+                        boards.pop(key, None)
+                    elif r:
+                        b["final"] = pend["final"]
+                else:
+                    _LAST_MSG.clear()
+                    if sport == "nba":
+                        _POSTER["name"] = (CONFIG.get("nba") or {}).get("bot_name") or "Donald 🏀"
+                    try:
+                        ok = discord(hook, [], "live", files={"live.png": pend["png"]})
+                    finally:
+                        _POSTER.clear()
+                    if ok and _LAST_MSG.get("id"):
+                        boards[key] = {"msg": _LAST_MSG["id"], "t": pend["t"], "final": pend["final"]}
+                _BOARD_PENDING.pop(key, None)
+                continue
+            if pend:
+                continue
+            # 2) take a new snapshot every 5 minutes while games are on (and one last FINAL one)
+            need_final = bool(done) and b.get("msg") and not b.get("final")
+            if not live_now and not need_final:
+                continue
+            if b.get("t") and time.time() - b["t"] < 300 and not need_final:
+                continue
+            if sport == "nba":
+                live, ol, _ = nba_ctx(st)
+            else:
+                ctx = nfl_ctx(st, fetch("football/nfl/scoreboard").get("events", []))
+                live, ol = (ctx or {}).get("live"), (ctx or {}).get("ol")
+            if not live or not live.get("pairs") or not ol:
+                continue
+            png = render_card(live_board_html(sport, live, ol, bool(need_final)))
+            if png:
+                _BOARD_PENDING[key] = {"png": png, "t": time.time(), "final": bool(need_final)}
+                if key in boards:
+                    boards[key]["t"] = time.time()
+            for k in list(boards)[:-6]:
+                boards.pop(k, None)
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"{sport} live scoreboard skipped: {ex}")
+
+
+# ---- 4) touchdowns taken away on review (or re-credited) get corrected in place
+_TD_HTML = {}
+_last_td_html = {"h": None}
+_nfl_td_html_track = nfl_td_fantasy_html
+
+
+def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
+    h = _nfl_td_html_track(event, play, summary, live, ol, base, *a, **k)
+    _last_td_html["h"] = h
+    return h
+
+
+_post_td_track = post_td_fantasy
+
+
+def post_td_fantasy(event, play, summary, ctx):
+    _LAST_MSG.clear()
+    _last_td_html["h"] = None
+    ok = _post_td_track(event, play, summary, ctx)
+    if ok and _LAST_MSG.get("id") and _NFL_ST.get("st") is not None:
+        st = _NFL_ST["st"]
+        st.setdefault("td_posts", {})[str(play["id"])] = {
+            "game": event["id"], "msg": _LAST_MSG["id"], "t": time.time(), "scorer": td_parse(play).get("scorer", ""),
+            "team": (play.get("team") or {}).get("abbreviation", "")}
+        if _last_td_html["h"]:
+            _TD_HTML[str(play["id"])] = _last_td_html["h"]
+    return ok
+
+
+OVERTURN_HTML = ("<div style='position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:9'>"
+                 "<div style='transform:rotate(-10deg);border:8px solid #ff3d3d;color:#ff3d3d;font:900 64px Inter,Arial;letter-spacing:6px;"
+                 "padding:6px 28px;border-radius:16px;background:rgba(18,4,8,.72);box-shadow:0 0 40px rgba(255,61,61,.6);text-align:center'>"
+                 "❌ OVERTURNED<div style='font-size:20px;letter-spacing:2px;color:#ffd0d0;margin-top:4px'>REVIEW: NO TOUCHDOWN · POINTS REMOVED</div>"
+                 "</div></div>")
+_OVR = {"t": 0.0}
+
+
+def check_overturns(st):
+    """Every minute: a touchdown we posted that has vanished (or changed scorer) gets its post corrected."""
+    if time.time() - _OVR["t"] < 60:
+        return
+    _OVR["t"] = time.time()
+    posts = st.get("td_posts") or {}
+    if not posts or not NFL_HOOK:
+        return
+    by_game = {}
+    for pid, r in list(posts.items()):
+        if time.time() - r.get("t", 0) > 3 * 3600 or r.get("done"):
+            if time.time() - r.get("t", 0) > 24 * 3600:
+                posts.pop(pid, None)
+            continue
+        by_game.setdefault(r["game"], []).append(pid)
+    for gid, pids in by_game.items():
+        try:
+            summ = fetch(f"football/nfl/summary?event={gid}")
+        except Exception:  # noqa: BLE001
+            continue
+        plays = {str(p.get("id")): p for p in summ.get("scoringPlays") or []}
+        if not plays:
+            continue                                         # feed hiccup: never treat an empty list as "overturned"
+        for pid in pids:
+            r = posts[pid]
+            if pid not in plays:
+                same = [q for q in plays.values() if td_parse(q).get("scorer") == r.get("scorer")
+                        and (q.get("team") or {}).get("abbreviation") == r.get("team")]
+                if same:                                     # ESPN renumbered the play: it still stands
+                    continue
+                html_text = _TD_HTML.get(pid)
+                png = None
+                if html_text:
+                    html_text = html_text.replace("<div class='card'", "<div class='card' style='filter:grayscale(.75) brightness(.8)'", 1)
+                    png = render_card(html_text.replace("</body>", OVERTURN_HTML + "</body>"))
+                ok = discord_edit(NFL_HOOK, r["msg"], png, "td.png",
+                                  content=None if png else "❌ **OVERTURNED** · this touchdown was taken away on review")
+                if ok is not False:
+                    r["done"] = "overturned"
+                    _log_plain(f"touchdown {pid} overturned: post corrected")
+            else:
+                now_scorer = td_parse(plays[pid]).get("scorer", "")
+                if now_scorer and r.get("scorer") and now_scorer != r["scorer"]:
+                    ok = discord_edit(NFL_HOOK, r["msg"], None,
+                                      content=f"✏️ **CORRECTED** · this touchdown is now credited to **{now_scorer}** (not {r['scorer']})")
+                    if ok is not False:
+                        r["scorer"] = now_scorer
+                        _log_plain(f"touchdown {pid} re-credited to {now_scorer}")
+
+
+# ---- 6) daily report in #rick-only (08:00 UK)
+def daily_report_text(st):
+    now = time.time()
+    day = [p for p in (st.get("post_log") or []) if now - p["t"] < 24 * 3600 and p.get("where") != "alert"]
+    nfl = sum(1 for p in day if p["where"] == "nfl")
+    nba = sum(1 for p in day if p["where"] == "nba")
+    trades = sum(1 for p in day if p["kind"] == "trade")
+    tim = [x for x in (st.get("post_timing") or []) if now - x.get("sent", 0) < 24 * 3600]
+    target = spoiler_delay()
+    if tim:
+        avg = sum(x["after"] for x in tim) / len(tim)
+        late = sum(1 for x in tim if x["after"] > target + 5)
+        slow = max(x["after"] for x in tim)
+        timing = f"⏱️ In-game timing: average **{avg:.1f}s** after the play · slowest {slow:.1f}s · {late} late (target {target:.0f}s)"
+    else:
+        timing = "⏱️ In-game timing: no in-game posts in the last 24h"
+    builds = [b for b in (st.get("anim_builds") or []) if now - b[0] < 24 * 3600]
+    anim = (f"🎞️ Animated cards: {len(builds)} · average build {sum(b[1] for b in builds) / len(builds):.0f}s"
+            if builds else "🎞️ Animated cards: none")
+    errs = [a for a in (st.get("alert_log") or []) if now - a < 24 * 3600]
+    held = sum(_HELD.values())
+    starts = [datetime.fromtimestamp(t, UK).strftime("%H:%M") for t in (st.get("run_starts") or []) if now - t < 24 * 3600]
+    nxt = []
+    try:
+        for e in fetch("football/nfl/scoreboard").get("events", []):
+            t = parse_time(e["date"])
+            if e["status"]["type"]["state"] == "pre" and (t - now_utc()).total_seconds() < 36 * 3600:
+                away, home = teams_of(e)
+                nxt.append(f"{away['team']['abbreviation']} @ {home['team']['abbreviation']} {t.astimezone(UK):%a %H:%M}")
+        nba_n = len([e for e in fetch("basketball/nba/scoreboard").get("events", []) if e["status"]["type"]["state"] == "pre"])
+        if nba_n:
+            nxt.append(f"NBA {nba_n} game{'s' if nba_n != 1 else ''} tonight")
+    except Exception:  # noqa: BLE001
+        pass
+    lines = [f"📋 **Daily bot report** · {datetime.now(UK):%a %-d %b}",
+             f"✅ **{len(day)} post{'s' if len(day) != 1 else ''}** · NFL {nfl} · NBA {nba} · trades {trades}",
+             timing, anim,
+             f"🛑 Alerts: {len(errs) if errs else 'none'} · held back: {held if held else 'none'}"
+             + (" · ⏸️ PAUSED" if CONFIG.get("paused") else ""),
+             f"🔁 Restarts: {' · '.join(starts) if starts else 'none'}",
+             f"📅 Next: {' · '.join(nxt[:4]) if nxt else 'nothing scheduled in the next 36h'}"]
+    return "\n".join(lines)
+
+
+def maybe_daily_report(st):
+    now = datetime.now(UK)
+    if not ALERT_HOOK or now.hour < int((CONFIG.get("daily_report") or {}).get("hour_uk", 8)):
+        return
+    key = f"{now:%Y-%m-%d}"
+    if st.get("daily_report") == key:
+        return
+    st["daily_report"] = key
+    _POSTER["name"] = "Donald 🩺"
+    _IN_ALERT["on"] = True
+    try:
+        discord(ALERT_HOOK, [], "report", content=daily_report_text(st)[:1900])
+    finally:
+        _POSTER.clear()
+        _IN_ALERT["on"] = False
+
+
+# ---- bookkeeping the report needs
+_render_anim_timed = render_anim
+
+
+def render_anim(html_text, width=None):
+    t0 = time.time()
+    gif = _render_anim_timed(html_text, width)
+    if gif:
+        _ANIM_BUILDS.append([round(time.time()), round(time.time() - t0, 1)])
+        del _ANIM_BUILDS[:-100]
+    return gif
+
+
+_ANIM_BUILDS = []
+_RUN_START = {"t": time.time(), "saved": False}
+_alert_plain = alert
+
+
+def alert(msg, key=None, every_h=3.0):
+    _ALERT_TIMES.append(round(time.time()))
+    del _ALERT_TIMES[:-200]
+    return _alert_plain(msg, key, every_h)
+
+
+_ALERT_TIMES = []
+_save_state_qol = save_state
+
+
+def save_state(st):
+    st["post_log"] = (st.get("post_log") or [])
+    known = {(p["t"], p["kind"]) for p in st["post_log"]}
+    st["post_log"] = (st["post_log"] + [p for p in _POSTLOG if (p["t"], p["kind"]) not in known])[-600:]
+    st["anim_builds"] = ((st.get("anim_builds") or []) + [b for b in _ANIM_BUILDS if b not in (st.get("anim_builds") or [])])[-100:]
+    st["alert_log"] = sorted(set((st.get("alert_log") or []) + _ALERT_TIMES))[-200:]
+    if not _RUN_START["saved"] and os.environ.get("KEEPALIVE") == "1":
+        st["run_starts"] = ((st.get("run_starts") or []) + [round(_RUN_START["t"])])[-20:]
+        _RUN_START["saved"] = True
+    return _save_state_qol(st)
+
+
+# ---- wire it all into the main loop
+_run_nfl_qol = run_nfl
+
+
+def run_nfl(st, date=None, force=False):
+    active = _run_nfl_qol(st, date, force)
+    if date is None and not SILENT:
+        for fn in (refresh_switches, lambda: check_overturns(st), lambda: maybe_live_board(st)):
+            try:
+                fn()
+            except Exception as ex:  # noqa: BLE001
+                _log_plain(f"quality-of-life task skipped: {ex}")
+    return active
+
+
+_maybe_daily_race_qol = maybe_daily_race
+
+
+def maybe_daily_race(st):
+    for fn in (maybe_daily_report, maybe_catchup):
+        try:
+            fn(st)
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"{fn.__name__} skipped: {ex}")
+    return _maybe_daily_race_qol(st)
 
 
 # ===================================================================== main

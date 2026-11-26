@@ -57,7 +57,10 @@
       "enabled": true,
       "mention_role_id": ""
     },
-    "season_high_min": 20
+    "season_high_min": 20,
+    "live_scoreboard": {
+      "enabled": true
+    }
   },
   "nba": {
     "batch_note": "-1 = one post per game as soon as it finishes. Set e.g. 60 to group games that tip off within 60 minutes of each other into one post.",
@@ -99,8 +102,31 @@
       "enabled": true,
       "mention_role_id": ""
     },
-    "season_high_min": 40
+    "season_high_min": 40,
+    "live_scoreboard": {
+      "enabled": true
+    }
   },
   "spoiler_delay_seconds": 60,
-  "live_poll_seconds": 15
+  "live_poll_seconds": 15,
+  "paused": false,
+  "test_mode": {
+    "enabled": false,
+    "kinds": [
+      "live",
+      "catchup"
+    ],
+    "note": "kinds are post types: live, catchup, td, ft, half, trade, playoffs, bracket, recap, race, game, batch"
+  },
+  "silent_hours_uk": [
+    0,
+    8
+  ],
+  "catchup": {
+    "enabled": true,
+    "hour_uk": 9
+  },
+  "daily_report": {
+    "hour_uk": 8
+  }
 }
