@@ -178,57 +178,92 @@ def discord(hook, embed, label="", content=None, files=None):
         payload["content"] = content
         roles = re.findall(r"<@&(\d+)>", content)
         payload["allowed_mentions"] = {"parse": [], "roles": roles}
-    if files:
-        boundary = "----sportsbot" + str(int(time.time() * 1000))
-        parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
-                 f"Content-Type: application/json\r\n\r\n".encode() + json.dumps(payload).encode() + b"\r\n"]
-        for i, (name, data) in enumerate(files.items()):
-            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[{i}]\"; filename=\"{name}\"\r\n"
-                         f"Content-Type: {'image/gif' if name.endswith('.gif') else 'image/png'}\r\n\r\n".encode() + data + b"\r\n")
-        body = b"".join(parts) + f"--{boundary}--\r\n".encode()
-        ctype = f"multipart/form-data; boundary={boundary}"
-    else:
-        body, ctype = json.dumps(payload).encode(), "application/json"
+    variants = []
+    if files and not embeds and _v2_on():
+        variants.append((_v2_payload(payload, files), True))          # newer layout: shown bigger in the channel
+    variants.append((payload, False))
     timed = hook != globals().get("ALERT_HOOK")          # health alerts never wait for a game's send slot
     if timed:
         _wait_for_send_slot()
-    for _ in range(5):
-        _t_up = time.time()
-        req = urllib.request.Request(
-            hook + ("&" if "?" in hook else "?") + "wait=true", data=body, method="POST",
-            headers={"Content-Type": ctype,
-                     "User-Agent": "DiscordBot (sports-bot, 1.0)"})
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                try:
-                    m = json.loads(resp.read().decode() or "{}")
-                    _LAST_MSG.clear()
-                    _LAST_MSG.update({"id": m.get("id"), "channel_id": m.get("channel_id")})
-                except Exception:  # noqa: BLE001
-                    pass
-                _POSTLOG.append({"t": round(time.time()), "kind": kind,
-                                 "where": "nfl" if hook == NFL_HOOK else ("nba" if hook == NBA_HOOK else "alert")})
-                del _POSTLOG[:-600]
-                if timed:
-                    _UPLOAD_SECS.append(time.time() - _t_up)
-                    del _UPLOAD_SECS[:-10]
-                    _record_send(True)
-                time.sleep(1)
-                return True
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                try:
-                    wait = float(json.loads(e.read().decode()).get("retry_after", 2))
-                except Exception:  # noqa: BLE001
-                    wait = 2
-                time.sleep(wait + 0.5)
-                continue
-            log(f"Discord rejected post ({e.code}): {e.read().decode()[:300]}")
-            return 400 <= e.code < 500   # bad payload: don't retry forever
-        except Exception as e:  # noqa: BLE001
-            log(f"Discord post failed: {e}")
+    for pl, v2 in variants:
+        body, ctype = _post_body(pl, files)
+        url = hook + ("&" if "?" in hook else "?") + "wait=true" + ("&with_components=true" if v2 else "")
+        for _ in range(5):
+            _t_up = time.time()
+            req = urllib.request.Request(url, data=body, method="POST",
+                                         headers={"Content-Type": ctype, "User-Agent": "DiscordBot (sports-bot, 1.0)"})
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    try:
+                        m = json.loads(resp.read().decode() or "{}")
+                        _LAST_MSG.clear()
+                        _LAST_MSG.update({"id": m.get("id"), "channel_id": m.get("channel_id"), "v2": v2,
+                                          "att": [(a.get("id"), a.get("filename")) for a in m.get("attachments") or []]})
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _POSTLOG.append({"t": round(time.time()), "kind": kind,
+                                     "where": "nfl" if hook == NFL_HOOK else ("nba" if hook == NBA_HOOK else "alert")})
+                    del _POSTLOG[:-600]
+                    if timed:
+                        _UPLOAD_SECS.append(time.time() - _t_up)
+                        del _UPLOAD_SECS[:-10]
+                        _record_send(True)
+                    time.sleep(1)
+                    return True
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    try:
+                        wait = float(json.loads(e.read().decode()).get("retry_after", 2))
+                    except Exception:  # noqa: BLE001
+                        wait = 2
+                    time.sleep(wait + 0.5)
+                    continue
+                msg = e.read().decode()[:300]
+                if v2 and e.code == 400:                  # newer layout refused: send it the classic way
+                    _log_plain(f"Discord refused the new layout ({msg[:120]}): posting the classic way")
+                    break
+                log(f"Discord rejected post ({e.code}): {msg}")
+                return 400 <= e.code < 500   # bad payload: don't retry forever
+            except Exception as e:  # noqa: BLE001
+                log(f"Discord post failed: {e}")
+                return False
+        else:
             return False
     return False
+
+
+V2_FLAG = 1 << 15                     # IS_COMPONENTS_V2: Discord's newer message layout (bigger images)
+
+
+def _v2_on():
+    return CONFIG.get("discord_layout", "v2") == "v2"
+
+
+def _v2_components(name, text=None):
+    comps = [{"type": 10, "content": str(text)[:3900]}] if text else []
+    return comps + [{"type": 12, "items": [{"media": {"url": f"attachment://{name}"}}]}]
+
+
+def _v2_payload(payload, files):
+    """The same post in the components-v2 layout: optional text, then the image in a media gallery."""
+    out = {k: v for k, v in payload.items() if k not in ("content", "embeds")}
+    out["flags"] = (payload.get("flags") or 0) | V2_FLAG
+    out["components"] = _v2_components(next(iter(files)), payload.get("content"))
+    out["attachments"] = [{"id": i, "filename": n} for i, n in enumerate(files)]
+    out.setdefault("allowed_mentions", {"parse": []})
+    return out
+
+
+def _post_body(payload, files):
+    if not files:
+        return json.dumps(payload).encode(), "application/json"
+    boundary = "----sportsbot" + str(int(time.time() * 1000))
+    parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
+             f"Content-Type: application/json\r\n\r\n".encode() + json.dumps(payload).encode() + b"\r\n"]
+    for i, (name, data) in enumerate(files.items()):
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[{i}]\"; filename=\"{name}\"\r\n"
+                     f"Content-Type: {'image/gif' if name.endswith('.gif') else 'image/png'}\r\n\r\n".encode() + data + b"\r\n")
+    return b"".join(parts) + f"--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
 
 
 # -------------------------------------------------------------------- state
@@ -7447,31 +7482,40 @@ def maybe_catchup(st):
 
 
 def discord_edit(hook, message_id, png=None, name="live.png", content=None):
-    """Edit one of our own webhook messages: swap its image and/or text."""
-    payload = {}
+    """Edit one of our own webhook messages: swap its image and/or text. Posts in the newer layout are edited in
+    that layout (image in a media gallery, text as a text block); classic posts the classic way."""
+    tries = []
+    if _v2_on() and (png or content is not None):
+        pl = {"flags": V2_FLAG, "components": _v2_components(name, content)}
+        if png:
+            pl["attachments"] = [{"id": 0, "filename": name}]
+        tries.append((pl, True))
+    classic = {}
     if content is not None:
-        payload["content"] = content
+        classic["content"] = content
     if png:
-        payload["attachments"] = [{"id": 0, "filename": name}]
-    boundary = "----sportsbotedit" + str(int(time.time() * 1000))
-    parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n".encode()
-             + json.dumps(payload).encode() + b"\r\n"]
-    if png:
-        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"{name}\"\r\n"
-                     f"Content-Type: {'image/gif' if name.endswith('.gif') else 'image/png'}\r\n\r\n".encode() + png + b"\r\n")
-    body = b"".join(parts) + f"--{boundary}--\r\n".encode()
-    req = urllib.request.Request(f"{hook}/messages/{message_id}", data=body, method="PATCH",
-                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
-                                          "User-Agent": "DiscordBot (sports-bot, 1.0)"})
-    try:
-        with urllib.request.urlopen(req, timeout=30):
-            return True
-    except urllib.error.HTTPError as e:
-        _log_plain(f"message edit failed ({e.code}): {e.read().decode()[:200]}")
-        return e.code == 404 and None
-    except Exception as e:  # noqa: BLE001
-        _log_plain(f"message edit failed: {e}")
-        return False
+        classic["attachments"] = [{"id": 0, "filename": name}]
+    tries.append((classic, False))
+    for pl, v2 in tries:
+        body, ctype = _post_body(pl, {name: png} if png else None)
+        if not png:
+            body, ctype = json.dumps(pl).encode(), "application/json"
+        req = urllib.request.Request(f"{hook}/messages/{message_id}" + ("?with_components=true" if v2 else ""),
+                                     data=body, method="PATCH",
+                                     headers={"Content-Type": ctype, "User-Agent": "DiscordBot (sports-bot, 1.0)"})
+        try:
+            with urllib.request.urlopen(req, timeout=30):
+                return True
+        except urllib.error.HTTPError as e:
+            msg = e.read().decode()[:200]
+            if v2 and e.code == 400:
+                continue                                # a classic post: edit it the classic way
+            _log_plain(f"message edit failed ({e.code}): {msg}")
+            return e.code == 404 and None
+        except Exception as e:  # noqa: BLE001
+            _log_plain(f"message edit failed: {e}")
+            return False
+    return False
 
 
 # ---- 3) weekly matchups board: ONE message per fantasy week, pinned, edited in place
@@ -8188,7 +8232,8 @@ def post_td_fantasy(event, play, summary, ctx):
         st = _NFL_ST["st"]
         st.setdefault("td_posts", {})[str(play["id"])] = {
             "game": event["id"], "msg": _LAST_MSG["id"], "t": time.time(), "scorer": td_parse(play).get("scorer", ""),
-            "team": (play.get("team") or {}).get("abbreviation", "")}
+            "team": (play.get("team") or {}).get("abbreviation", ""),
+            "file": next((f for _, f in _LAST_MSG.get("att") or [] if f), "td.png")}
         if _last_td_html["h"]:
             _TD_HTML[str(play["id"])] = _last_td_html["h"]
     return ok
@@ -8237,7 +8282,7 @@ def check_overturns(st):
                 if html_text:
                     html_text = html_text.replace("<div class='card'", "<div class='card' style='filter:grayscale(.75) brightness(.8)'", 1)
                     png = render_card(html_text.replace("</body>", OVERTURN_HTML + "</body>"))
-                ok = discord_edit(NFL_HOOK, r["msg"], png, "td.png",
+                ok = discord_edit(NFL_HOOK, r["msg"], png, "td.png" if png else (r.get("file") or "td.png"),
                                   content=None if png else "❌ **OVERTURNED** · this touchdown was taken away on review")
                 if ok is not False:
                     r["done"] = "overturned"
@@ -8245,7 +8290,7 @@ def check_overturns(st):
             else:
                 now_scorer = td_parse(plays[pid]).get("scorer", "")
                 if now_scorer and r.get("scorer") and now_scorer != r["scorer"]:
-                    ok = discord_edit(NFL_HOOK, r["msg"], None,
+                    ok = discord_edit(NFL_HOOK, r["msg"], None, r.get("file") or "td.png",
                                       content=f"✏️ **CORRECTED** · this touchdown is now credited to **{now_scorer}** (not {r['scorer']})")
                     if ok is not False:
                         r["scorer"] = now_scorer
@@ -9114,7 +9159,16 @@ def render_anim(html_text, width=None):
 #   lists show the top 8 with the rest in one line. Few rows -> bigger rows that fill the panel.
 #   tools/inline_size.py measures any card.
 
-INLINE_W = 550
+INLINE_W, INLINE_H = 550, 350
+# Every in-game card is exactly W x (W * 350/550): the shape Discord shows at its full inline width (also in the
+# components-v2 media gallery Donald posts with: same box shape, ~0.64 height/width), and the
+# same size before and after an edit. Short content stretches to fill; long content is zoomed to fit.
+FIT_CSS = (".card{height:%dpx!important;overflow:hidden!important}"
+           ".card>.in{min-height:100%%;display:flex;flex-direction:column}"
+           ".card>.in>.lsx{flex:1}")
+_FIT_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const c=document.querySelector('.card'),"
+           "n=c&&c.querySelector('.in');if(!n)return;let z=1;"
+           "for(let i=0;i<16&&c.scrollHeight>c.clientHeight+1;i++){z*=0.96;n.style.zoom=z;}});</script>")
 _MIN_TEXT_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const f=%s;"
                 "document.querySelectorAll('.card *').forEach(el=>{if(![...el.childNodes].some(n=>n.nodeType==3&&n.textContent.trim()))return;"
                 "const s=parseFloat(getComputedStyle(el).fontSize);if(s<f)el.style.fontSize=f+'px';});});</script>")
@@ -9160,11 +9214,11 @@ BIG_MOMENT_CSS = """
 .lsx .lcol:not(:has(.pp5+.pp5)) .pp5 .gn b{font-size:50px!important}
 .lsx .lcol:not(:has(.pp5+.pp5)) .pjn,.lsx .lcol:not(:has(.pp5+.pp5)) .pp5 .ow3{font-size:24px!important}
 .pp5 .ow3{font-size:22px!important;margin-top:4px!important}
-.cv{font-size:21px!important;padding:10px 16px!important;gap:10px!important}
+.cv{font-size:20px!important;padding:8px 14px!important;gap:8px!important;flex-wrap:nowrap!important;white-space:nowrap;overflow:hidden}
 .cv .tg,.cv .ok,.cv .no{font-size:20px!important}.cv .cvw{font-size:21px!important}
 .imp{padding:12px 18px!important;display:flex;flex-direction:column}
 .imp .ih{font-size:21px!important;letter-spacing:1.5px!important;margin-bottom:2px!important}
-.imp .ih+.im{margin-top:auto!important}.imp .im:last-child{margin-bottom:auto!important}
+
 .lsx .im{grid-template-columns:26px minmax(0,1fr) auto!important;font-size:22px!important;padding:10px 0!important;
  column-gap:12px!important;row-gap:4px!important}
 .lsx .im>*{grid-row:auto!important}
@@ -9193,6 +9247,7 @@ BIG_MOMENT_CSS = """
 
 BIG_LIST_CSS = """
 body,.card{width:1100px!important}
+.card>.in{display:grid!important;align-content:start}
 .in{grid-template-columns:minmax(0,1fr) auto!important;column-gap:14px!important}
 .in>.top{display:none!important}
 .in>.nbar{font-size:22px!important}
@@ -9229,6 +9284,7 @@ body,.card{width:1100px!important}
 
 BIG_GROUP_CSS = """
 body,.card{width:1100px!important}
+.card>.in{display:block!important}
 .in>.top{display:none!important}
 .in>.nbar{font-size:22px!important}
 .hl{margin-top:0!important}.hl .h1{font-size:28px!important;line-height:1.2!important}
@@ -9254,6 +9310,7 @@ body,.card{width:1100px!important}
 
 BIG_OT_CSS = """
 body,.card{width:1100px!important}
+.card>.in{display:block!important}
 .otg{grid-template-columns:1fr 1.15fr!important;gap:20px!important}
 .otg .otw{font-size:104px!important}
 .ots{font-size:24px!important}
@@ -9336,11 +9393,12 @@ def readable_inline(html_text):
         else:
             return html_text
         floor = round(w / INLINE_W * 9.5, 1)                 # safety net: nothing under ~9.5px on screen
+        hmax = int(w * INLINE_H / INLINE_W)                   # fixed shape: Discord shows it at its full width
         html_text = re.sub(r"body,\.card\{width:\d+px(!important)?\}", "", html_text)
-        css = f"body,.card{{width:{w}px!important}}" + css
+        css = f"body,.card{{width:{w}px!important}}" + css + FIT_CSS % hmax
         return (html_text.replace("<style>", "<style>" + f"body,.card{{width:{w}px!important}}", 1)
                 .replace("</style>", css + "</style>", 1)
-                .replace("</head>", _MIN_TEXT_JS % floor + "</head>", 1))
+                .replace("</head>", _MIN_TEXT_JS % floor + _FIT_JS + "</head>", 1))
     except Exception as ex:  # noqa: BLE001
         _log_plain(f"inline sizing skipped: {ex}")
         return html_text
@@ -9560,16 +9618,77 @@ def wants_animation(html_text):
         (CONFIG.get("animations") or {}).get("enabled", True) and any(t == 4 for _, _, t, _ in _hype_scan(html_text)))
 
 
+# ---- ribbons (season high, league record, big game) never leave their row and never cover text: they are merged into
+#      one strip held inside the row's own width, and the row gets room above its name.
+RIBBON_CSS = """
+.rb{position:relative;overflow:visible!important}
+.pr2.rb,.pp5.rb,.tpr.rb{padding-top:26px!important}
+.pl2>.pr2.rb,.tp>.tpr.rb{margin-top:12px!important}.lsx .pp5.rb{margin-top:8px!important}
+.rbs{position:absolute;top:-13px;left:10px;right:10px;display:flex;gap:6px;z-index:8;overflow:hidden;pointer-events:none;
+ padding:0 2px 2px}
+.rbs>*{position:static!important;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+ font-size:16px!important;padding:3px 10px!important;letter-spacing:.8px!important;margin:0!important;box-shadow:none!important}
+.rbs>* em{font-size:15px!important;margin-left:4px!important}
+.pp5 .rbs{left:14px;right:14px}.pp5 .rbs>*{font-size:19px!important}.pp5 .rbs>* em{font-size:17px!important}
+.tpr.rb{padding-top:20px!important}.tpr .rbs>*{font-size:14px!important}
+"""
+
+
+def ribbon_merge(html_text):
+    try:
+        found = False
+        for cls in ("pp5", "pr2", "tpr"):
+            i = 0
+            while True:
+                m = re.compile(r"<div class='%s([^']*)'>" % cls).search(html_text, i)
+                if not m:
+                    break
+                e = _div_end(html_text, m.start())
+                blk = html_text[m.end():e - len("</div>")]
+                rib = []
+                for rx in (r"<span class='recr'>.*?</em></span>", r"<span class='hyr[^']*'>[^<]*</span>",
+                           r"<span class='shr'>.*?</em></span>"):
+                    mm = re.search(rx, blk)
+                    if mm:
+                        rib.append(mm.group(0))
+                        blk = blk.replace(mm.group(0), "", 1)
+                if not rib:
+                    i = e
+                    continue
+                short = []
+                for r in rib:
+                    r = re.sub(r"🏛️ NEW LEAGUE RECORD<em>best game in league history · old ([\d.]+) \((?:[^ ),]+ )*([^ ),]+), wk \d+\)</em>",
+                               r"🏛️ LEAGUE RECORD<em>· old \1 (\2)</em>", r)
+                    r = r.replace("<em>old best ", "<em>· old ")
+                    if cls != "pp5":
+                        r = re.sub(r"(GAME) · [\d.]+ PTS", r"\1", r)
+                    if cls != "pp5" and len(rib) > 1:          # two ribbons in a row: keep both readable
+                        r = re.sub(r" \([^()]*\)</em>", "</em>", r)
+                    short.append(r)
+                found = True
+                new = (m.group(0)[:-2] + " rb'>" + "<span class='rbs'>" + "".join(short) + "</span>" + blk)
+                html_text = html_text[:m.start()] + new + "</div>" + html_text[e:]
+                i = m.start() + len(new)
+        return html_text.replace("</style>", RIBBON_CSS + "</style>", 1) if found else html_text
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"ribbon layout skipped: {ex}")
+        return html_text
+
+
 _render_card_small = render_card
 _render_anim_small = render_anim
 
 
+def _inline_ready(html_text):
+    return ribbon_merge(hype_mark(readable_inline(_shape_more(_moment_landscape(html_text)))))
+
+
 def render_card(html_text, width=None):
-    return _render_card_small(hype_mark(readable_inline(_shape_more(_moment_landscape(html_text)))), width)
+    return _render_card_small(_inline_ready(html_text), width)
 
 
 def render_anim(html_text, width=None):
-    return _render_anim_small(hype_mark(readable_inline(_shape_more(_moment_landscape(html_text)))), width)
+    return _render_anim_small(_inline_ready(html_text), width)
 
 
 

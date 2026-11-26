@@ -25,17 +25,23 @@ BOX_W, BOX_H, MIN_PX = 550, 350, 11.0
 
 PROBE = """<script>addEventListener('load',()=>{const c=document.querySelector('.card');const r=c.getBoundingClientRect();
 const W=r.width,H=r.height,s=Math.min(1,%d/W,%d/H);const out=[];
-const walk=document.createTreeWalker(c,NodeFilter.SHOW_TEXT);let n;
+const walk=document.createTreeWalker(c,NodeFilter.SHOW_TEXT);let n;const els=[];
 while((n=walk.nextNode())){const t=n.textContent.trim();if(!t)continue;const el=n.parentElement;const cs=getComputedStyle(el);
 if(cs.visibility=='hidden'||cs.display=='none'||parseFloat(cs.opacity)==0)continue;const b=el.getBoundingClientRect();if(!b.width)continue;
-out.push([t.slice(0,40),Math.round(parseFloat(cs.fontSize)*s*10)/10,t.length]);}
-const p=document.createElement('pre');p.id='probe';p.textContent=JSON.stringify({W:W,H:H,s:s,t:out});document.body.appendChild(p);});</script>"""
+out.push([t.slice(0,40),Math.round(parseFloat(cs.fontSize)*s*10)/10,t.length]);
+if(!el.__r&&el.getClientRects().length<2){el.__r=1;els.push(el);}}
+const ov=[];const cr=c.getBoundingClientRect();
+for(let i=0;i<els.length;i++){const a=els[i].getBoundingClientRect();
+ if(a.right>cr.right+1||a.left<cr.left-1)ov.push(['outside card',els[i].textContent.trim().slice(0,30)]);
+ for(let j=i+1;j<els.length;j++){if(els[i].contains(els[j])||els[j].contains(els[i]))continue;const b=els[j].getBoundingClientRect();
+  const w=Math.min(a.right,b.right)-Math.max(a.left,b.left),h=Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top);
+  if(w>3&&h>3)ov.push([els[i].textContent.trim().slice(0,30),els[j].textContent.trim().slice(0,30)]);}}
+const p=document.createElement('pre');p.id='probe';p.textContent=JSON.stringify({W:W,H:H,s:s,t:out,ov:ov});document.body.appendChild(p);});</script>"""
 
 
 def measure(html_text):
-    html_text = bot._shape_more(bot._moment_landscape(html_text))
-    if hasattr(bot, "readable_inline"):
-        html_text = bot.readable_inline(html_text)
+    html_text = (bot._inline_ready(html_text) if hasattr(bot, "_inline_ready")
+                 else bot._shape_more(bot._moment_landscape(html_text)))
     html_text = html_text.replace("</body>", PROBE % (BOX_W, BOX_H) + "</body>")
     chrome = bot.find_chrome()
     m = re.search(r"body,\.card\{width:(\d+)px", html_text)
@@ -63,7 +69,8 @@ def report(name, r):
     mn = min((t[1] for t in r["t"]), default=0)
     print(f"{name:34s} {r['W']:.0f}x{r['H']:.0f}  scale {r['s']:.2f}  smallest {mn:4.1f}px  "
           f"under {MIN_PX:.0f}px: {100 * sc / chars:3.0f}% of text"
-          + (f"  e.g. {', '.join(repr(t[0]) + '=' + str(t[1]) for t in small[:4])}" if small else ""))
+          + (f"  e.g. {', '.join(repr(t[0]) + '=' + str(t[1]) for t in small[:4])}" if small else "")
+          + (f"\n    OVERLAPPING TEXT ({len(r['ov'])}): {r['ov'][:4]}" if r.get("ov") else "  no overlapping text"))
 
 
 def main():

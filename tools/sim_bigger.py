@@ -38,7 +38,7 @@ def shot(html_text, out):
         f = Path(d) / "p.html"
         f.write_text(html_text)
         subprocess.run([bot.find_chrome(), "--headless=new", "--no-sandbox", "--hide-scrollbars", "--force-device-scale-factor=2",
-                        "--window-size=660,900", f"--screenshot={out}", "--virtual-time-budget=4000", f.as_uri()],
+                        "--window-size=660,1900", f"--screenshot={out}", "--virtual-time-budget=4000", f.as_uri()],
                        check=True, capture_output=True, timeout=60)
     from PIL import Image
     im = Image.open(out)                                    # trim the empty bottom
