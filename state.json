@@ -111,6 +111,8 @@
  "nfl": {
   "401873079": {
    "date": "2026-11-26",
+   "half": true,
+   "half_seen": 1795661052.2555983,
    "pending": {},
    "preview": true,
    "tds": [
