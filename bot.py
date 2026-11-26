@@ -3531,6 +3531,7 @@ PREP_SECONDS = 30                    # animated cards take ~15-25s to build
 _SEND_AT = {"t": None, "t0": None, "label": ""}      # target send time for the post being built right now
 _NEXT_WAKE = {"t": None}                              # earliest upcoming "start building" time (main loop wakes for it)
 _TIMING = []                                          # (label, moment, sent) for the last posts, saved to state
+_ANIM_CHECK = {}
 
 
 def due(t0, label=""):
@@ -5171,7 +5172,18 @@ def pins_tick(st):
 _save_state_nopins = save_state
 
 
+def _animations_ready():
+    try:
+        import PIL  # noqa: F401
+        return bool(find_chrome())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def save_state(st):
+    if "animations_ready" not in _ANIM_CHECK:
+        _ANIM_CHECK["animations_ready"] = _animations_ready()
+    st["animations_ready"] = _ANIM_CHECK["animations_ready"]      # visible in state.json: are animated cards possible?
     if _TIMING:
         st["post_timing"] = list(_TIMING)            # how many seconds after the real moment each post landed
     try:
