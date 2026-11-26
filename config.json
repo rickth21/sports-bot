@@ -64,7 +64,7 @@
       "note": "One matchups board per week (points now, projected final, win %, players left), edited every 5 min while games are live. Posted 00:00 UK on the day of the week's first game (normally Friday), pinned until Tuesday 12:00 UK. Pinning needs DISCORD_BOT_TOKEN on the server.",
       "enabled": true,
       "pin": true,
-      "idle_refresh_min": 60
+      "idle_refresh_min": 0
     }
   },
   "nba": {
@@ -113,7 +113,7 @@
       "note": "Weekly matchups board, posted + pinned Monday 12:00 UK and replaced the next Monday 12:00 UK.",
       "enabled": true,
       "pin": true,
-      "idle_refresh_min": 60
+      "idle_refresh_min": 0
     }
   },
   "spoiler_delay_seconds": 60,

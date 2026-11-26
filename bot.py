@@ -7994,7 +7994,7 @@ def _wb_publish(st, b, pend):
             b["msg"] = None
             b["pin"] = {"state": "none"}
         elif r:
-            b.update(final=pend["final"], sig=pend["sig"], shown=time.time())
+            b.update(final=pend["final"], sig=pend["sig"], shown=time.time(), layout=pend.get("layout"))
         return
     _LAST_MSG.clear()
     routed = _wb_routed_to_alert()
@@ -8006,7 +8006,7 @@ def _wb_publish(st, b, pend):
         _POSTER.clear()
     if ok and _LAST_MSG.get("id"):
         b.update(msg=str(_LAST_MSG["id"]), ch=str(_LAST_MSG.get("channel_id") or ""), where="alert" if routed else "main",
-                 posted=time.time(), final=pend["final"], sig=pend["sig"], shown=time.time())
+                 posted=time.time(), final=pend["final"], sig=pend["sig"], shown=time.time(), layout=pend.get("layout"))
         b["pin"] = {"state": "none"}
         _log_plain(f"{sport} weekly board posted for week {b['week']}")
     elif ok and CAPTURE is not None:
@@ -8055,16 +8055,23 @@ def maybe_live_board(st):
                     if _NEXT_WAKE["t"] is None or pend["show"] < _NEXT_WAKE["t"]:
                         _NEXT_WAKE["t"] = pend["show"]
                 continue
-            if (b.get("final") and b.get("msg")) or CONFIG.get("paused"):
+            relayout = (bool(b.get("msg")) and b.get("layout") != _code_version()   # new code: redraw once
+                        and now - b.get("t", 0) >= 120)
+            if (b.get("final") and b.get("msg") and not relayout) or CONFIG.get("paused"):
                 continue
             if not b.get("msg") and now - b.get("t", 0) < 60:
                 continue                                    # last post attempt failed: try again in a minute
-            # how often: every 5 min while games are live, hourly otherwise, right away when a game just ended
+            # when: every 5 min while games are live, once more when they end, never in between
+            # (plus the new board when the week opens and one redraw after a code/layout update)
             live_now = _wb_live_now(sport, b)
-            every = 300 if (live_now or b.get("was_live")) else int(cfg.get("idle_refresh_min", 60)) * 60
+            idle = int(cfg.get("idle_refresh_min", 0) or 0) * 60
             just_ended = b.get("was_live") and not live_now
-            if b.get("msg") and now < b.get("t", 0) + every and not just_ended:
-                continue
+            if b.get("msg") and not just_ended and not relayout:
+                if live_now:
+                    if now < b.get("t", 0) + 300:
+                        continue
+                elif not idle or now < b.get("t", 0) + idle:
+                    continue
             if now < b["start"] - lead:
                 w = b["start"] - lead
                 if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
@@ -8078,12 +8085,12 @@ def maybe_live_board(st):
             ended = b.get("was_live") and state != "live"
             b["was_live"] = state == "live"
             sig = _wb_sig(data)
-            if b.get("msg") and sig == b.get("sig") and not ended:
+            if b.get("msg") and sig == b.get("sig") and not ended and not relayout:
                 continue                                    # nothing moved: leave the message as it is
             png = render_card(wb_html(data))
             if png:
                 _WB_PENDING[key] = {"png": png, "t": now, "show": max(now + delay, b["start"]),
-                                    "final": state == "final", "sig": sig}
+                                    "final": state == "final", "sig": sig, "layout": _code_version()}
                 w = _WB_PENDING[key]["show"]
                 if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
                     _NEXT_WAKE["t"] = w
