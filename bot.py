@@ -9855,6 +9855,321 @@ def rank_badges(html_text):
         return html_text
 
 
+# ------------------------------------------------ recap / playoff cards, redesigned to read without opening (inline)
+#   Same data as before, 1100 x 700 (Discord's full-width box), text >= ~22px in the card (~11px on screen):
+#   results + awards as big tiles, a short lineup "verdict" band instead of the full table, a race table with
+#   only what matters, the playoff picture and bracket as big tiles. Switch: config "recap_layout": "v2".
+RD_CSS = """
+body,.card{width:1100px!important}
+.top{font-size:19px!important;letter-spacing:1.5px!important}.top img{width:32px!important;height:32px!important}
+.top .pill{font-size:18px!important;padding:5px 12px!important}
+.hl{margin:10px 0 0!important;padding:10px 18px!important}.hl .h1{font-size:30px!important;line-height:1.15}
+.hl .h2{font-size:21px!important;margin-top:4px}
+.rd2{display:grid;grid-template-columns:430px 1fr;gap:16px;margin-top:12px}
+.sx{font-size:17px;font-weight:900;letter-spacing:1.6px;color:#c3cad8;margin:0 0 8px 2px}
+.rsl{display:flex;flex-direction:column;gap:7px}
+.rsr{display:grid;grid-template-columns:minmax(0,1fr) 84px;gap:1px 10px;align-items:center;background:rgba(255,255,255,.065);
+ border-radius:11px;padding:6px 14px;font-variant-numeric:tabular-nums}
+.rsr b{font-size:22px;font-weight:900;white-space:nowrap;line-height:1.15}
+.rsr .s{font-size:24px;font-weight:900;text-align:right}.rsr .lo{color:#8b95a8}
+.rsr b.lo{font-weight:800;font-size:19px}.rsr .s.lo{font-size:20px}
+.rsr.blow{box-shadow:inset 4px 0 0 #ff8a3d}.rsr.close{box-shadow:inset 4px 0 0 #ffd166}
+.awg{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.awt{position:relative;background:rgba(255,255,255,.065);border-radius:12px;padding:11px 14px;min-height:96px}
+.awt .k{font-size:16px;font-weight:900;letter-spacing:1.2px;color:#ffd166}
+.awt .v{font-size:25px;font-weight:900;margin-top:4px;line-height:1.1}
+.awt .x{font-size:19px;color:#dbe0ea;margin-top:3px;line-height:1.25}
+.awt .x b{color:#fff}
+.awt.pow{background:linear-gradient(120deg,rgba(255,179,71,.22),rgba(255,255,255,.05))}
+.awt .prk{position:absolute!important;right:12px;bottom:10px;left:auto!important;top:auto!important}
+.vb{display:flex;flex-direction:column;gap:6px;margin-top:12px;background:rgba(9,12,22,.55);border-radius:12px;padding:10px 16px}
+.vb div{font-size:20px;color:#dbe0ea;line-height:1.3}.vb b{color:#fff}.vb .c{color:#ff9a9e;font-weight:900}
+.st3{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:16px;margin-top:12px}
+.trw{display:grid;grid-template-columns:34px minmax(0,1fr) 70px 92px 200px 84px;gap:10px;align-items:center;height:41px;
+ font-size:22px;font-variant-numeric:tabular-nums;border-radius:8px;padding:0 8px}
+.trw:nth-child(even){background:rgba(255,255,255,.04)}
+.trw.h{height:28px;font-size:15px;font-weight:900;letter-spacing:1.2px;color:#9aa3b5;background:none!important}
+.trw .k{color:#9aa3b5;font-weight:900}.trw .m{font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:clip}
+.trw .pf{color:#aab3c5}.trw.cut{border-bottom:2px dashed rgba(245,197,66,.7)}.trw.out{opacity:.5}
+.trw .po{display:grid;grid-template-columns:62px 1fr;gap:8px;align-items:center;font-weight:900}
+.trw .po i{height:10px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden}
+.trw .po i em{display:block;height:10px;border-radius:999px;background:linear-gradient(90deg,#1faa59,#7ee2a8)}
+.trw .ti{font-weight:900;color:#ffd166;text-align:right}
+.trw .chip{font-size:14px;font-weight:900;letter-spacing:.6px;border-radius:6px;padding:4px 7px;text-align:center;white-space:nowrap}
+.chip.in{background:#1faa59;color:#fff}.chip.bye{background:linear-gradient(90deg,#ffd166,#ffb347);color:#1b1305}
+.chip.out{background:#3a1218;color:#ff9a9e}.chip.alive{background:rgba(255,255,255,.1);color:#dbe0ea}
+.chip.mir{background:linear-gradient(90deg,#6d28d9,#a855f7);color:#fff}
+.sdc{display:flex;flex-direction:column;gap:10px}
+.sdt{background:rgba(255,255,255,.065);border-radius:12px;padding:11px 14px}
+.sdt .k{font-size:16px;font-weight:900;letter-spacing:1.2px;color:#c3cad8}
+.sdt .v{font-size:27px;font-weight:900;margin-top:3px;color:#ffd166;line-height:1.1}
+.sdt .x{font-size:19px;color:#dbe0ea;margin-top:3px;line-height:1.3}.sdt .x b{color:#fff}
+.mvl{display:flex;flex-direction:column;gap:3px;margin-top:4px;font-size:20px}
+.mvl .u{color:#7ee2a8;font-weight:900}.mvl .dn{color:#ff9a9e;font-weight:900}
+.stp2{display:grid;grid-template-columns:52px minmax(0,1fr);gap:12px;align-items:center;border-radius:12px;padding:10px 12px;
+ background:rgba(255,255,255,.07)}
+.stp2 img,.stp2 .av{width:52px;height:52px;border-radius:50%;object-fit:cover;background:#2a3246;display:flex;align-items:center;
+ justify-content:center;font-weight:900;font-size:22px}
+.stp2 b{font-size:24px;font-weight:900;display:block;line-height:1.1}.stp2 small{font-size:17px;font-weight:900;letter-spacing:1px}
+.stp2.in,.stp2.bye{box-shadow:inset 0 0 0 2px #1faa59;background:linear-gradient(120deg,rgba(31,170,89,.25),rgba(255,255,255,.04))}
+.stp2.in small,.stp2.bye small{color:#7ee2a8}
+.stp2.out{box-shadow:inset 0 0 0 2px rgba(255,154,158,.6)}.stp2.out small{color:#ff9a9e}
+.bk2{display:grid;grid-template-columns:1fr 1fr 0.9fr 270px;gap:14px;margin-top:12px;align-items:stretch}
+.bkc2{display:flex;flex-direction:column;gap:10px}
+.bkc2 .k{font-size:16px;font-weight:900;letter-spacing:1.3px;color:#c3cad8}
+.bkg2{display:flex;flex-direction:column;justify-content:space-around;flex:1;gap:12px}
+.bkm2{display:flex;flex-direction:column;gap:4px;background:rgba(255,255,255,.05);border-radius:12px;padding:6px}
+.bkt{display:grid;grid-template-columns:30px minmax(0,1fr) auto;gap:8px;align-items:center;border-radius:9px;padding:7px 10px;
+ background:rgba(255,255,255,.07);font-variant-numeric:tabular-nums}
+.bkt .sd{font-size:18px;font-weight:900;color:#ffd166;text-align:center}
+.bkt b{font-size:22px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:clip;line-height:1.1}
+.bkt small{display:block;font-size:16px;color:#aab3c5;font-weight:700}
+.bkt .o{font-size:20px;font-weight:900;color:#7ee2a8}.bkt .o.lo{color:#9aa3b5}
+.bkt.w{box-shadow:inset 0 0 0 2px #ffd166}.bkt.l{opacity:.5}.bkt.tbd b{color:#8b95a8;font-weight:700}
+.bkye{font-size:16px;font-weight:900;letter-spacing:1px;color:#ffd166;text-align:center;padding:2px 0}
+.bko{background:rgba(9,12,22,.55);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:7px}
+.bko .k{font-size:16px;font-weight:900;letter-spacing:1.2px;color:#c3cad8}
+.bko div.r{display:grid;grid-template-columns:minmax(0,1fr) 54px;gap:8px;align-items:center;font-size:20px}
+.bko div.r span:first-child{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:clip}
+.bko div.r b{text-align:right;color:#ffd166}
+.bko i{grid-column:1/-1;height:7px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden;margin-top:-4px}
+.bko i em{display:block;height:7px;background:linear-gradient(90deg,#f5b942,#ffe08a)}
+"""
+
+
+def _rd_card(sport, body, css_vars, label):
+    body = re.sub(r"<span class='m'>([^<]{13,})</span>", r"<span class='m' style='font-size:18px'>\1</span>", body)
+    body = re.sub(r"<div style='min-width:0'><b>([^<]{11,})</b>", r"<div style='min-width:0'><b style='font-size:18px'>\1</b>", body)
+    html_text = _card(css_vars, body, None, HL_CSS + RD_CSS + RANK_CSS, width=1100)
+    return _nba_theme(html_text, None, label) if sport == "nba" else html_text
+
+
+def _rd_top(sport, title, pill):
+    import html as H
+    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
+    return f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape(title)}</div><div class='pill'>{H.escape(pill)}</div></div>"
+
+
+def recap_v2_html(sport, week, live, settings):
+    """Weekly recap as two inline-readable cards: (1) results + awards + lineup verdicts, (2) the title race."""
+    import html as H
+    league = CONFIG[sport].get("league_name", "League")
+    players = sleeper_players(sport)
+    names = {rid: x["manager"] for rid, x in live["rosters"].items()}
+    games, starters, bench = [], [], []
+    for ra, rb in live["pairs"]:
+        A, B = live["rosters"][ra], live["rosters"][rb]
+        games.append((A, B) if A["points"] >= B["points"] else (B, A))
+    for rid, x in live["rosters"].items():
+        for pid in x["players"]:
+            p = players.get(pid) or {}
+            nm = p.get("full_name") or (f"{p.get('last_name', pid)} D/ST" if p.get("position") == "DEF" else pid)
+            row = {"pid": pid, "name": nm, "pts": float(x["pp"].get(pid) or 0), "manager": x["manager"]}
+            (starters if pid in x["starters"] else bench).append(row)
+    scores, rec = season_history(sport, week)
+    odds, po_start, n_po = simulate_odds(sport, settings, scores, rec, week)
+    table = sorted(rec.keys(), key=lambda r: (-(rec[r]["w"] + 0.5 * rec[r]["t"]), -rec[r]["pf"]))
+    allr = [x for x in live["rosters"].values() if x.get("matchup_id")]
+    allpts = sorted((x["points"] for x in allr), reverse=True)
+
+    def allplay(p):
+        return sum(1 for q in allpts if q < p), len(allpts) - 1
+    top = max(allr, key=lambda x: x["points"])
+    blow = max(games, key=lambda g: g[0]["points"] - g[1]["points"])
+    close = min(games, key=lambda g: g[0]["points"] - g[1]["points"])
+    lucky = min((w for w, _ in games), key=lambda x: x["points"])
+    unlucky = max((l for _, l in games), key=lambda x: x["points"])
+    pow_ = max(starters, key=lambda p: p["pts"], default=None)
+    lw, ln_ = allplay(lucky["points"])
+    uw, un = allplay(unlucky["points"])
+    proj = {}
+    try:
+        proj = nfl_projections(week) if sport == "nfl" else {}
+    except Exception:  # noqa: BLE001
+        pass
+    ranks = position_ranks(sport)
+    pow_extra, badge = "", ""
+    if pow_:
+        pj = proj.get(pow_["pid"])
+        pow_extra = f"<b>{pow_['pts']:.1f}</b> pts for {H.escape(pow_['manager'])}" + (f" · proj {pj:.1f}" if pj else "")
+        if pow_["pid"] in ranks:
+            pos, rk = ranks[pow_["pid"]]
+            badge = _rank_badge(pos, rk)
+    tiles = [
+        ("⭐ PLAYER OF THE WEEK", pow_["name"] if pow_ else "—", pow_extra, " pow", badge),
+        ("💥 BIGGEST WIN", blow[0]["manager"], f"by <b>{blow[0]['points'] - blow[1]['points']:.1f}</b> over {H.escape(blow[1]['manager'])}", "", ""),
+        ("😬 CLOSEST FINISH", close[0]["manager"], f"by <b>{close[0]['points'] - close[1]['points']:.1f}</b> over {H.escape(close[1]['manager'])}", "", ""),
+        ("🍀 LUCKIEST WIN", lucky["manager"], f"won with {lucky['points']:.1f} (beats {lw} of {ln_})", "", ""),
+        ("🥶 UNLUCKIEST LOSS", unlucky["manager"], f"lost with {unlucky['points']:.1f} (beats {uw} of {un})", "", ""),
+    ]
+    lr = lineup_report(sport, week, live, settings)
+    verdicts = []
+    if lr:
+        tiles.append(("🧠 MANAGER OF THE WEEK", lr[0]["manager"], f"{lr[0]['eff']:.0f}% of their best lineup", "", ""))
+        perfect = [r["manager"] for r in lr if r["eff"] >= 99.5]
+        if perfect:
+            verdicts.append(f"🧠 <b>Perfect lineups:</b> {H.escape(', '.join(perfect[:4]))}" + (f" +{len(perfect) - 4}" if len(perfect) > 4 else ""))
+        for r in [r for r in lr if r["cost"]][:2]:
+            bp = players.get(r["top_bench"]) or {}
+            bname = bp.get("full_name") or (f"{bp.get('last_name', '')} D/ST" if bp else "")
+            verdicts.append(f"<span class='c'>💔 Bench cost {H.escape(r['manager'])} the win</span> · "
+                            f"{H.escape(bname)} scored {r['top_bench_pts']:.1f} on the bench vs {H.escape(r['opp'])}")
+        worst = max(lr, key=lambda r: r["left"])
+        if worst["left"] >= 5 and not worst["cost"]:
+            verdicts.append(f"🪑 <b>Most left on the bench:</b> {H.escape(worst['manager'])} −{worst['left']:.1f}")
+    else:
+        bb = max(bench, key=lambda p: p["pts"], default=None)
+        low = min(allr, key=lambda x: x["points"])
+        tiles.append(("📉 LOW SCORE", low["manager"], f"{low['points']:.1f} pts", "", ""))
+        if bb:
+            verdicts.append(f"🪑 <b>Bench star:</b> {H.escape(bb['name'])} {bb['pts']:.1f} on {H.escape(bb['manager'])}'s bench")
+    res = "".join(
+        f"<div class='rsr{' blow' if (w, l) == blow else ' close' if (w, l) == close else ''}'><b>{H.escape(w['manager'])}</b>"
+        f"<span class='s'>{w['points']:.1f}</span><b class='lo'>{H.escape(l['manager'])}</b>"
+        f"<span class='s lo'>{l['points']:.1f}</span></div>" for w, l in games)
+    aw = "".join(f"<div class='awt{cls}'>{bd}<div class='k'>{k}</div><div class='v'>{H.escape(v)}</div><div class='x'>{x}</div></div>"
+                 for k, v, x, cls, bd in tiles)
+    vb = f"<div class='vb'>{''.join(f'<div>{v}</div>' for v in verdicts[:3])}</div>" if verdicts else ""
+    body_a = (_rd_top(sport, f"{league.upper()} · WEEK {week}", "WEEKLY RECAP · 1 OF 2")
+              + f"<div class='hl'><div class='h1'>Week {week}: {H.escape(top['manager'])} top-scores with {top['points']:.1f}</div></div>"
+              + f"<div class='rd2'><div><div class='sx'>RESULTS</div><div class='rsl'>{res}</div></div>"
+              + f"<div><div class='sx'>AWARDS</div><div class='awg'>{aw}</div></div></div>{vb}")
+    # card 2: the race
+    rows = ["<div class='trw h'><span>#</span><span>MANAGER</span><span>W-L</span><span>PF</span><span>PLAYOFFS</span>"
+            "<span style='text-align:right'>TITLE</span></div>"]
+    for i, r in enumerate(table, 1):
+        x = rec[r]
+        po, ti = odds[r]
+        rows.append(f"<div class='trw{' cut' if i == n_po else ''}{' out' if po < 0.5 else ''}'><span class='k'>{i}</span>"
+                    f"<span class='m'>{H.escape(names.get(r, '?'))}</span><span>{x['w']}-{x['l']}{'-' + str(x['t']) if x['t'] else ''}</span>"
+                    f"<span class='pf'>{x['pf']:.0f}</span><span class='po'><span>{po:.0f}%</span><i><em style='width:{max(po, 1.5):.0f}%'></em></i></span>"
+                    f"<span class='ti'>{ti:.0f}%</span></div>")
+    fav = max(odds, key=lambda r: odds[r][1])
+    side = [f"<div class='sdt'><div class='k'>🏆 TITLE FAVOURITE</div><div class='v'>{H.escape(names[fav])}</div>"
+            f"<div class='x'><b>{odds[fav][1]:.0f}%</b> to win it all</div></div>"]
+    try:
+        lid = str(CONFIG[sport].get("sleeper_league_id")).strip()
+        ms = fetch_url(f"{SLEEPER}/league/{lid}/matchups/{week + 1}", tries=2) if week + 1 < po_start else []
+        by = {}
+        for m in ms:
+            if m.get("matchup_id"):
+                by.setdefault(m["matchup_id"], []).append(m["roster_id"])
+        pairs = [p for p in by.values() if len(p) == 2]
+        if pairs:
+            a, b = max(pairs, key=lambda p: min(odds[p[0]][0], odds[p[1]][0]) + 0.3 * (odds[p[0]][0] + odds[p[1]][0]))
+            side.append(f"<div class='sdt'><div class='k'>👀 GAME TO WATCH NEXT WEEK</div><div class='x'><b>{H.escape(names[a])}</b> v "
+                        f"<b>{H.escape(names[b])}</b><br>playoff odds {odds[a][0]:.0f}% and {odds[b][0]:.0f}%</div></div>")
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"recap next week unavailable: {e}")
+    try:
+        now_r, _, _ = power_rankings(sport, week)
+        prev_r, _, _ = power_rankings(sport, week - 1) if week > 1 else ([], {}, {})
+        mv = []
+        for i, r in enumerate(now_r, 1):
+            if r in prev_r:
+                d = (prev_r.index(r) + 1) - i
+                if d:
+                    mv.append((abs(d), d, i, r))
+        mv = sorted(mv, reverse=True)[:3]
+        if now_r:
+            items = "".join(f"<div><span class='{'u' if d > 0 else 'dn'}'>{'▲' if d > 0 else '▼'}{abs(d)}</span> "
+                            f"{H.escape(names.get(r, '?'))} <span style='color:#9aa3b5'>now #{i}</span></div>" for _, d, i, r in mv)
+            side.append(f"<div class='sdt'><div class='k'>⚡ POWER RANKINGS</div><div class='x'>#1 <b>{H.escape(names.get(now_r[0], '?'))}</b></div>"
+                        f"<div class='mvl'>{items}</div></div>")
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"recap power rankings unavailable: {e}")
+    left = max(0, po_start - week - 1)
+    body_b = (_rd_top(sport, f"{league.upper()} · WEEK {week}", "TITLE RACE · 2 OF 2")
+              + f"<div class='hl'><div class='h1'>The race: top {n_po} make it, {left} week{'s' if left != 1 else ''} to go</div></div>"
+              + f"<div class='st3'><div>{''.join(rows)}</div><div class='sdc'>{''.join(side)}</div></div>")
+    v = "--a:#1faa59;--h:#5b7bd5"
+    return _rd_card(sport, body_a, v, "WEEKLY RECAP"), _rd_card(sport, body_b, v, "TITLE RACE")
+
+
+def playoff_picture_v2_html(sport, settings, rec, status, changes, odds, week):
+    import html as H
+    people = _league_people(sport)
+    s = settings.get("settings") or {}
+    n, po = int(s.get("playoff_teams") or 6), int(s.get("playoff_week_start") or 15)
+    byes = _byes(n)
+    words = {"bye": "🔒 BYE CLINCHED", "in": "🔒 PLAYOFF SPOT CLINCHED", "out": "❌ ELIMINATED"}
+    stamps = []
+    for rid, old, new in changes[:4]:
+        pe = people.get(rid, {"manager": "?"})
+        r = rec[rid]
+        stamps.append(f"<div class='stp2 {new}'>{_avatar(pe)}<div><b>{H.escape(pe['manager'])}</b>"
+                      f"<small>{words[new]} · {r['w']}-{r['l']}</small></div></div>")
+    rows = ["<div class='trw h' style='grid-template-columns:34px minmax(0,1fr) 70px 220px 84px'><span>#</span><span>MANAGER</span>"
+            "<span>W-L</span><span>STATUS</span><span style='text-align:right'>ODDS</span></div>"]
+    for rid in sorted(rec, key=lambda r: status[r]["seed"]):
+        x, stt = rec[rid], status[rid]
+        if stt["status"] == "alive" and odds.get(rid, (0, 0))[0] < 0.5:
+            chip = "<span class='chip mir'>NEEDS A MIRACLE</span>"
+        elif stt["status"] == "alive":
+            chip = (f"<span class='chip alive'>{stt['magic']} WIN{'S' if stt['magic'] != 1 else ''} TO CLINCH</span>"
+                    if stt["magic"] else "<span class='chip alive'>IN THE HUNT</span>")
+        else:
+            chip = f"<span class='chip {stt['status']}'>{ {'bye': 'BYE ✓', 'in': 'CLINCHED ✓', 'out': 'ELIMINATED'}[stt['status']] }</span>"
+        rows.append(f"<div class='trw{' cut' if stt['seed'] == n else ''}{' out' if stt['status'] == 'out' else ''}' "
+                    f"style='grid-template-columns:34px minmax(0,1fr) 70px 220px 84px'><span class='k'>{stt['seed']}</span>"
+                    f"<span class='m'>{H.escape(people.get(rid, {}).get('manager', '?'))}</span><span>{x['w']}-{x['l']}</span>"
+                    f"<span style='justify-self:start'>{chip}</span><span class='ti' style='color:#fff'>{odds.get(rid, (0, 0))[0]:.0f}%</span></div>")
+    ins = [people[c[0]]["manager"] for c in changes if c[2] in ("in", "bye") and c[0] in people]
+    outs = [people[c[0]]["manager"] for c in changes if c[2] == "out" and c[0] in people]
+    head = " · ".join(x for x in ((" & ".join(ins) + (" clinch!" if len(ins) > 1 else " clinches!")) if ins else "",
+                                  (" & ".join(outs) + (" are out" if len(outs) > 1 else " is out")) if outs else "") if x)
+    left = max(po - 1 - week, 0)
+    body = (_rd_top(sport, f"{(settings.get('name') or '').upper()} · PLAYOFF PICTURE", f"{left} WEEK{'S' if left != 1 else ''} LEFT · TOP {n}")
+            + f"<div class='hl'><div class='h1'>{H.escape(head)}</div><div class='h2'>Gold line = the playoff cut · top {byes} get a bye</div></div>"
+            + f"<div class='st3' style='grid-template-columns:minmax(0,1fr) 340px'><div>{''.join(rows)}</div>"
+            + f"<div class='sdc'>{''.join(stamps)}</div></div>")
+    return _rd_card(sport, body, "--a:#1faa59;--h:#d4af37", "PLAYOFF PICTURE")
+
+
+def bracket_v2_html(sport, settings, br, rec, odds, stage):
+    import html as H
+    people = _league_people(sport)
+    seed_of = {r: s for s, r in br["seed"].items()}
+
+    def team(rid, g=None, side=None):
+        if rid is None:
+            return "<div class='bkt tbd'><span class='sd'>?</span><b>TBD</b><span></span></div>"
+        pe = people.get(rid, {"manager": "?"})
+        x = rec.get(rid, {"w": 0, "l": 0})
+        cls, right = "", (f"<span class='o'>{odds.get(rid, 0):.0f}%</span>" if odds else "<span></span>")
+        if g and g.get("win"):
+            cls = " w" if g["win"] == rid else " l"
+            right = f"<span class='o{'' if g['win'] == rid else ' lo'}'>{(g['pa'] if side == 'a' else g['pb']):.1f}</span>"
+        return (f"<div class='bkt{cls}'><span class='sd'>{seed_of.get(rid, '')}</span><div style='min-width:0'><b>{H.escape(pe['manager'])}</b>"
+                f"<small>{x['w']}-{x['l']}</small></div>{right}</div>")
+
+    def game(g):
+        return f"<div class='bkm2'>{team(g['a'], g, 'a')}{team(g['b'], g, 'b')}</div>"
+    po = br["po"]
+    r1 = (f"<div class='bkc2'><div class='k'>ROUND 1 · WK {po}</div><div class='bkg2'>"
+          f"<div class='bkm2'>{team(br['seed'].get(1))}<div class='bkye'>BYE</div></div>{game(br['r1'][0])}{game(br['r1'][1])}"
+          f"<div class='bkm2'>{team(br['seed'].get(2))}<div class='bkye'>BYE</div></div></div></div>")
+    r2 = f"<div class='bkc2'><div class='k'>SEMI-FINALS · WK {po + 1}</div><div class='bkg2'>{game(br['r2'][0])}{game(br['r2'][1])}</div></div>"
+    fn = f"<div class='bkc2'><div class='k'>🏆 FINAL · WK {po + 2}</div><div class='bkg2'>{game(br['final'])}</div></div>"
+    if br["champ"]:
+        pe = people.get(br["champ"], {"manager": "?"})
+        side = f"<div class='bko'><div class='k'>🏆 CHAMPION</div><div class='r'><span>{H.escape(pe['manager'])}</span><b>👑</b></div></div>"
+    else:
+        rows = "".join(f"<div class='r'><span>{H.escape(people.get(r, {}).get('manager', '?'))}</span><b>{p:.0f}%</b>"
+                       f"<i><em style='width:{max(p, 2):.0f}%'></em></i></div>" for r, p in sorted(odds.items(), key=lambda kv: -kv[1]))
+        side = f"<div class='bko'><div class='k'>TITLE ODDS</div>{rows}</div>"
+    titles = {0: "THE PLAYOFFS ARE SET", 1: "ROUND 1 RESULTS", 2: "THE FINAL IS SET", 3: "CHAMPION CROWNED"}
+    head = {0: "Six teams, one trophy: the bracket is set", 1: "Round 1 is done: the semi-finals are set",
+            2: "Two left standing: it's the final",
+            3: f"🏆 {people.get(br['champ'], {}).get('manager', '?')} is the champion!"}.get(stage, "")
+    body = (_rd_top(sport, f"{(settings.get('name') or '').upper()} · PLAYOFFS {settings.get('season', '')}", titles.get(stage, "PLAYOFFS"))
+            + f"<div class='hl'><div class='h1'>{H.escape(head)}</div></div><div class='bk2'>{r1}{r2}{fn}{side}</div>")
+    html_text = _rd_card(sport, body, "--a:#d4af37;--h:#5b7bd5", "PLAYOFFS")
+    if br["champ"]:
+        html_text = html_text.replace("<div class='card'", "<div class='card shc'", 1).replace("</style>", SH_CSS + "</style>", 1)
+    return html_text
+
+
 _render_card_small = render_card
 _render_anim_small = render_anim
 
