@@ -5010,6 +5010,176 @@ def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=30):
     return html_text.replace("</style>", css + "</style>", 1)
 
 
+# ------------------------------------------------ overtime: the urgent version
+
+OT_CSS = """
+.oth{position:relative;margin-top:12px;border-radius:16px;overflow:hidden;padding:22px 26px;
+ background:linear-gradient(100deg,var(--ca) 0%,var(--ca) 47%,var(--cb) 53%,var(--cb) 100%)}
+.oth:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.25),rgba(0,0,0,.55))}
+.oth .row{position:relative;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:16px}
+.oth .tm{display:flex;align-items:center;gap:16px}.oth .tm.r{justify-content:flex-end}
+.oth .tm img{width:92px;height:92px;object-fit:contain;background:rgba(255,255,255,.92);border-radius:50%;padding:10px;box-shadow:0 4px 16px rgba(0,0,0,.45)}
+.oth .tm .nm{font-size:24px;font-weight:900;text-transform:uppercase;letter-spacing:1px}
+.oth .sc{font-size:84px;font-weight:900;line-height:1;font-variant-numeric:tabular-nums;text-shadow:0 4px 18px rgba(0,0,0,.6)}
+.oth .badge{width:118px;height:118px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;
+ background:radial-gradient(circle,#ff5a4e 0%,#c81d25 62%,#7a0d12 100%);
+ box-shadow:0 0 0 5px rgba(255,209,102,.9),0 0 38px 10px rgba(255,90,78,.75)}
+.oth .badge b{font-size:44px;font-weight:900;line-height:1;letter-spacing:1px}
+.oth .badge span{font-size:10.5px;font-weight:900;letter-spacing:1.6px;color:#ffe3a3;margin-top:3px}
+.oth .sub{position:relative;text-align:center;margin-top:14px;font-size:14px;font-weight:900;letter-spacing:3px;color:#ffd166}
+.otl{margin-top:10px;background:rgba(9,12,22,.7);border-radius:14px;padding:10px 16px}
+.otl .ih{font-size:11px;letter-spacing:1.6px;font-weight:900;color:#ff8a80}
+.otr{display:grid;grid-template-columns:150px 1fr 230px;align-items:center;gap:12px;padding:8px 0;
+ border-top:1px solid rgba(255,255,255,.08)}
+.otl .ih + .otr{border-top:none}
+.otr .mg{font-size:16px;font-weight:900}
+.otr .ch{display:flex;flex-wrap:wrap;gap:6px}
+.otr .ch span{letter-spacing:0;background:rgba(255,255,255,.1);border-radius:7px;padding:3px 8px;font-size:13px;font-weight:700;color:#e3e7ef}
+.otr .ch span b{color:#7ee2a8;margin-left:4px}
+.otr .pj{text-align:right;font-size:13px;color:#c3cad8;font-weight:700}
+.otr .pj b{color:#fff;font-size:15px}.otr .pj .u{color:#7ee2a8}.otr .pj .dn{color:#ff9a9e}
+.otr .flip{display:inline-block;margin-left:6px;background:#ffd166;color:#1b1f2a;border-radius:6px;padding:1px 6px;
+ font-size:10.5px;font-weight:900;letter-spacing:1px}
+.otf{margin-top:10px;text-align:center;font-size:12.5px;font-weight:800;letter-spacing:2px;color:#ffd166}
+"""
+
+
+def nfl_ot_html(event, summary, live, ol):
+    import html as H
+    away, home = teams_of(event)
+    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+    ca = vivid(away["team"].get("color") or "1faa59")
+    cb = vivid(home["team"].get("color") or "5b7bd5")
+    hero = (f"<div class='oth' style='--ca:{ca};--cb:{cb}'><div class='row'>"
+            f"<div class='tm'><img src='{H.escape(away['team'].get('logo', ''))}'><div><div class='nm'>"
+            f"{H.escape(away['team'].get('name') or away['team']['abbreviation'])}</div><div class='sc'>{a_s}</div></div></div>"
+            f"<div class='badge'><b>OT</b><span>OVERTIME</span></div>"
+            f"<div class='tm r'><div style='text-align:right'><div class='nm'>"
+            f"{H.escape(home['team'].get('name') or home['team']['abbreviation'])}</div><div class='sc'>{h_s}</div></div>"
+            f"<img src='{H.escape(home['team'].get('logo', ''))}'></div></div>"
+            f"<div class='sub'>TIED AFTER 60 MINUTES · 10:00 OF OVERTIME TO COME</div></div>")
+
+    # what's on the line: every manager with a starter in this game
+    proj = nfl_projections(live["week"])
+    players = sleeper_players("nfl")
+    here = {sl_team(t["team"]["abbreviation"]) for t in teams_of(event)}
+    npid = nfl_name_pid()
+    now = {}
+    for p in nfl_fantasy(summary):
+        pid = p["id"][4:] if str(p.get("id", "")).startswith("def:") else npid.get((name_key(p["name"]), sl_team(p["team"])))
+        if pid:
+            now[pid] = p["pts"]
+    rows = []
+    for a, b in live["pairs"]:
+        for r, opp in ((a, b), (b, a)):
+            x = live["rosters"][r]
+            mine = [p for p in x["starters"] if ((players.get(p) or {}).get("team") or p) in here]
+            if not mine:
+                continue
+            pa, pb = _proj_total(r, live, ol, event, proj), _proj_total(opp, live, ol, event, proj)
+            win = ol[r]["win"]
+            chips = "".join(
+                f"<span>{H.escape(short_name(players[p]['full_name']) if (players.get(p) or {}).get('full_name') else p + ' D/ST')}"
+                f"<b>{fmt_pts(now.get(p, 0))}</b></span>" for p in mine)
+            flip = "<span class='flip'>COIN FLIP</span>" if 35 <= win <= 65 else ""
+            rows.append((abs(win - 50), f"<div class='otr'><span class='mg'>{H.escape(x['manager'])}</span>"
+                         f"<div class='ch'>{chips}</div>"
+                         f"<div class='pj'>proj <b class='{'u' if pa >= pb else 'dn'}'>{pa:.1f}</b> – {pb:.1f}"
+                         f" vs {H.escape(live['rosters'][opp]['manager'])}<br>win <b>{win:.0f}%</b>{flip}</div></div>"))
+    rows.sort(key=lambda z: z[0])
+    line = (f"<div class='otl'><div class='ih'>🚨 WHAT'S ON THE LINE · STARTERS STILL PLAYING</div>"
+            f"{''.join(r for _, r in rows)}</div>") if rows else ""
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL · WEEK {live['week']} · "
+            f"{H.escape(CONFIG['nfl'].get('league_name', 'League').upper())}</div><div class='pill' "
+            f"style='border-color:#ff5a4e;color:#ffb4ad'>OVERTIME</div></div>{hero}{line}"
+            f"<div class='otf'>EVERY OVERTIME SCORE GETS A POST ⚡</div>")
+    bg = (f".bg{{opacity:1!important;background:linear-gradient(120deg,#c81d25b0 0%,#7a0d1240 40%,rgba(13,18,32,0) 70%),"
+          f"linear-gradient(300deg,#ffd16640 0%,rgba(13,18,32,0) 30%)!important}}.hl{{border-left-color:#ff5a4e!important}}"
+          f".hl .h1{{font-size:28px!important}}")
+    return _card("--a:#c81d25;--h:#ffd166", body, extra_css=V4_CSS + TD5_CSS + OT_CSS + bg)
+
+
+def post_overtime(event, summary, ctx):
+    away, home = teams_of(event)
+    a = int(num(away.get("score")))
+    embed = {"author": AU_NFL(), "color": 0xC81D25,
+             "title": f"🚨 WE'RE GOING TO OVERTIME! {away['team'].get('name')} {a}–{a} {home['team'].get('name')}",
+             "description": "Sixty minutes couldn't split them — and your league's matchups are riding on it."}
+    return _post_card(NFL_HOOK, nfl_ot_html(event, summary, ctx["live"], ctx["ol"]), "🚨 **OVERTIME**", embed, "ot.png")
+
+
+_nfl_ot_html_v2 = nfl_ot_html
+
+
+# ------------------------------------------------ overtime v3: full-screen alarm
+
+OT3_CSS = """
+html,body{background:#12040a!important}.card{background:#12040a!important}
+.tape.bot{margin-bottom:6px!important}
+.bg{opacity:1!important;background:
+ repeating-conic-gradient(from 0deg at 50% 38%,rgba(255,80,60,.20) 0deg 6deg,rgba(255,80,60,0) 6deg 18deg),
+ radial-gradient(ellipse at 50% 38%,#ff3b2f 0%,#b3121b 30%,#4a0710 62%,#12040a 100%)!important}
+.tape{margin:0 -32px;height:34px;display:flex;align-items:center;overflow:hidden;white-space:nowrap;
+ background:repeating-linear-gradient(-45deg,#ffd166 0 22px,#141414 22px 44px);box-shadow:0 0 22px rgba(255,209,102,.5)}
+.tape span{background:#141414;color:#ffd166;font-weight:900;letter-spacing:5px;font-size:15px;padding:4px 14px;margin:0 18px}
+.tape.top{margin-top:-6px}.tape.bot{margin-top:18px;margin-bottom:-6px}
+.otw{text-align:center;margin-top:18px;font-size:132px;line-height:.95;font-weight:900;font-style:italic;letter-spacing:-2px;
+ transform:skew(-8deg);background:linear-gradient(180deg,#fff7d6 0%,#ffd166 45%,#ff9f1c 100%);-webkit-background-clip:text;
+ background-clip:text;color:transparent;filter:drop-shadow(0 6px 0 #6b0a10) drop-shadow(0 0 28px rgba(255,190,60,.75))}
+.ots{text-align:center;margin-top:8px;font-size:17px;font-weight:900;letter-spacing:6px;color:#fff;text-shadow:0 2px 10px #000}
+.otv{display:grid;grid-template-columns:1fr 120px 1fr;align-items:center;gap:10px;margin-top:20px}
+.otv .tm{display:flex;flex-direction:column;align-items:center;gap:6px}
+.otv .disc{width:136px;height:136px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;
+ box-shadow:0 0 0 6px var(--tc),0 0 36px 8px var(--tc)}
+.otv .disc img{width:104px;height:104px;object-fit:contain}
+.otv .nm{font-size:22px;font-weight:900;letter-spacing:2px;text-transform:uppercase;color:#fff;margin-top:6px}
+.otv .sc{font-size:110px;font-weight:900;line-height:.9;color:#fff;font-variant-numeric:tabular-nums;
+ text-shadow:0 0 30px rgba(255,255,255,.35),0 6px 0 rgba(0,0,0,.45)}
+.otv .vs{display:flex;align-items:center;justify-content:center;width:110px;height:110px;margin:auto;border-radius:50%;
+ background:radial-gradient(circle,#fff 0%,#ffd166 35%,#ff6b35 70%,rgba(255,60,40,0) 72%);font-size:40px;font-weight:900;
+ font-style:italic;color:#4a0710;text-shadow:0 1px 0 rgba(255,255,255,.6)}
+.otq{text-align:center;margin-top:16px;font-size:15px;font-weight:900;letter-spacing:4px;color:#ffd166}
+.otl{margin-top:16px!important;background:rgba(10,4,8,.78)!important;border:2px solid rgba(255,90,78,.85);
+ box-shadow:0 0 28px rgba(255,59,47,.45)}
+.otl .ih{color:#ffd166!important;font-size:13px!important;letter-spacing:2.4px!important}
+.otr .flip{animation:none;box-shadow:0 0 14px rgba(255,209,102,.8)}
+.otf{display:none}
+"""
+
+
+def nfl_ot_html(event, summary, live, ol):
+    import html as H
+    away, home = teams_of(event)
+    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+    # reuse v2's "what's on the line" panel
+    v2 = _nfl_ot_html_v2(event, summary, live, ol)
+    i = v2.find("<div class='otl'>")
+    line = v2[i:v2.find("<div class='otf'>", i)] if i >= 0 else ""
+    tape = "".join("<span>OVERTIME</span>" for _ in range(8))
+
+    def side(tm, sc):
+        c = vivid(tm["team"].get("color") or "ffffff", min_l=0.45)
+        return (f"<div class='tm' style='--tc:{c}'><div class='disc'><img src='{H.escape(tm['team'].get('logo', ''))}'></div>"
+                f"<div class='nm'>{H.escape(tm['team'].get('name') or tm['team']['abbreviation'])}</div>"
+                f"<div class='sc'>{sc}</div></div>")
+    body = (f"<div class='tape top'>{tape}</div>"
+            f"<div class='otw'>OVERTIME</div>"
+            f"<div class='ots'>🚨 TIED AFTER 60 MINUTES 🚨</div>"
+            f"<div class='otv'>{side(away, a_s)}<div class='vs'>VS</div>{side(home, h_s)}</div>"
+            f"<div class='otq'>10:00 ON THE CLOCK · EVERY SNAP MATTERS</div>"
+            f"{line}"
+            f"<div class='tape bot'>{''.join('<span>EVERY OT SCORE GETS A POST</span>' for _ in range(4))}</div>")
+    return _card("--a:#c81d25;--h:#ffd166", body, extra_css=V4_CSS + TD5_CSS + OT_CSS + OT3_CSS)
+
+
+def post_overtime(event, summary, ctx):
+    away, home = teams_of(event)
+    a = int(num(away.get("score")))
+    embed = {"author": AU_NFL(), "color": 0xC81D25, "img_title": "", "img_desc": "",
+             "title": f"🚨 OVERTIME! {away['team'].get('name')} {a}–{a} {home['team'].get('name')}"}
+    return _post_card(NFL_HOOK, nfl_ot_html(event, summary, ctx["live"], ctx["ol"]), "🚨 **OVERTIME**", embed, "ot.png")
+
+
 # ===================================================================== main
 
 def send_test():
