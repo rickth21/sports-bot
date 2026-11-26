@@ -2412,14 +2412,19 @@ def main():
         save_state(st)
         return
 
-    for sport in ("nfl", "nba"):          # weekly Sleeper league recaps (NFL Tue, NBA Mon, 13:00 UK)
-        try:
-            maybe_weekly_recap(st, sport)
-        except Exception as ex:  # noqa: BLE001
-            log(f"{sport} weekly recap error: {ex}")
+    keepalive = os.environ.get("KEEPALIVE") == "1"   # GitHub: stay on for the whole run, idle-poll slowly
+    idle = int(os.environ.get("IDLE_SECONDS", "300"))
     start = time.time()
-    last_nba = 0.0
+    last_nba = last_recap = last_push = 0.0
+    saved = json.dumps(st, sort_keys=True)
     while True:
+        if time.time() - last_recap >= 600:       # weekly Sleeper recaps (NFL Tue, NBA Mon, 13:00 UK)
+            for sport in ("nfl", "nba"):
+                try:
+                    maybe_weekly_recap(st, sport)
+                except Exception as ex:  # noqa: BLE001
+                    log(f"{sport} weekly recap error: {ex}")
+            last_recap = time.time()
         active = False
         try:
             active = run_nfl(st)
@@ -2432,11 +2437,34 @@ def main():
                 log(f"NBA error: {ex}")
             last_nba = time.time()
         save_state(st)
-        if not active or time.time() - start > MAX_RUNTIME:
+        now_saved = json.dumps(st, sort_keys=True)
+        if keepalive and now_saved != saved and time.time() - last_push >= 120:
+            push_state()                            # so a crash mid-run can't cause repeat posts
+            saved, last_push = now_saved, time.time()
+        elapsed = time.time() - start
+        if elapsed > MAX_RUNTIME or (not active and not keepalive):
             break
-        log(f"NFL game live — next check in {POLL_SECONDS}s")
-        time.sleep(POLL_SECONDS)
+        wait = POLL_SECONDS if active else idle
+        time.sleep(max(5, min(wait, MAX_RUNTIME - elapsed + 1)))
     log("Done.")
+
+
+def push_state():
+    """Commit state.json back to the repo (GitHub Actions only)."""
+    import subprocess
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    cmds = [["git", "config", "user.name", "sports-bot"],
+            ["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"],
+            ["git", "add", "state.json"],
+            ["git", "commit", "-q", "-m", "update state"],
+            ["git", "pull", "-q", "--rebase", "-X", "theirs"],
+            ["git", "push", "-q"]]
+    for c in cmds:
+        r = subprocess.run(c, cwd=ROOT, capture_output=True, text=True)
+        if r.returncode and c[1] not in ("commit",):
+            log(f"state push: {' '.join(c[:2])} failed: {r.stderr.strip()[:200]}")
+            return
 
 
 if __name__ == "__main__":
