@@ -6801,8 +6801,14 @@ def render_anim(html_text, width=None):
                 if scale != 1.0:
                     f = f.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
                 frames.append(f)
-            # one shared palette keeps colours steady from frame to frame (no flicker) and the file small
-            pal = frames[0].quantize(colors=255, method=Image.Quantize.MEDIANCUT)
+            # one shared palette for every frame, built from frames across the whole loop (so glows and flashes
+            # have their colours too) and applied without dithering: static areas are identical in every frame
+            picks = frames[::5]
+            pw, ph = max(1, width // 2), max(1, height // 2)
+            sheet2 = Image.new("RGB", (pw, ph * len(picks)))
+            for k, f0 in enumerate(picks):
+                sheet2.paste(f0.resize((pw, ph)), (0, ph * k))
+            pal = sheet2.quantize(colors=255, method=Image.Quantize.MEDIANCUT)
             q = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
             buf = __import__("io").BytesIO()
             q[0].save(buf, format="GIF", save_all=True, append_images=q[1:], loop=0,
@@ -9174,9 +9180,10 @@ INLINE_W, INLINE_H = 550, 350
 FIT_CSS = (".card{height:%dpx!important;overflow:hidden!important}"
            ".card>.in{min-height:100%%;display:flex;flex-direction:column}"
            ".card>.in>.lsx{flex:1}")
-_FIT_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const c=document.querySelector('.card'),"
-           "n=c&&c.querySelector('.in');if(!n)return;let z=1;"
-           "for(let i=0;i<16&&c.scrollHeight>c.clientHeight+1;i++){z*=0.96;n.style.zoom=z;}});</script>")
+_FIT_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const fit=()=>{const c=document.querySelector('.card'),"
+           "n=c&&c.querySelector('.in');if(!n)return;let z=1;n.style.zoom=1;"
+           "for(let i=0;i<16&&c.scrollHeight>c.clientHeight+1;i++){z*=0.96;n.style.zoom=z;}};"
+           "(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(fit);});</script>")
 _MIN_TEXT_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const f=%s;"
                 "document.querySelectorAll('.card *').forEach(el=>{if(![...el.childNodes].some(n=>n.nodeType==3&&n.textContent.trim()))return;"
                 "const s=parseFloat(getComputedStyle(el).fontSize);if(s<f)el.style.fontSize=f+'px';});});</script>")
@@ -9237,6 +9244,8 @@ BIG_MOMENT_CSS = """
 .lsx .im>:nth-child(5){grid-column:2/-1!important;grid-row:3!important}
 .lsx .im>:nth-child(5):empty{display:none}
 .lsx .im .who5{font-size:27px!important}
+.lsx .im .who5{white-space:normal!important;overflow:visible!important;text-overflow:clip!important;min-width:0}
+.lsx .imp .im .who5.lng.lng{font-size:24px!important}
 .lsx .im .ar{font-size:22px!important}
 .imp:not(:has(.im+.im+.im)) .im .who5{font-size:31px!important}
 .imp:not(:has(.im+.im+.im)) .im{font-size:24px!important}
@@ -9377,6 +9386,7 @@ def readable_inline(html_text):
             html_text = html_text.replace("<br>win ", " · win ")
         elif "class='lsx'" in html_text:
             css, w = BIG_MOMENT_CSS, MOMENT_W
+            html_text = re.sub(r"<b class='who5'>([^<]{13,})</b>", r"<b class='who5 lng'>\1</b>", html_text)
             m = re.search(r"<div class='tryt [a-z]+'>[^<]*</div>", html_text)
             if m and "<div class=st>" in html_text:          # try tag under the lead line, not under the +N chip
                 html_text = html_text.replace(m.group(0), "", 1)
@@ -9668,7 +9678,7 @@ def ribbon_merge(html_text):
                     r = re.sub(r"🏛️ NEW LEAGUE RECORD<em>best game in league history · old ([\d.]+) \((?:[^ ),]+ )*([^ ),]+), wk \d+\)</em>",
                                r"🏛️ LEAGUE RECORD<em>· old \1 (\2)</em>", r)
                     r = r.replace("<em>old best ", "<em>· old ")
-                    if cls != "pp5":
+                    if cls != "pp5" or len(rib) > 1:          # points are on the card already
                         r = re.sub(r"(GAME) · [\d.]+ PTS", r"\1", r)
                     if cls != "pp5" and len(rib) > 1:          # two ribbons in a row: keep both readable
                         r = re.sub(r" \([^()]*\)</em>", "</em>", r)
