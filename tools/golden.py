@@ -88,6 +88,7 @@ def main(mode, data_path, out_path):
         return b"PNG" + hashlib.sha1(html_text.encode()).hexdigest().encode() + b"x" * 30000
     bot.render_card = fake_png
     bot.render_png = fake_png
+    bot.render_anim = lambda html_text, *a, **k: None      # compare the still cards; animations are frames of the same HTML
     bot.NFL_HOOK = bot.NBA_HOOK = "dry"
     bot.ALERT_HOOK = ""
     out = {}
