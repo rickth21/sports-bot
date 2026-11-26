@@ -33,7 +33,11 @@ jobs:
         run: (sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-color-emoji) > /dev/null 2>&1 || true
 
       - name: Image library for the animated cards
-        run: python3 -m pip install --quiet --user pillow || true
+        run: |
+          python3 -m pip install --quiet --user --break-system-packages pillow \
+            || sudo apt-get install -y -qq python3-pil \
+            || echo "Pillow could not be installed: cards will be still images"
+          python3 -c "import PIL; print('Pillow', PIL.__version__)" || true
 
       - name: Test message
         if: ${{ inputs.test }}
