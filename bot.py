@@ -7232,7 +7232,9 @@ _LIVE_CFG = {"t": 0.0, "paused": None}
 
 def refresh_switches():
     """Pick up "paused" and "test_mode" from config.json on GitHub (edit it there; takes effect within ~2 minutes)."""
-    if time.time() - _LIVE_CFG["t"] < 120 or os.environ.get("GITHUB_ACTIONS") != "true":
+    on_server = os.environ.get("GITHUB_ACTIONS") != "true" and (ROOT / ".git").exists() and \
+        os.environ.get("KEEPALIVE") == "1"
+    if time.time() - _LIVE_CFG["t"] < 120 or not (os.environ.get("GITHUB_ACTIONS") == "true" or on_server):
         return
     _LIVE_CFG["t"] = time.time()
     import subprocess
@@ -7241,6 +7243,17 @@ def refresh_switches():
         txt = subprocess.run(["git", "show", "origin/main:config.json"], cwd=ROOT, capture_output=True, text=True,
                              timeout=15).stdout
         fresh = json.loads(txt)
+        if on_server:                     # new code uploaded to GitHub? restart onto it at the next quiet moment
+            import hashlib
+            remote = subprocess.run(["git", "show", "origin/main:bot.py"], cwd=ROOT, capture_output=True,
+                                    timeout=15).stdout
+            local = (ROOT / "bot.py").read_bytes()
+            new = bool(remote) and hashlib.sha1(remote).digest() != hashlib.sha1(local).digest()
+            remote_cfg = txt.encode()
+            new = new or (bool(remote_cfg) and remote_cfg != (ROOT / "config.json").read_bytes())
+            if new and not _LIVE_CFG.get("new_code"):
+                _log_plain("new code/config on GitHub: will restart onto it at the next quiet moment")
+            _LIVE_CFG["new_code"] = new
     except Exception as e:  # noqa: BLE001
         _log_plain(f"switch refresh skipped: {e}")
         return
@@ -8303,7 +8316,12 @@ def main():
         if elapsed > MAX_RUNTIME or (not active and not keepalive):
             break
         # hand over to the next run in a quiet moment (no game on, nothing about to post) instead of mid-game
-        if keepalive and elapsed > HANDOFF_AFTER_MIN * 60 and not active and not _NBA_LIVE["on"] \
+        on_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+        if keepalive and not on_actions and _LIVE_CFG.get("new_code") and not active and not _NBA_LIVE["on"] \
+                and _NEXT_WAKE["t"] is None and quiet_now():
+            _log_plain("restarting onto the new code from GitHub (quiet moment)")
+            break                                   # systemd restarts us; the start step pulls the new files
+        if keepalive and on_actions and elapsed > HANDOFF_AFTER_MIN * 60 and not active and not _NBA_LIVE["on"] \
                 and _NEXT_WAKE["t"] is None and quiet_now():
             log_handoff = f"handing over to the next run in a quiet window after {elapsed / 3600:.1f}h"
             _log_plain(log_handoff)
