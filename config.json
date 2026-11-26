@@ -52,15 +52,18 @@
     "clutch_field_goals": true,
     "overtime_posts": true,
     "game_changer_swing": 12,
-    "pin_final_hours": 16,
+    "pin_final_hours": 0,
     "hide_pin_notice": true,
     "trades": {
       "enabled": true,
       "mention_role_id": ""
     },
     "season_high_min": 20,
-    "live_scoreboard": {
-      "enabled": true
+    "weekly_board": {
+      "note": "One matchups board per week (points now, projected final, win %, players left), edited every 5 min while games are live. Posted 00:00 UK on the day of the week's first game (normally Friday), pinned until Tuesday 12:00 UK. Pinning needs DISCORD_BOT_TOKEN on the server.",
+      "enabled": true,
+      "pin": true,
+      "idle_refresh_min": 60
     }
   },
   "nba": {
@@ -104,8 +107,11 @@
       "mention_role_id": ""
     },
     "season_high_min": 40,
-    "live_scoreboard": {
-      "enabled": true
+    "weekly_board": {
+      "note": "Weekly matchups board, posted + pinned Monday 12:00 UK and replaced the next Monday 12:00 UK.",
+      "enabled": true,
+      "pin": true,
+      "idle_refresh_min": 60
     }
   },
   "spoiler_delay_seconds": 60,

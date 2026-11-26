@@ -14,6 +14,8 @@ What it posts
   NBA  full-time per game (grouped only when another game is in its final minute), half-time for grouped
        tip-offs, weekly recap.
   Both leagues: every trade, with grades and a verdict (NFL trades ping @NFLfantasy).
+  Weekly matchups board (one per league per week, pinned, edited every 5 min while games are live):
+       NFL 00:00 UK on the day of the first game (normally Friday) -> Tuesday 12:00; NBA Monday 12:00 -> Monday 12:00.
 
 How this file is organised
   It grew in layers. A later section may wrap an earlier function: it saves the old one
@@ -42,6 +44,7 @@ Usage:
   python3 bot.py --preview-nba 20261124
   python3 tools/check.py                  run before every upload
   python3 tools/golden.py ...             before/after check for clean-ups (see the file)
+  python3 tools/sim_board.py cards DIR    weekly matchups board mock-ups (sim_board.py lifecycle: pin/unpin dry run)
 """
 import json
 import os
@@ -3461,6 +3464,12 @@ def nfl_projections(week):
     """Sleeper projections for the week, scored with the league's own settings: {sleeper pid: pts}."""
     if week in _PROJ:
         return _PROJ[week]
+    _PROJ[week] = _nfl_proj_fetch(week)
+    return _PROJ[week]
+
+
+def _nfl_proj_fetch(week):
+    """One fresh download of the week's Sleeper projections (no cache)."""
     out = {}
     try:
         season = fetch_url(f"{SLEEPER}/state/nfl").get("season")
@@ -3474,7 +3483,6 @@ def nfl_projections(week):
                                                if k in sc and isinstance(v, (int, float)))
     except Exception as e:  # noqa: BLE001
         log(f"projections unavailable: {e}")
-    _PROJ[week] = out
     return out
 
 
@@ -5333,6 +5341,12 @@ def nba_rows(week):
     """Sleeper's NBA projections for one week: one row per game -> [(pid, US date, league fpts)]."""
     if week in _NBA_ROWS:
         return _NBA_ROWS[week]
+    _NBA_ROWS[week] = _nba_rows_fetch(week)
+    return _NBA_ROWS[week]
+
+
+def _nba_rows_fetch(week):
+    """One fresh download of Sleeper's NBA projections for the week (no cache)."""
     out = []
     try:
         season = fetch_url(f"{SLEEPER}/state/nba").get("season")
@@ -5345,12 +5359,12 @@ def nba_rows(week):
             out.append((str(r.get("player_id")), r.get("date") or "", pts / (float(s.get("gp") or 1) or 1)))
     except Exception as e:  # noqa: BLE001
         _log_plain(f"NBA projections unavailable: {e}")
-    _NBA_ROWS[week] = out
     return out
 
 
-def best_lineup(slots, pids, pts, sport):
-    """Best possible starting lineup points: fill the strictest slots first with the best eligible player."""
+def best_lineup(slots, pids, pts, sport, picks=None):
+    """Best possible starting lineup points: fill the strictest slots first with the best eligible player.
+    picks: optional list that receives the chosen players."""
     allp = sleeper_players(sport)
     pos = {p: set((allp.get(p) or {}).get("fantasy_positions") or [(allp.get(p) or {}).get("position") or p]) for p in pids}
     for p in pids:
@@ -5364,6 +5378,8 @@ def best_lineup(slots, pids, pts, sport):
             if pos[p] & el:
                 total += pts[p]
                 free.remove(p)
+                if picks is not None:
+                    picks.append(p)
                 break
     return total
 
@@ -7225,10 +7241,21 @@ def maybe_daily_race(st):
 
 
 
-# ------------------------------------------------ quality of life: live switches, catch-up, live scoreboard, corrections, report
+# ------------------------------------------------ quality of life: live switches, catch-up, weekly matchups board, corrections, report
 
 # ---- pause / test mode switches, re-read from GitHub every 2 minutes (no restart needed)
 _LIVE_CFG = {"t": 0.0, "paused": None}
+ENV_FILE = Path("/etc/sports-bot.env")                    # server secrets (e.g. a new DISCORD_BOT_TOKEN)
+
+
+def _env_mtime():
+    try:
+        return ENV_FILE.stat().st_mtime                   # readable even though the file itself is root-only
+    except OSError:
+        return None
+
+
+_ENV_AT_START = _env_mtime()
 
 
 def refresh_switches():
@@ -7252,6 +7279,11 @@ def refresh_switches():
             new = bool(remote) and hashlib.sha1(remote).digest() != hashlib.sha1(local).digest()
             remote_cfg = txt.encode()
             new = new or (bool(remote_cfg) and remote_cfg != (ROOT / "config.json").read_bytes())
+            if _ENV_AT_START is not None and _env_mtime() not in (None, _ENV_AT_START):
+                if not _LIVE_CFG.get("env_changed"):
+                    _log_plain("server settings changed (/etc/sports-bot.env): will restart at the next quiet moment")
+                _LIVE_CFG["env_changed"] = True
+                new = True
             if new and not _LIVE_CFG.get("new_code"):
                 _log_plain("new code/config on GitHub: will restart onto it at the next quiet moment")
             _LIVE_CFG["new_code"] = new
@@ -7394,41 +7426,6 @@ def maybe_catchup(st):
         st["catchups"] = done[-30:]
 
 
-# ---- 3) live scoreboard: one message per game night, edited in place every 5 minutes
-LIVE_CSS = """
-.lms{display:grid;grid-template-columns:1fr;gap:8px;margin-top:12px}
-.lm{display:grid;grid-template-columns:1fr 92px 170px 92px 1fr;grid-template-rows:auto auto;align-items:center;gap:2px 10px;background:rgba(255,255,255,.06);border-radius:12px;padding:10px 14px}
-.lm b{font-size:21px;font-weight:900;color:#cfd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lm b.w{color:#fff}.lm b.r{text-align:right}
-.lm .p{font-size:28px;font-weight:900;text-align:center;font-variant-numeric:tabular-nums}
-.wb{height:10px;border-radius:5px;background:#3b4152;overflow:hidden}.wb i{display:block;height:10px;background:linear-gradient(90deg,#ffd166,#ee6730)}
-.lm small{grid-row:2;font-size:12.5px;font-weight:800;color:#aab3c5}.lm small:nth-of-type(1){grid-column:1}.lm small.r{grid-column:5;text-align:right}
-.lv{display:inline-block;background:#ff3d3d;color:#fff;font-weight:900;font-size:12px;letter-spacing:1.5px;padding:2px 8px;border-radius:5px;margin-right:8px}
-.lv.f{background:#4b5563}
-"""
-
-
-def live_board_html(sport, live, ol, final):
-    import html as H
-    rows = []
-    for ra, rb in live["pairs"]:
-        A, B = live["rosters"][ra], live["rosters"][rb]
-        wa = float((ol.get(ra) or {}).get("win", 50))
-        rows.append(
-            f"<div class='lm'><b class='{'w' if wa >= 50 else ''}'>{H.escape(A['manager'])}</b><span class='p'>{A['points']:.1f}</span>"
-            f"<div class='wb'><i style='width:{wa:.0f}%'></i></div><span class='p'>{B['points']:.1f}</span>"
-            f"<b class='r {'w' if wa < 50 else ''}'>{H.escape(B['manager'])}</b>"
-            f"<small>{wa:.0f}% to win</small><small class='r'>{100 - wa:.0f}%</small></div>")
-    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
-    stamp = datetime.now(UK).strftime("%H:%M")
-    pill = ("<span class='lv f'>FINAL</span>TONIGHT'S GAMES ARE DONE" if final else
-            f"<span class='lv'>● LIVE</span>UPDATED {stamp} · REFRESHES EVERY 5 MIN")
-    body = (f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape(CONFIG[sport].get('league_name', 'League').upper())}"
-            f" · WEEK {live['week']} MATCHUPS</div><div class='pill'>{pill}</div></div><div class='lms'>{''.join(rows)}</div>")
-    html_text = _card("--a:#ee6730;--h:#ffb347" if sport == "nba" else "--a:#1faa59;--h:#5b7bd5", body, None,
-                      LIVE_CSS + "body,.card{width:980px!important}", width=980)
-    return _nba_theme(html_text, None, "LIVE SCOREBOARD") if sport == "nba" else html_text
-
-
 def discord_edit(hook, message_id, png=None, name="live.png", content=None):
     """Edit one of our own webhook messages: swap its image and/or text."""
     payload = {}
@@ -7457,90 +7454,662 @@ def discord_edit(hook, message_id, png=None, name="live.png", content=None):
         return False
 
 
-def _games_live(sport):
-    """(any game live now, any game finished tonight, key for tonight's board)."""
+# ---- 3) weekly matchups board: ONE message per fantasy week, pinned, edited in place
+#   NFL: posted 00:00 UK on the day of the week's first kick-off (normally Friday = Thursday night), pinned,
+#        unpinned Tuesday 12:00 UK.
+#   NBA: posted Monday 12:00 UK, pinned, replaced the next Monday 12:00 UK (old one unpinned, new one pinned).
+#   Each matchup: points now, projected final (points + Sleeper projections still to come), win chance,
+#   players / games left. Edited every 5 minutes while games are live (spoiler-safe: a snapshot is only shown
+#   spoiler_delay() after it was taken), hourly otherwise (lineups and projections move), once more at the end.
+#   Pinning needs a Discord bot token (DISCORD_BOT_TOKEN): webhooks can't pin. Without one the boards still post.
+import math as _math
+
+WB_CSS = """
+.wbh{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;margin:12px 2px 0}
+.wbh .h1{font-size:31px;font-weight:900;letter-spacing:-.3px;line-height:1.1;white-space:nowrap}
+.wbh .h2{font-size:17px;font-weight:700;color:#cfd5e1;text-align:right;line-height:1.3;white-space:nowrap}
+.wbh .h2 b{color:#fff;font-weight:900}
+.wbg{display:grid;grid-template-columns:1fr 1fr;gap:14px 16px;margin-top:6px}
+.wch{display:grid;grid-template-columns:minmax(0,1fr) 140px 108px;gap:12px;padding:0 14px 0 70px;
+ font-size:13.5px;font-weight:900;letter-spacing:2px;color:#9aa3b5}
+.wch span{text-align:right}.wch span.w{text-align:center}.wch span.p{color:#ffd166}
+.wm{position:relative;background:rgba(255,255,255,.065);border-radius:14px;padding:3px 14px}
+.wm.close{box-shadow:inset 0 0 0 2px rgba(255,209,102,.6)}
+.wr{display:grid;grid-template-columns:46px minmax(0,1fr) 140px 108px;gap:12px;align-items:center;height:80px}
+.wr+.wr{border-top:1px solid rgba(255,255,255,.08)}
+.wr .wav,.wr img{width:46px;height:46px;border-radius:50%;object-fit:cover;background:#2a3246;display:flex;align-items:center;
+ justify-content:center;font-size:21px;font-weight:900;color:#cfd5e1}
+.wr .wn{font-size:24px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.15;letter-spacing:-.2px}
+.wr .wn.s{font-size:20px}
+.wr .ws{font-size:18px;font-weight:700;color:#aab3c5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px}
+.wr .ws b{color:#fff;font-weight:900}.wr .ws .lv{color:#5ef08f;font-weight:800}.wr .ws .dn{color:#8b95a8}
+.wr .wnum{text-align:right;font-variant-numeric:tabular-nums;line-height:1}
+.wr .wpj{font-size:37px;font-weight:900;color:#ffd166;letter-spacing:-.6px}
+.wr .wno{font-size:18px;font-weight:800;color:#e6e9ef;margin-top:5px}.wr .wno i{font-style:normal;color:#9aa3b5;font-weight:700}
+.wr .wp{height:56px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:34px;font-weight:900;
+ font-variant-numeric:tabular-nums;letter-spacing:-.6px;background:rgba(255,255,255,.07);color:#8b95a8}
+.wr .wp small{font-size:18px;margin-left:1px}
+.wr.fav .wp{background:linear-gradient(180deg,#4be38e,#1faa59);color:#062312;box-shadow:0 0 16px rgba(46,204,113,.35)}
+.wr.won .wp{background:linear-gradient(180deg,#ffe08a,#f5b942);color:#1b1305;box-shadow:0 0 16px rgba(245,185,66,.45);font-size:26px}
+.wr.lost .wp{font-size:24px}
+.wr.dog .wn,.wr.lost .wn{color:#c3c9d6}
+.wr.lost .wpj{color:#9aa3b5}
+.wtag{position:absolute;top:-10px;right:14px;font-size:12px;font-weight:900;letter-spacing:1.4px;padding:2px 9px;border-radius:6px;
+ background:#ffd166;color:#1b1305}
+.wtag.lk{background:#3a4357;color:#e6e9ef}.wtag.fn{background:#e6e9ef;color:#101522}.wtag.cb{background:#ff8a3d;color:#1b0d03}
+.lv2{display:inline-block;background:#ff3d3d;color:#fff;font-weight:900;font-size:12px;letter-spacing:1.5px;padding:2px 8px;
+ border-radius:5px;margin-right:8px}
+.lv2.f{background:#4b5563}.lv2.p{background:#1faa59}
+"""
+
+_WB_PENDING = {}
+_WB_CACHE = {}
+# spread of one player's score (a + b * projection) and a whole-team share on top (injuries, rest days, lineups)
+_WB_SD = {"nfl": (2.0, 0.35, 0.10), "nba": (3.0, 0.22, 0.08)}
+
+
+def _wb_cfg(sport):
+    return (CONFIG.get(sport) or {}).get("weekly_board") or {}
+
+
+def _wb_cached(key, ttl, fn):
+    hit = _WB_CACHE.get(key)
+    if hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    v = fn()
+    _WB_CACHE[key] = (time.time(), v)
+    return v
+
+
+def _wb_side(sport, points, items, left, on_now):
+    """items: (projection, share of it still to come) for every starter-game still to play."""
+    a, b, team = _WB_SD[sport]
+    rem = sum(pj * f for pj, f in items)
+    var = sum(((a + b * pj) ** 2) * f for pj, f in items) + (team * rem) ** 2
+    return {"points": points, "proj": points + rem, "var": var, "left": left, "on": on_now}
+
+
+def _wb_win(sa, sb):
+    """Win chance (0-100) for side a: normal approximation on the projected finals."""
+    d, v = sa["proj"] - sb["proj"], sa["var"] + sb["var"]
+    if v <= 1e-6:
+        return 100.0 if d > 0.05 else (0.0 if d < -0.05 else 50.0)
+    return 100 * 0.5 * (1 + _math.erf(d / (2 * v) ** 0.5))
+
+
+def _wb_people(sport):
+    return _wb_cached(("people", sport), 600, lambda: _league_people(sport))
+
+
+def wb_nfl_data(week, events, live=None, proj=None, people=None):
+    """Everything the NFL board shows. events = ESPN games of that NFL week."""
+    if live is None:
+        live = league_live("nfl", week)
+        if live and live.get("pairs"):
+            live = espn_topup(live, events)
+    if not live or not live.get("pairs"):
+        return None
+    proj = proj if proj is not None else _wb_cached(("nflproj", week), 1800, lambda: _nfl_proj_fetch(week))
+    people = people if people is not None else _wb_people("nfl")
+    players = sleeper_players("nfl")
+    gofteam = {}
+    for e in events:
+        for t in teams_of(e):
+            gofteam[sl_team(t["team"]["abbreviation"])] = e
+    sides = {}
+    for rid, x in live["rosters"].items():
+        items, left, on = [], 0, 0
+        for p in x["starters"] or []:
+            e = gofteam.get((players.get(p) or {}).get("team"))
+            if e is None:                                   # bye week / no team: nothing to come
+                continue
+            f = 1 - game_elapsed(e)
+            if f <= 0.001:
+                continue
+            left += 1
+            on += e["status"]["type"]["state"] == "in"
+            items.append((max(0.0, float(proj.get(p) or 0)), f))
+        sides[rid] = _wb_side("nfl", float(x["points"]), items, left, on)
+    st_ = [e["status"]["type"]["state"] for e in events]
+    kicks = sorted(parse_time(e["date"]) for e in events if e["status"]["type"]["state"] == "pre")
+    return {"sport": "nfl", "week": week, "pairs": live["pairs"], "sides": sides, "rosters": live["rosters"],
+            "people": people, "games": len(events), "done": st_.count("post"), "live": st_.count("in"),
+            "next_kick": kicks[0] if kicks else None}
+
+
+def wb_nba_data(week, events_today=None, live=None, rows=None, people=None, day0=None):
+    """Everything the NBA board shows. Today: the starters already set; later days: each roster's best lineup."""
+    if live is None:
+        live = league_live("nba", week)
+    if not live or not live.get("pairs"):
+        return None
+    rows = rows if rows is not None else _wb_cached(("nbarows", week), 1800, lambda: _nba_rows_fetch(week))
+    people = people if people is not None else _wb_people("nba")
+    if day0 is None:
+        day0, today_evs = _wb_nba_today()
+        events_today = today_evs if events_today is None else events_today
+    d0 = day0
+    events_today = events_today or []
+    tmap = {}
+    for e in events_today:
+        for t in teams_of(e):
+            a = t["team"]["abbreviation"]
+            tmap[NBA_ESPN_TO_SLEEPER.get(a, a)] = e
+    by_day = {}
+    for pid, d, v in rows:
+        by_day.setdefault(d, {})[pid] = v
+    lg = league_settings("nba") or {}
+    slots = [s for s in (lg.get("roster_positions") or []) if s not in ("BN", "IR", "TAXI")] or \
+        ["PG", "SG", "G", "SF", "PF", "F", "C", "UTIL", "UTIL"]
+    players = sleeper_players("nba")
+    sides, today_left = {}, False
+    for rid, x in live["rosters"].items():
+        items, left, on = [], 0, 0
+        today = by_day.get(d0, {})
+        for p in x["starters"] or []:
+            if p not in today:
+                continue
+            e = tmap.get((players.get(p) or {}).get("team"))
+            f = 0.0
+            if e is not None:
+                f = game_frac(e, "nba")
+                if f is None:                               # already played today
+                    continue
+                on += e["status"]["type"]["state"] == "in"
+            left += 1
+            today_left = True
+            items.append((max(0.0, today[p]), 1 - f))
+        pe = (people or {}).get(rid) or {}
+        pool = [p for p in (pe.get("players") or x.get("players") or []) if p not in (pe.get("inactive") or set())]
+        for d in sorted(by_day):
+            if d <= d0:
+                continue
+            pts = {p: by_day[d][p] for p in pool if p in by_day[d] and by_day[d][p] > 0}
+            picks = []
+            best_lineup(slots, list(pts), pts, "nba", picks)
+            items += [(pts[p], 1.0) for p in picks]
+            left += len(picks)
+        sides[rid] = _wb_side("nba", float(x["points"]), items, left, on)
+    st_ = [e["status"]["type"]["state"] for e in events_today]
+    days_left = len([d for d in by_day if d > d0]) + (1 if today_left else 0)
+    return {"sport": "nba", "week": week, "pairs": live["pairs"], "sides": sides, "rosters": live["rosters"],
+            "people": people, "live": st_.count("in"), "days_left": days_left,
+            "games": sum(s["left"] for s in sides.values())}
+
+
+def _wb_state(data):
+    """pre (nothing played yet) / live / mid (between games) / final (nothing left for anyone)."""
+    if not any(s["left"] for s in data["sides"].values()):
+        return "final"
+    if data.get("live"):
+        return "live"
+    if not any(abs(s["points"]) > 0.01 for s in data["sides"].values()):
+        return "pre"
+    return "mid"
+
+
+def wb_html(data, stamp=None):
+    """The board card: 2 x 3 matchup tiles, each with points now, projected final, win chance and players left."""
+    import html as H
+    sport = data["sport"]
+    state = _wb_state(data)
+    people = data.get("people") or {}
+    unit = "left" if sport == "nfl" else "games left"
+    if sport == "nfl" and state == "pre":
+        unit = "to play"
+    tiles, closest = [], None
+    for ra, rb in data["pairs"]:
+        sa, sb = data["sides"][ra], data["sides"][rb]
+        wa = _wb_win(sa, sb)
+        done = not sa["left"] and not sb["left"]
+        if not done and (closest is None or abs(wa - 50) < abs(closest[0] - 50)):
+            closest = (wa, ra, rb)
+        rows = []
+        for rid, s, w in ((ra, sa, wa), (rb, sb, 100 - wa)):
+            pe = people.get(rid) or {}
+            name = pe.get("manager") or data["rosters"][rid]["manager"]
+            av = (f"<img src='https://sleepercdn.com/avatars/thumbs/{H.escape(pe['avatar'])}'>" if pe.get("avatar")
+                  else f"<div class='wav'>{H.escape(name[:1].upper())}</div>")
+            if done:
+                cls = "won" if w > 50 else ("lost" if w < 50 else "fav")
+                pill = "WON" if w > 50 else ("LOST" if w < 50 else "TIE")
+            else:
+                cls = "fav" if w >= 50 else "dog"
+                shown = ">99" if 99.5 <= w < 100 else ("<1" if 0 < w <= 0.5 else f"{w:.0f}")
+                pill = f"{shown}<small>%</small>"
+            other = sb if s is sa else sa
+            if done:
+                m = abs(s["points"] - other["points"])
+                sub = f"<span class='dn'>{'won' if w > 50 else 'lost' if w < 50 else 'tied'}{f' by {m:.1f}' if m else ''}</span>"
+            elif not s["left"]:
+                sub = "<span class='dn'>all played ✓</span>"
+            else:
+                sub = f"<b>{s['left']}</b> {unit if state != 'pre' else unit.replace('left', 'to play')}"
+                if s["on"]:
+                    sub += f" · <span class='lv'>● {s['on']} {'playing' if sport == 'nfl' else 'on court'}</span>"
+            pj = f"{s['proj']:.1f}" if sport == "nfl" or done else f"{s['proj']:.0f}"
+            now_txt = "" if state == "pre" else f"<div class='wno'><i>now</i> {s['points']:.1f}</div>"
+            if done:
+                pj, now_txt = f"{s['points']:.1f}", ""
+            rows.append(
+                f"<div class='wr {cls}'>{av}<div style='min-width:0'><div class='wn{' s' if len(name) > 14 else ''}'>"
+                f"{H.escape(name)}</div><div class='ws'>{sub}</div></div>"
+                f"<div class='wnum'><div class='wpj'>{pj}</div>{now_txt}</div><div class='wp'>{pill}</div></div>")
+        tag, cls = "", ""
+        fav = sa if wa > 50 else sb
+        fav_trails = (sa["points"] - sb["points"]) * (1 if wa > 50 else -1)
+        under_way = fav["points"] >= 0.3 * max(fav["proj"], 1)       # no "comeback" before the favourite has played
+        if done:
+            tag = "<div class='wtag fn'>FINAL</div>" if state != "final" else ""
+        elif 40 <= wa <= 60:
+            tag, cls = f"<div class='wtag'>🔥 {'TOO CLOSE TO CALL' if state == 'pre' else 'COIN FLIP'}</div>", " close"
+        elif max(wa, 100 - wa) >= 99.5:
+            tag = "<div class='wtag lk'>🔒 ALL BUT OVER</div>"
+        elif state != "pre" and under_way and fav_trails <= -(15 if sport == "nfl" else 60):
+            tag = "<div class='wtag cb'>⚡ COMEBACK ON</div>"
+        tiles.append(f"<div class='wm{cls}'>{tag}{rows[0]}{rows[1]}</div>")
+    # headline + top-right status
+    stamp = stamp or datetime.now(UK).strftime("%H:%M")
     if sport == "nfl":
-        evs = [e for e in fetch("football/nfl/scoreboard").get("events", []) if is_prime(parse_time(e["date"]))]
-        if any(e["status"]["type"]["state"] == "in" and not is_prime(parse_time(e["date"]))
-               for e in fetch("football/nfl/scoreboard").get("events", [])):
-            return False, False, None                     # Sunday window already has its 30-minute updates
+        left_all = sum(s["left"] for s in data["sides"].values())
+        if state == "final":
+            h1 = f"Week {data['week']} is in the books"
+        elif state == "pre":
+            k = data.get("next_kick")
+            h1 = f"Week {data['week']} · " + (f"kicks off {k.astimezone(UK):%A %H:%M}" if k else "projections")
+        else:
+            h1 = f"{data['done']} of {data['games']} games done · {left_all} starters still to play"
     else:
-        d = datetime.now(ET) - timedelta(hours=6)          # an NBA "night" runs into the early hours
-        evs = fetch(f"basketball/nba/scoreboard?dates={d:%Y%m%d}").get("events", [])
-    live_now = any(e["status"]["type"]["state"] == "in" for e in evs)
-    today = [e for e in evs if (now_utc() - parse_time(e["date"])).total_seconds() < 14 * 3600]
-    started = [e for e in today if e["status"]["type"]["state"] != "pre"]
-    all_done = bool(started) and all(e["status"]["type"]["state"] == "post" for e in today)
-    key = f"{sport}-{(datetime.now(ET) - timedelta(hours=6)):%Y-%m-%d}"
-    return live_now, all_done, key
+        dl = data.get("days_left", 0)
+        if state == "final":
+            h1 = f"Week {data['week']} is in the books"
+        else:
+            h1 = (f"Week {data['week']} · " if state == "pre" else "") + \
+                 f"{data['games']} games still to play · {dl} day{'s' if dl != 1 else ''} left"
+    if state == "final":
+        h2 = "Final scores · winners in gold"
+    elif closest:
+        wa, ra, rb = closest
+        na = (people.get(ra) or {}).get("manager") or data["rosters"][ra]["manager"]
+        nb = (people.get(rb) or {}).get("manager") or data["rosters"][rb]["manager"]
+        h2 = f"Closest: <b>{H.escape(na)}</b> v <b>{H.escape(nb)}</b> · {max(wa, 100 - wa):.0f}–{min(wa, 100 - wa):.0f}"
+    else:
+        h2 = ""
+    if state == "live":
+        pill = f"<span class='lv2'>● LIVE</span>UPDATED {stamp} · EVERY 5 MIN"
+    elif state == "final":
+        pill = "<span class='lv2 f'>FINAL</span>WEEK COMPLETE"
+    elif state == "pre":
+        pill = f"<span class='lv2 p'>PROJECTED</span>UPDATED {stamp}"
+    else:
+        pill = f"UPDATED {stamp}"
+    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
+    league = CONFIG[sport].get("league_name", "League").upper()
+    colh = ("<div class='wch'><span></span><span class='p'>" + ("FINAL" if state == "final" else "PROJECTED")
+            + "</span><span class='w'>" + ("RESULT" if state == "final" else "WIN") + "</span></div>")
+    title = f"{H.escape(league)} · WEEK {data['week']} MATCHUPS" if sport == "nfl" else f"{H.escape(league)} LEAGUE"
+    body = (f"<div class='top'><div class='lg'><img src='{logo}'>{title}</div>"
+            f"<div class='pill'>{pill}</div></div>"
+            f"<div class='wbh'><div class='h1'>{H.escape(h1)}</div><div class='h2'>{h2}</div></div>"
+            f"<div class='wbg'>{colh}{colh}{''.join(tiles)}</div>")
+    css = WB_CSS + "body,.card{width:1160px!important}.wbg .wch{margin-top:2px}"
+    html_text = _card("--a:#ee6730;--h:#ffb347" if sport == "nba" else "--a:#1faa59;--h:#5b7bd5", body, None, css,
+                      width=1160)
+    return _nba_theme(html_text, None, f"WEEK {data['week']} MATCHUPS") if sport == "nba" else html_text
 
 
-_BOARD_PENDING = {}
+def _wb_sig(data):
+    return json.dumps([_wb_state(data)] + [[round(s["points"], 1), round(s["proj"], 1), s["left"], s["on"]]
+                                            for _, s in sorted(data["sides"].items())])
+
+
+# -- which week, and when it's on the board
+
+def _wb_nfl_events(week):
+    return _wb_cached(("nflweek", week), 240,
+                      lambda: fetch(f"football/nfl/scoreboard?seasontype=2&week={week}").get("events", []))
+
+
+def wb_nfl_window(week, events=None):
+    """(start, end) UK datetimes: 00:00 on the day of the week's first kick-off, never later than Friday 00:00
+    (Thursday night) -> Tuesday 12:00 after the last game."""
+    events = events if events is not None else _wb_nfl_events(week)
+    if not events:
+        return None
+    kicks = sorted(parse_time(e["date"]).astimezone(UK) for e in events)
+    first, last = kicks[0], kicks[-1]
+    day = first.replace(hour=0, minute=0, second=0, microsecond=0)
+    if first.weekday() in (4, 5, 6):                       # Fri/Sat/Sun first game: from Friday 00:00
+        day -= timedelta(days=first.weekday() - 4)
+    start = day                                            # Wed/Thu games (Thanksgiving, Christmas): that day 00:00
+    end = (last + timedelta(days=(1 - last.weekday()) % 7)).replace(hour=12, minute=0, second=0, microsecond=0)
+    if end <= last:
+        end += timedelta(days=7)
+    return start, min(end, start + timedelta(days=7, hours=12))
+
+
+def wb_nba_window(now=None):
+    """(start, end): Monday 12:00 UK -> next Monday 12:00 UK, for the window containing `now`."""
+    now = now or datetime.now(UK)
+    mon = (now - timedelta(days=now.weekday())).replace(hour=12, minute=0, second=0, microsecond=0)
+    if mon > now:
+        mon -= timedelta(days=7)
+    return mon, mon + timedelta(days=7)
+
+
+def wb_nba_week(monday):
+    """Sleeper NBA week whose games fall in the Monday-Sunday starting at `monday` (UK date)."""
+    sw = int(_wb_sleeper_week("nba") or 1)
+    lo, hi = monday.strftime("%Y-%m-%d"), (monday + timedelta(days=6)).strftime("%Y-%m-%d")
+    for w in (sw, sw + 1, sw - 1):
+        if w < 1:
+            continue
+        ds = [d for _, d, _ in _wb_cached(("nbarows", w), 1800, lambda w=w: _nba_rows_fetch(w))]
+        if any(lo <= d <= hi for d in ds):
+            return w
+    return sw
+
+
+def _wb_sleeper_week(sport):
+    return _wb_cached(("state", sport), 300, lambda: fetch_url(f"{SLEEPER}/state/{sport}").get("week"))
+
+
+def _wb_nba_today():
+    d0 = (datetime.now(ET) - timedelta(hours=6)).strftime("%Y-%m-%d")
+    return d0, _wb_cached(("nbatoday", d0), 60,
+                          lambda: fetch(f"basketball/nba/scoreboard?dates={d0.replace('-', '')}").get("events", []))
+
+
+def _wb_live_now(sport, b):
+    evs = _wb_nfl_events(b["week"]) if sport == "nfl" else _wb_nba_today()[1]
+    return any(e["status"]["type"]["state"] == "in" for e in evs)
+
+
+def _wb_current(sport, lead):
+    """(key, week, start, end) of the board that should be up now (or starts within `lead` seconds), else None."""
+    now = datetime.now(UK)
+    if sport == "nfl":
+        sw = int(_wb_sleeper_week("nfl") or 0)
+        for w in (sw, sw + 1):
+            win = wb_nfl_window(w) if w else None
+            if win and win[0] - timedelta(seconds=lead) <= now < win[1]:
+                return f"nfl-{w}", w, win[0], win[1]
+        return None
+    start, end = wb_nba_window(now + timedelta(seconds=lead))
+    week = _wb_cached(("nbaweek", start.isoformat()), 6 * 3600, lambda: wb_nba_week(start))
+    return f"nba-{start:%Y-%m-%d}", week, start, end
+
+
+def _wb_wake(t):
+    """Make the main loop wake up at time t (it otherwise idles for a few minutes between checks)."""
+    if t > time.time() - 1 and (_NEXT_WAKE["t"] is None or t < _NEXT_WAKE["t"]):
+        _NEXT_WAKE["t"] = max(t, time.time() + 1)
+
+
+def _wb_hook(b):
+    if b.get("where") == "alert":
+        return globals().get("ALERT_HOOK")
+    return NFL_HOOK if b["sport"] == "nfl" else NBA_HOOK
+
+
+def _wb_routed_to_alert():
+    tm = CONFIG.get("test_mode") or {}
+    return bool(tm.get("enabled") and "live" in (tm.get("kinds") or []) and globals().get("ALERT_HOOK"))
+
+
+def _hook_message(hook, mid):
+    """Our own webhook message (dict with channel_id), or None."""
+    try:
+        req = urllib.request.Request(f"{hook}/messages/{mid}", headers={"User-Agent": "DiscordBot (sports-bot, 1.0)"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _wb_adopt(st, sport, b):
+    """First run after the switch: turn tonight's still-running game-night scoreboard into this week's board
+    (edited in place) instead of leaving it stuck on LIVE and posting a second one."""
+    old = st.get("live_boards") or {}
+    cands = [(v.get("t", 0), k) for k, v in old.items()
+             if k.startswith(sport + "-") and v.get("msg") and not v.get("final")
+             and v.get("t", 0) >= b["start"] - 86400]
+    if not cands:
+        return
+    k = max(cands)[1]
+    hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
+    m = _hook_message(hook, old[k]["msg"]) if hook and not (DRY_RUN or CAPTURE is not None) else None
+    if m and m.get("channel_id"):
+        b.update(msg=str(old[k]["msg"]), ch=str(m["channel_id"]), where="main", posted=time.time(), adopted=k)
+        _log_plain(f"{sport} weekly board: took over tonight's scoreboard message {old[k]['msg']}")
+    old.pop(k, None)
+
+
+def _wb_publish(st, b, pend):
+    sport = b["sport"]
+    if b.get("msg"):
+        if CONFIG.get("paused"):
+            return
+        r = discord_edit(_wb_hook(b), b["msg"], pend["png"])
+        if r is None:                                       # someone deleted it: post a new one next time
+            _log_plain(f"{sport} weekly board message is gone: posting a fresh one")
+            b["msg"] = None
+            b["pin"] = {"state": "none"}
+        elif r:
+            b.update(final=pend["final"], sig=pend["sig"], shown=time.time())
+        return
+    _LAST_MSG.clear()
+    routed = _wb_routed_to_alert()
+    if sport == "nba":
+        _POSTER["name"] = (CONFIG.get("nba") or {}).get("bot_name") or "Donald 🏀"
+    try:
+        ok = discord(NFL_HOOK if sport == "nfl" else NBA_HOOK, [], "live", files={"live.png": pend["png"]})
+    finally:
+        _POSTER.clear()
+    if ok and _LAST_MSG.get("id"):
+        b.update(msg=str(_LAST_MSG["id"]), ch=str(_LAST_MSG.get("channel_id") or ""), where="alert" if routed else "main",
+                 posted=time.time(), final=pend["final"], sig=pend["sig"], shown=time.time())
+        b["pin"] = {"state": "none"}
+        _log_plain(f"{sport} weekly board posted for week {b['week']}")
+    elif ok and CAPTURE is not None:
+        b.update(msg="capture", posted=time.time(), final=pend["final"], sig=pend["sig"])
+
+
+def wb_snapshot(sport, b):
+    """Data for the board right now, or None."""
+    if sport == "nfl":
+        evs = _wb_nfl_events(b["week"])
+        return wb_nfl_data(b["week"], evs)
+    return wb_nba_data(b["week"])
 
 
 def maybe_live_board(st):
-    """Post tonight's live scoreboard when the first game starts and edit it every 5 minutes; mark it FINAL at the end.
-    Spoiler-safe: each snapshot is only shown once it's spoiler_delay() seconds old."""
+    """Weekly matchups boards (NFL + NBA): post when the week opens, keep them fresh, pin/unpin on time."""
+    boards = st.setdefault("weekly_boards", {})
+    delay = spoiler_delay()
+    lead = delay + 30
     for sport in ("nfl", "nba"):
-        cfg = (CONFIG.get(sport) or {}).get("live_scoreboard") or {}
+        cfg = _wb_cfg(sport)
         if not cfg.get("enabled", True):
             continue
         try:
-            live_now, done, key = _games_live(sport)
-            if not key:
+            cur = _wb_current(sport, lead)
+            soon = _wb_current(sport, lead + 900)              # a new week opening in the next 15 minutes?
+            if soon and (not cur or soon[0] != cur[0]):
+                _wb_wake(soon[2].timestamp() - lead)
+            if not cur:
                 continue
-            boards = st.setdefault("live_boards", {})
-            b = boards.get(key) or {}
-            pend = _BOARD_PENDING.get(key)
-            # 1) publish a waiting snapshot once it's old enough
-            if pend and time.time() < pend["t"] + spoiler_delay():
-                w = pend["t"] + spoiler_delay()
+            key, week, start, end = cur
+            b = boards.get(key)
+            if b is None:
+                b = {"sport": sport, "week": week, "start": start.timestamp(), "end": end.timestamp(), "msg": None,
+                     "t": 0, "pin": {"state": "none"}}
+                if time.time() >= b["start"]:
+                    _wb_adopt(st, sport, b)
+                boards[key] = b
+            now = time.time()
+            pend = _WB_PENDING.get(key)
+            if pend:
+                if now >= pend["show"]:
+                    _WB_PENDING.pop(key, None)
+                    _wb_publish(st, b, pend)
+                else:
+                    if _NEXT_WAKE["t"] is None or pend["show"] < _NEXT_WAKE["t"]:
+                        _NEXT_WAKE["t"] = pend["show"]
+                continue
+            if (b.get("final") and b.get("msg")) or CONFIG.get("paused"):
+                continue
+            if not b.get("msg") and now - b.get("t", 0) < 60:
+                continue                                    # last post attempt failed: try again in a minute
+            # how often: every 5 min while games are live, hourly otherwise, right away when a game just ended
+            live_now = _wb_live_now(sport, b)
+            every = 300 if (live_now or b.get("was_live")) else int(cfg.get("idle_refresh_min", 60)) * 60
+            just_ended = b.get("was_live") and not live_now
+            if b.get("msg") and now < b.get("t", 0) + every and not just_ended:
+                continue
+            if now < b["start"] - lead:
+                w = b["start"] - lead
                 if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
                     _NEXT_WAKE["t"] = w
-            if pend and time.time() >= pend["t"] + spoiler_delay():
-                hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
-                if b.get("msg"):
-                    r = discord_edit(hook, b["msg"], pend["png"])
-                    if r is None:
-                        boards.pop(key, None)
-                    elif r:
-                        b["final"] = pend["final"]
-                else:
-                    _LAST_MSG.clear()
-                    if sport == "nba":
-                        _POSTER["name"] = (CONFIG.get("nba") or {}).get("bot_name") or "Donald 🏀"
-                    try:
-                        ok = discord(hook, [], "live", files={"live.png": pend["png"]})
-                    finally:
-                        _POSTER.clear()
-                    if ok and _LAST_MSG.get("id"):
-                        boards[key] = {"msg": _LAST_MSG["id"], "t": pend["t"], "final": pend["final"]}
-                _BOARD_PENDING.pop(key, None)
                 continue
-            if pend:
+            data = wb_snapshot(sport, b)
+            b["t"] = now
+            if not data:
                 continue
-            # 2) take a new snapshot every 5 minutes while games are on (and one last FINAL one)
-            need_final = bool(done) and b.get("msg") and not b.get("final")
-            if not live_now and not need_final:
-                continue
-            if b.get("t") and time.time() - b["t"] < 300 and not need_final:
-                continue
-            if sport == "nba":
-                live, ol, _ = nba_ctx(st)
-            else:
-                ctx = nfl_ctx(st, fetch("football/nfl/scoreboard").get("events", []))
-                live, ol = (ctx or {}).get("live"), (ctx or {}).get("ol")
-            if not live or not live.get("pairs") or not ol:
-                continue
-            png = render_card(live_board_html(sport, live, ol, bool(need_final)))
+            state = _wb_state(data)
+            ended = b.get("was_live") and state != "live"
+            b["was_live"] = state == "live"
+            sig = _wb_sig(data)
+            if b.get("msg") and sig == b.get("sig") and not ended:
+                continue                                    # nothing moved: leave the message as it is
+            png = render_card(wb_html(data))
             if png:
-                _BOARD_PENDING[key] = {"png": png, "t": time.time(), "final": bool(need_final)}
-                if key in boards:
-                    boards[key]["t"] = time.time()
-            for k in list(boards)[:-6]:
-                boards.pop(k, None)
+                _WB_PENDING[key] = {"png": png, "t": now, "show": max(now + delay, b["start"]),
+                                    "final": state == "final", "sig": sig}
+                w = _WB_PENDING[key]["show"]
+                if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
+                    _NEXT_WAKE["t"] = w
         except Exception as ex:  # noqa: BLE001
-            _log_plain(f"{sport} live scoreboard skipped: {ex}")
+            _log_plain(f"{sport} weekly board skipped: {ex}")
+    for k in sorted(boards, key=lambda k: boards[k].get("start", 0))[:-6]:
+        if (boards[k].get("pin") or {}).get("state") != "pinned":
+            boards.pop(k, None)
+    try:
+        wb_pins(st)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"weekly board pins skipped: {ex}")
+
+
+# -- pins: catch-up every loop, so a restart never double-pins or misses an unpin
+
+def _pinned_ids(ch):
+    """Message ids pinned in the channel right now, or None if Discord can't be asked."""
+    code, js = discord_api("GET", f"/channels/{ch}/messages/pins?limit=50")
+    if code == 200 and isinstance(js, dict):
+        return {str((i.get("message") or {}).get("id")) for i in js.get("items") or []}
+    code, js = discord_api("GET", f"/channels/{ch}/pins")
+    if code == 200 and isinstance(js, list):
+        return {str(m.get("id")) for m in js}
+    return None
+
+
+def _wb_drop_notice(ch, mid, tries=3):
+    """Delete Discord's "<bot> pinned a message" line (message type 6 pointing at our message).
+    True when deleted, False when not found yet, None when not allowed."""
+    for i in range(tries):
+        code, msgs = discord_api("GET", f"/channels/{ch}/messages?limit=25")
+        for m in msgs or []:
+            if m.get("type") == 6 and str((m.get("message_reference") or {}).get("message_id")) == str(mid):
+                c, _ = discord_api("DELETE", f"/channels/{ch}/messages/{m['id']}")
+                if c in (200, 204, 404):
+                    return True
+                return None if c == 403 else False
+        if code in (401, 403):
+            return None
+        time.sleep(1.5 * (i + 1))
+    return False
+
+
+def _wb_fail(b, what, code):
+    p = b["pin"]
+    p["tries"] = p.get("tries", 0) + 1
+    p["next"] = time.time() + min(1800, 60 * 2 ** min(p["tries"], 5))
+    why = {401: "the bot token is wrong or was reset", 403: "the bot is missing the Pin Messages / Manage Messages "
+           "permission in the channel", 404: "Discord can't find the message", 0: "Discord couldn't be reached"}.get(
+        code, f"Discord said {code}")
+    _log_plain(f"weekly board {what} failed ({code}) for {b['sport']} week {b['week']}, retrying: {why}")
+    if p["tries"] in (3, 10):
+        alert(f"📌 Couldn't {what} the {b['sport'].upper()} week {b['week']} matchups board: {why}",
+              f"wbpin-{b['sport']}-{what}", 6)
+
+
+def wb_pins(st):
+    """Pin the board that should be pinned now, unpin the ones whose time is up, and remove Discord's pin notice."""
+    boards = st.get("weekly_boards") or {}
+    if not BOT_TOKEN or DRY_RUN or CAPTURE is not None or SILENT:
+        if not BOT_TOKEN and any(b.get("msg") for b in boards.values()) and not (DRY_RUN or CAPTURE is not None) \
+                and any(_wb_cfg(s).get("pin", True) for s in ("nfl", "nba")) \
+                and time.time() - st.get("wb_token_alert", 0) > 7 * 86400:
+            st["wb_token_alert"] = time.time()             # once a week, also across restarts
+            alert("📌 Weekly matchups boards are posting but can't be pinned yet: no Discord bot token "
+                  "(DISCORD_BOT_TOKEN) on the server", "wb-notoken", 24 * 7)
+        return
+    now = time.time()
+    newest = {}
+    for k, b in boards.items():
+        if b.get("msg") and b["msg"] != "capture" and b.get("ch"):
+            if b["sport"] not in newest or b["start"] > boards[newest[b["sport"]]]["start"]:
+                newest[b["sport"]] = k
+    # unpins first, so a Monday NBA swap never has two boards pinned at once
+    for k in sorted(boards, key=lambda k: (boards[k].get("start", 0))):
+        b = boards[k]
+        if not b.get("msg") or b["msg"] == "capture" or not b.get("ch"):
+            continue
+        p = b.setdefault("pin", {"state": "none"})
+        want = (_wb_cfg(b["sport"]).get("pin", True) and b["start"] - 120 <= now < b["end"]
+                and newest.get(b["sport"]) == k)
+        if p["state"] == "pinned" and now < b["end"] < now + 900:
+            _wb_wake(b["end"])                              # unpin on the minute, not at the next idle check
+        if now < p.get("next", 0):
+            continue
+        if want and p["state"] != "pinned":
+            ids = _pinned_ids(b["ch"])
+            if ids is not None and b["msg"] in ids:
+                code = 204                                  # already pinned (e.g. before a restart): don't pin twice
+            else:
+                code = _pin(b["ch"], b["msg"], True)
+            if code in (200, 204):
+                p.update(state="pinned", at=now, tries=0, next=0, checked=now)
+                _log_plain(f"pinned {b['sport']} week {b['week']} matchups board")
+                if ids is None or b["msg"] not in ids:
+                    p["notice"] = _wb_drop_notice(b["ch"], b["msg"])
+                else:
+                    p["notice"] = True
+            else:
+                _wb_fail(b, "pin", code)
+        elif not want and p["state"] == "pinned":
+            code = _pin(b["ch"], b["msg"], False)
+            if code in (200, 204, 404):
+                p.update(state="unpinned", at=now, tries=0, next=0)
+                _log_plain(f"unpinned {b['sport']} week {b['week']} matchups board")
+            else:
+                _wb_fail(b, "unpin", code)
+        elif not want and p["state"] == "none" and not p.get("end_checked"):
+            ids = _pinned_ids(b["ch"])                     # crash between pin and save? make sure it's not left up
+            if ids is not None:
+                p["end_checked"] = True
+                if b["msg"] in ids and _pin(b["ch"], b["msg"], False) in (200, 204, 404):
+                    _log_plain(f"unpinned {b['sport']} week {b['week']} matchups board (left over)")
+        elif want and p["state"] == "pinned":
+            if p.get("notice") is False and p.get("notice_tries", 0) < 5:
+                p["notice_tries"] = p.get("notice_tries", 0) + 1
+                p["notice"] = _wb_drop_notice(b["ch"], b["msg"], tries=1)
+            if now - p.get("checked", 0) > 3600:           # hourly: is it really still pinned?
+                ids = _pinned_ids(b["ch"])
+                p["checked"] = now
+                if ids is not None and b["msg"] not in ids:
+                    p["state"] = "none"
+                    _log_plain(f"{b['sport']} week {b['week']} board was not pinned any more: pinning it again")
 
 
 # ---- 4) touchdowns taken away on review (or re-credited) get corrected in place
