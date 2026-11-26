@@ -2476,7 +2476,7 @@ def nba_game_fantasy_html(event, summary, live, max_rows=7):
                   f"vs {H.escape(opp)}</div>")
         prs.append(f"<div class='pr2{' lead' if i == 0 else ''}'><img src='{H.escape(r['hs'])}'>"
                    f"<div><div class='nm2'>{H.escape(r['name'])}<span>{r['team']}</span></div><div class='ln'>{line}</div></div>"
-                   f"<div class='fp{' el' if r['elite'] else ''}'>{fmt_pts(r['fp'])}<small>FPTS</small></div>"
+                   f"{pj_box(r['fp'], pregame_proj('nba', r, live), r['elite'])}"
                    f"<div><div class='ow'>{H.escape(r['owner'])}</div>"
                    f"<span class='bd {'st' if r['starting'] else 'bn'}'>{'STARTING' if r['starting'] else 'BENCH'}</span></div>"
                    f"{mt}</div>")
@@ -2485,7 +2485,7 @@ def nba_game_fantasy_html(event, summary, live, max_rows=7):
         prs.append(f"<div class='pr2'><img src='{H.escape(fa['hs'])}'>"
                    f"<div><div class='nm2'>{H.escape(fa['name'])}<span>{fa['team']}</span></div>"
                    f"<div class='ln'>{raw['pts']} pts · {raw['reb']} reb · {raw['ast']} ast</div></div>"
-                   f"<div class='fp'>{fmt_pts(fa['fp'])}<small>FPTS</small></div>"
+                   f"{pj_box(fa['fp'], pregame_proj('nba', fa, live))}"
                    f"<div><div class='ow'>Nobody</div><span class='bd fa'>FREE AGENT</span></div>"
                    f"<div class='mt'>waiver pickup?</div></div>")
     n = len(prs)
@@ -2499,7 +2499,7 @@ def nba_game_fantasy_html(event, summary, live, max_rows=7):
             f"<div class='big2'>{len([r for r in rows if r['owner']])} league players · "
             f"{fmt_pts(sum(r['fp'] for r in rows if r['owner'] and r['starting']))} fpts from starters</div></div>"
             f"{score_strip()}</div><div class='pl2'>{''.join(prs)}</div>{more}")
-    return _card(f"--a:{ca};--h:{ch}", body, 64 + 70 + n * 62 + (28 if more else 0) + 8)
+    return _card(f"--a:{ca};--h:{ch}", body, 64 + 70 + n * 68 + (28 if more else 0) + 8)
 
 
 def nba_batch_html(mode, events, summaries, live, title):
@@ -2526,7 +2526,7 @@ def nba_batch_html(mode, events, summaries, live, title):
                 bits.append(f"{raw['tpm']} 3pm")
             tops.append(f"<div class='tpr{' one' if i == 0 else ''}'><span class='rk5'>{'⭐' if i == 0 else i + 1}</span>"
                         f"<span class='nm5'>{H.escape(r['name'])}<small>{H.escape(r.get('team', ''))}</small></span>"
-                        f"<span class='fp5'>{fmt_pts(r['fp'])}</span>"
+                        f"<span class='fp5'>{fmt_pts(r['fp'])}</span>{pj_small(r['fp'], pregame_proj('nba', r, live))}"
                         f"<span class='ow5'>{H.escape(r['owner'])}<em class='{'s' if r['starting'] else 'b'}'>"
                         f"{'STARTING' if r['starting'] else 'BENCH'}</em></span>"
                         f"<span class='ln5'>{' · '.join(bits)}</span></div>")
@@ -2633,7 +2633,9 @@ def post_nba_group(mode, events, live):
              "color": 0x17408B}
     if best:
         embed["title"] = f"Best {'so far' if mode == 'HALF-TIME' else 'of the bunch'}: {best['name']} " \
-                         f"{fmt_pts(best['fp'])} ({best['owner']})"
+                         f"{fmt_pts(best['fp'])}" + \
+                         (lambda pj: f" (proj {pj:.1f})" if pj is not None else "")(pregame_proj('nba', best, live)) + \
+                         f" · {best['owner']}"
     cl = closest_matchup_line(live)
     if cl:
         embed["description"] = cl
@@ -3004,13 +3006,13 @@ def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=7):
         prs.append(f"<div class='pr2{' lead' if i == 0 else ''}'><img src='{H.escape(nfl_headshot(r.get('id')))}'>"
                    f"<div><div class='nm2'>{H.escape(r['name'])}<span>{r['team']} · {r.get('pos', '')}</span></div>"
                    f"<div class='ln'>{H.escape(r['line'])}</div></div>"
-                   f"<div class='fp{' el' if r['elite'] else ''}'>{fmt_pts(r['pts'])}<small>FPTS</small></div>"
+                   f"{pj_box(r['pts'], pregame_proj('nfl', r, live), r['elite'])}"
                    f"<div><div class='ow'>{H.escape(r['owner'])}</div>"
                    f"<span class='bd {'st' if r['starting'] else 'bn'}'>{'STARTING' if r['starting'] else 'BENCH'}</span></div>{mt}</div>")
     if fa and fa["pts"] >= 12:
         prs.append(f"<div class='pr2'><img src='{H.escape(nfl_headshot(fa.get('id')))}'>"
                    f"<div><div class='nm2'>{H.escape(fa['name'])}<span>{fa['team']} · {fa.get('pos', '')}</span></div>"
-                   f"<div class='ln'>{H.escape(fa['line'])}</div></div><div class='fp'>{fmt_pts(fa['pts'])}<small>FPTS</small></div>"
+                   f"<div class='ln'>{H.escape(fa['line'])}</div></div>{pj_box(fa['pts'], pregame_proj('nfl', fa, live))}"
                    f"<div><div class='ow'>Nobody</div><span class='bd fa'>FREE AGENT</span></div><div class='mt'>waiver pickup?</div></div>")
     ca, ch = team_cols(away, home)
     strip = (f"<div class='sm'><img src='{H.escape(away['team'].get('logo', ''))}'>{away['team']['abbreviation']} "
@@ -3028,7 +3030,7 @@ def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=7):
             f"<div class='pl2'>{''.join(prs)}</div>{panel}")
     if event["status"].get("period", 0) > 4 and event["status"]["type"].get("state") == "post":
         body = body.replace("<div class='pill'>FULL-TIME</div>", "<div class='pill'>FULL-TIME · OT</div>", 1)
-    return _card(f"--a:{ca};--h:{ch}", body, 64 + 70 + len(prs) * 62 + (60 + ((len(sub) + 1) // 2) * 24 if panel else 0) + 14,
+    return _card(f"--a:{ca};--h:{ch}", body, 64 + 70 + len(prs) * 68 + (60 + ((len(sub) + 1) // 2) * 24 if panel else 0) + 14,
                  OUT_CSS + RECAP_CSS)
 
 
@@ -5794,6 +5796,81 @@ def nfl_defenses(summary, event=None, week=None):
         bits.append(f"{int(s['pts_allow'])} pts allowed")
         d["line"] = " · ".join(bits)
     return out
+
+
+
+# ------------------------------------------------ pre-game projections on every player row
+
+_PJIDX = {}
+
+
+def pregame_proj(sport, row, live=None):
+    """The player's pre-game Sleeper projection (league scoring), or None if Sleeper has none."""
+    try:
+        week = (live or {}).get("week") or fetch_url(f"{SLEEPER}/state/{sport}").get("week")
+        proj = nfl_projections(week) if sport == "nfl" else nba_projections(week)
+        if not proj:
+            return None
+        rid = str(row.get("id") or "")
+        if rid.startswith("def:"):
+            v = proj.get(rid[4:])
+            return round(v, 1) if v is not None else None
+        if sport not in _PJIDX:
+            ix = {}
+            for pid, p in sleeper_players(sport).items():
+                if p.get("full_name"):
+                    if p.get("espn_id"):
+                        ix[f"e:{p['espn_id']}"] = pid
+                    ix[(name_key(p["full_name"]), p.get("team") or "")] = pid
+                    ix.setdefault(name_key(p["full_name"]), pid)
+            _PJIDX[sport] = ix
+        ix = _PJIDX[sport]
+        team = row.get("team") or ""
+        if sport == "nba":
+            team = NBA_ESPN_TO_SLEEPER.get(team, team)
+        else:
+            team = sl_team(team) if team else ""
+        pid = (ix.get(f"e:{rid}") if rid else None) or ix.get((name_key(row.get("name", "")), team)) \
+            or ix.get(name_key(row.get("name", "")))
+        v = proj.get(str(pid)) if pid else None
+        return round(v, 1) if v is not None else None
+    except Exception as e:  # noqa: BLE001
+        log(f"pre-game projection unavailable: {e}")
+        return None
+
+
+def pj_box(pts, pj, elite=False):
+    """Points box with the pre-game projection underneath; gold when the player beat it."""
+    if pj is None:
+        return f"<div class='fp{' el' if elite else ''}'>{fmt_pts(pts)}<small>FPTS</small></div>"
+    beat = pj > 0 and pts >= pj
+    d = pts - pj
+    return (f"<div class='fp pjx{' beat' if beat else (' el' if elite else '')}'>{fmt_pts(pts)}"
+            f"<small>proj {pj:.1f}</small><i class='{'up' if d >= 0 else 'dn'}'>{'+' if d >= 0 else '−'}{abs(d):.1f}</i></div>")
+
+
+def pj_small(pts, pj):
+    if pj is None:
+        return "<span class='pj5'></span>"
+    d = pts - pj
+    return (f"<span class='pj5{' beat' if pj > 0 and pts >= pj else ''}'>proj {pj:.1f}"
+            f"<b class='{'up' if d >= 0 else 'dn'}'>{'+' if d >= 0 else '−'}{abs(d):.1f}</b></span>")
+
+
+FAN_CSS += """
+.pr2{grid-template-columns:44px 1fr 92px 168px 176px!important;height:62px!important}
+.fp.pjx{font-size:19px;padding:3px 0 4px;line-height:1.05}
+.fp.pjx small{font-size:10.5px;letter-spacing:.2px;font-weight:800;opacity:.95;margin-top:2px;text-transform:none}
+.fp.pjx i{display:block;font-style:normal;font-size:10.5px;font-weight:900;margin-top:1px}
+.fp.pjx i.up{color:#7ee2a8}.fp.pjx i.dn{color:#ff9a9e}
+.fp.pjx.el i.up{color:#eafff2}
+.fp.pjx.beat{background:linear-gradient(180deg,#ffd166,#ffb347);color:#1b1305;box-shadow:0 0 14px rgba(255,190,70,.55)}
+.fp.pjx.beat i.up{color:#1b1305}
+.tpr{grid-template-columns:24px 180px 56px 100px 196px 1fr!important}
+.tpr .pj5{font-size:12px;font-weight:800;color:#c9bfb3;white-space:nowrap;font-variant-numeric:tabular-nums}
+.tpr .pj5 b{margin-left:5px}.tpr .pj5 b.up{color:#7ee2a8}.tpr .pj5 b.dn{color:#ff9a9e}
+.tpr .pj5.beat{color:#ffd166}.tpr .pj5.beat b.up{color:#ffd166}
+"""
 
 
 # ===================================================================== main
