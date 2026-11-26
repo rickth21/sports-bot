@@ -475,6 +475,11 @@ def league_index(sport="nfl"):
                 starters = set(r.get("starters") or [])
                 for pid in r.get("players") or []:
                     p = players.get(pid) or {}
+                    if p.get("position") == "DEF":         # team defence: keyed 'def:LAR'
+                        idx[f"def:{pid}"] = {"manager": u.get("display_name", "?"), "starting": pid in starters,
+                                             "name": f"{p.get('last_name', pid)} D/ST", "pos": "DEF", "team": pid,
+                                             "team_name": (u.get("metadata") or {}).get("team_name") or ""}
+                        continue
                     if not p.get("full_name"):
                         continue
                     entry = {
@@ -964,8 +969,8 @@ def nba_players(summary):
                 if ast >= 15: fp += v("bonus_ast_15p")
 
                 parts = [f"{int(pts)} pts", f"{int(reb)} reb", f"{int(ast)} ast"]
-                if stl >= 2: parts.append(f"{int(stl)} stl")
-                if blk >= 2: parts.append(f"{int(blk)} blk")
+                if stl >= 1: parts.append(f"{int(stl)} stl")
+                if blk >= 1: parts.append(f"{int(blk)} blk")
                 if tpm >= 4: parts.append(f"{int(tpm)} 3PM")
                 if fg: parts.append(f"{fg} FG")
                 tag = " · triple-double" if doubles >= 3 else ""
@@ -1300,8 +1305,8 @@ def nba_card_html(event, summary, players, tag):
     if pog:
         hs = headshot(summary, pog["name"])
         r = pog["raw"]
-        st = f"{r['pts']} PTS · {r['reb']} REB · {r['ast']} AST" + (f" · {r['stl']} STL" if r["stl"] >= 2 else "") + \
-             (f" · {r['blk']} BLK" if r["blk"] >= 2 else "")
+        st = f"{r['pts']} PTS · {r['reb']} REB · {r['ast']} AST" + (f" · {r['stl']} STL" if r["stl"] >= 1 else "") + \
+             (f" · {r['blk']} BLK" if r["blk"] >= 1 else "")
         pog_html = (f"<div class='pog'>{'<img src=' + chr(39) + H.escape(hs) + chr(39) + '>' if hs else ''}<div>"
                     f"<div class='pl'>PLAYER OF THE GAME</div><div class='pn'>{H.escape(pog['name'])}"
                     f"<span class='chip'>{fmt_pts(pog['fp'])}</span></div><div class='ps'>{st}</div></div></div>")
@@ -2444,7 +2449,7 @@ def nba_game_fantasy_html(event, summary, live, max_rows=7):
     for i, r in enumerate(owned):
         raw = r["raw"]
         line = f"{raw['pts']} pts · {raw['reb']} reb · {raw['ast']} ast" + \
-               (f" · {raw['stl']} stl" if raw["stl"] >= 2 else "") + (f" · {raw['blk']} blk" if raw["blk"] >= 2 else "") + \
+               (f" · {raw['stl']} stl" if raw["stl"] >= 1 else "") + (f" · {raw['blk']} blk" if raw["blk"] >= 1 else "") + \
                (f" · {raw['tpm']} 3pm" if raw["tpm"] >= 3 else "")
         m = mu.get(r["owner"])
         mt = ""
@@ -3028,6 +3033,7 @@ V2_CSS = """
 .mrw .pl{font-size:14px!important;white-space:normal!important;line-height:1.5;margin-top:5px;letter-spacing:0!important;color:#cfd5e1}
 .mrw .pl.none{font-size:12.5px!important;color:#6f788b!important;font-style:italic}
 .mrw .pc{display:inline-block;background:#f5c542;color:#1b1f2a;font-weight:800;border-radius:6px;padding:1px 8px;margin:2px 3px 2px 0;font-size:14px}
+.mrw .pc small{font-size:11.5px;font-weight:800;opacity:.72;margin-left:6px}
 .mrw.hot{background:rgba(245,197,66,.10)!important;box-shadow:inset 3px 0 0 #f5c542}
 .mrw.hot2{background:rgba(245,197,66,.10)!important;box-shadow:inset -3px 0 0 #f5c542}
 .mrw.hot.hot2{box-shadow:inset 3px 0 0 #f5c542,inset -3px 0 0 #f5c542}
@@ -3077,7 +3083,8 @@ V2_CSS = """
 """
 
 
-def matchup_rows_html(live, ol, base=None, delta=None, players_label="playing", max_names=5, show_teams=None):
+def matchup_rows_html(live, ol, base=None, delta=None, players_label="playing", max_names=5, show_teams=None,
+                      proj=None):
     """v2: one row per matchup, nothing clipped. delta = points gained since last update per roster."""
     import html as H
     players = sleeper_players("nfl")
@@ -3092,11 +3099,17 @@ def matchup_rows_html(live, ol, base=None, delta=None, players_label="playing", 
                 pp = players.get(p) or {}
                 if show_teams is not None and pp.get("team") not in show_teams:
                     continue
-                names.append(pp.get("full_name") and short_name(pp["full_name"]) or f"{pp.get('last_name', p)} D/ST")
+                nm = pp.get("full_name") and short_name(pp["full_name"]) or f"{pp.get('last_name', p)} D/ST"
+                if proj is not None:
+                    pos = pp.get("position") or "DEF"
+                    pj = proj.get(str(p))
+                    nm = (nm, f"{pos} · proj {pj:.1f}" if pj else pos)
+                names.append(nm)
             cap = max_names or len(names)
             if names:
                 pl = (f"<div class='pl'><b>{len(names)}</b> {players_label}<br>" +
-                      "".join(f"<span class='pc'>{H.escape(n)}</span>" for n in names[:cap]) +
+                      "".join(f"<span class='pc'>{H.escape(n[0])}<small>{H.escape(n[1])}</small></span>" if isinstance(n, tuple)
+                              else f"<span class='pc'>{H.escape(n)}</span>" for n in names[:cap]) +
                       (f" <span style='color:#9aa3b5'>+{len(names) - cap} more</span>" if len(names) > cap else "") + "</div>")
             else:
                 pl = f"<div class='pl none'>{'nobody left to play' if show_teams is None else 'nobody in this game'}</div>"
@@ -3168,7 +3181,7 @@ def _preview_rows(live, ol, show_teams, league):
     sub = dict(live, pairs=hot)
     html_rows = (f"<div class='sec'>{H.escape(league.upper())} · MATCHUPS WITH PLAYERS IN THIS GAME</div>"
                  f"<div class='rows' style='gap:8px;margin-top:8px'>"
-                 f"{matchup_rows_html(sub, ol, max_names=None, show_teams=show_teams, players_label='playing' if show_teams is None else 'in this game')}</div>")
+                 f"{matchup_rows_html(sub, ol, max_names=None, show_teams=show_teams, players_label='playing' if show_teams is None else 'in this game', proj=nfl_projections(live['week']))}</div>")
     if cold:
         html_rows += f"<div class='sec'>OTHER MATCHUPS · WIN CHANCE</div>{compact_matchups_html(live, ol, cold)}"
     return html_rows
@@ -3747,11 +3760,31 @@ _post_nba_group_v1 = post_nba_group
 _NBA_STATE = {}
 
 
+def nba_odds_due(st):
+    """NBA playoff odds: on every post in the last 6 regular-season weeks; before that only on the
+    first NBA post on the days in config (default Wednesday + Friday; Monday's recap has them too)."""
+    cfg = CONFIG["nba"].get("playoff_odds") or {}
+    try:
+        pws = int(league_settings("nba").get("settings", {}).get("playoff_week_start") or 0)
+        week = int(fetch_url(f"{SLEEPER}/state/nba").get("week") or 0)
+        if pws and week >= pws - int(cfg.get("every_post_weeks_before_playoffs", 6)):
+            return True
+    except Exception as e:  # noqa: BLE001
+        log(f"NBA week unavailable: {e}")
+    now = datetime.now(UK)
+    return (WEEKDAYS[now.weekday()] in cfg.get("days", ["Wednesday", "Friday"])
+            and st.get("nba_odds_day") != now.strftime("%Y-%m-%d"))
+
+
 def _with_nba_odds(fn):
     def wrapped(*a, **k):
         try:
-            live, ol, base = nba_ctx(_NBA_STATE.setdefault("st", {}))
-            _NBA_ODDS.update(ol=ol, base=base)
+            st = _NBA_STATE.setdefault("st", {})
+            _NBA_ODDS.clear()
+            if nba_odds_due(st):
+                live, ol, base = nba_ctx(st)
+                _NBA_ODDS.update(ol=ol, base=base)
+                st["nba_odds_day"] = datetime.now(UK).strftime("%Y-%m-%d")
         except Exception as ex:  # noqa: BLE001
             log(f"NBA odds unavailable: {ex}")
             _NBA_ODDS.clear()
@@ -3981,6 +4014,212 @@ def maybe_daily_race(st):
                                        f"{now:%A %-d %B}", embed, "race.png"):
         st["race_day"] = today
         st["race_snap"] = {str(r): v["po"] for r, v in ol.items()}
+
+
+# ------------------------------------------------ kickers in the player lists, half-time post, projections
+
+def nfl_kickers(summary):
+    """Kickers who have kicked in this game, with league fantasy points (same shape as nfl_fantasy rows)."""
+    sc = league_scoring("nfl")
+    dists = {}
+    for p in summary.get("scoringPlays", []):
+        m = re.match(r"^(.+?) (\d+) Yd Field Goal", p.get("text") or "")
+        if m:
+            dists.setdefault(name_key(m.group(1)), []).append(int(m.group(2)))
+    out = []
+    for team in summary.get("boxscore", {}).get("players", []):
+        cat = next((c for c in team.get("statistics", []) if c.get("name") == "kicking"), None)
+        for a in (cat or {}).get("athletes") or []:
+            s = dict(zip(cat.get("keys", []), a.get("stats", [])))
+            fgm, fga = (int(num(x)) for x in (str(s.get("fieldGoalsMade/fieldGoalAttempts", "0/0")) + "/0").split("/")[:2])
+            xpm, xpa = (int(num(x)) for x in (str(s.get("extraPointsMade/extraPointAttempts", "0/0")) + "/0").split("/")[:2])
+            if not (fga or xpa):
+                continue
+            ds = dists.get(name_key(a["athlete"]["displayName"]), [])
+            pts = sum(kicker_fpts(d) for d in ds) + max(0, fgm - len(ds)) * kicker_fpts(40)
+            pts += xpm * float(sc.get("xpm") or 0) + (xpa - xpm) * float(sc.get("xpmiss") or 0)
+            pts += (fga - fgm) * float(sc.get("fgmiss") or 0)
+            bits = []
+            if fga:
+                bits.append(f"FG {fgm}/{fga}" + (f" ({', '.join(str(d) for d in ds)} yds)" if ds else ""))
+            if xpa:
+                bits.append(f"XP {xpm}/{xpa}")
+            out.append({"id": str(a["athlete"]["id"]), "name": a["athlete"]["displayName"],
+                        "team": team["team"]["abbreviation"], "pos": "K", "pts": pts,
+                        "line": " · ".join(bits), "elite": False})
+    return out
+
+
+_nfl_fantasy_base = nfl_fantasy
+
+
+def nfl_fantasy(summary):
+    """Offensive players + kickers, best first (kickers only show where their points earn a place)."""
+    out = _nfl_fantasy_base(summary)
+    try:
+        out = out + [k for k in nfl_kickers(summary) if k["pts"] > 0]
+    except Exception as e:  # noqa: BLE001
+        log(f"kicker points unavailable: {e}")
+    out.sort(key=lambda x: -x["pts"])
+    return out
+
+
+def nfl_half_html(event, summary, live, ol, base):
+    """Half-time: the full-time card's layout, with everyone's points at the half."""
+    h = nfl_game_fantasy_html(event, summary, live, ol, base)
+    return (h.replace("<div class='pill'>FULL-TIME</div>", "<div class='pill'>HALF-TIME</div>", 1)
+             .replace("YOUR LEAGUE'S PLAYERS IN THIS GAME", "YOUR LEAGUE'S PLAYERS · POINTS AT THE HALF", 1))
+
+
+def post_prime_half(event, summary, ctx):
+    away, home = teams_of(event)
+    a, h = int(num(away.get("score"))), int(num(home.get("score")))
+    owned = [(p, o) for p in nfl_fantasy(summary) for o in [league_owner(p.get("id"), p["name"])] if o]
+    title = (f"Half-time · {owned[0][0]['name']} leads the way with {fmt_pts(owned[0][0]['pts'])} for {owned[0][1]['manager']}"
+             if owned else f"Half-time · {away['team'].get('name')} {a}–{h} {home['team'].get('name')}")
+    embed = {"author": AU_NFL(), "color": 0xD97757, "title": title}
+    content = f"⏸️ **HALF-TIME** · {away['team'].get('name')} {a}–{h} {home['team'].get('name')}"
+    return _post_card(NFL_HOOK, nfl_half_html(event, summary, ctx["live"], ctx["ol"], ctx["base"]),
+                      content, embed, "half.png")
+
+
+_nfl_prime_slot_base = nfl_prime_slot
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    """Prime-time window + a half-time post for each game."""
+    for e in slot:
+        if e["status"]["type"].get("name") != "STATUS_HALFTIME":
+            continue
+        g = st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})
+        if g.get("half"):
+            continue
+        ctx = getctx()
+        if ctx is None:
+            g["half"] = True
+            continue
+        summary = fetch(f"football/nfl/summary?event={e['id']}")
+        if post_prime_half(e, summary, ctx):
+            g["half"] = True
+    return _nfl_prime_slot_base(slot, st, getctx, force)
+
+
+_PROJ = {}
+
+
+def nfl_projections(week):
+    """Sleeper projections for the week, scored with the league's own settings: {sleeper pid: pts}."""
+    if week in _PROJ:
+        return _PROJ[week]
+    out = {}
+    try:
+        season = fetch_url(f"{SLEEPER}/state/nfl").get("season")
+        rows = fetch_url(f"https://api.sleeper.app/projections/nfl/{season}/{week}?season_type=regular")
+        sc = dict(league_scoring("nfl"))
+        if "fgm_50p" not in sc:
+            sc["fgm_50p"] = sc.get("fgm_50_59", 0)
+        for r in rows or []:
+            s = r.get("stats") or {}
+            out[str(r.get("player_id"))] = sum(float(v or 0) * float(sc[k]) for k, v in s.items()
+                                               if k in sc and isinstance(v, (int, float)))
+    except Exception as e:  # noqa: BLE001
+        log(f"projections unavailable: {e}")
+    _PROJ[week] = out
+    return out
+
+
+# ------------------------------------------------ team defences (DEF) in the player lists
+
+def nfl_defenses(summary, event=None):
+    """Both team defences with league fantasy points (sacks, takeaways, TDs, safeties, points allowed)."""
+    sc = league_scoring("nfl")
+    v = lambda k: float(sc.get(k) or 0)  # noqa: E731
+    box = summary.get("boxscore", {})
+    plist = box.get("players", [])
+    if len(plist) != 2:
+        return []
+
+    def cat_sum(team, cat, key):
+        tot = 0.0
+        for c in team.get("statistics", []):
+            if c.get("name") == cat:
+                keys = c.get("keys", [])
+                for a in c.get("athletes", []):
+                    s = dict(zip(keys, a.get("stats", [])))
+                    tot += num(s.get(key, 0))
+        return tot
+
+    scores = {}
+    for t in (teams_of(event) if event else []):
+        scores[t["team"]["abbreviation"]] = int(num(t.get("score")))
+    if not scores:
+        hdr = (summary.get("header") or {}).get("competitions", [{}])[0].get("competitors", [])
+        scores = {c["team"]["abbreviation"]: int(num(c.get("score"))) for c in hdr}
+    out = []
+    for i, me in enumerate(plist):
+        opp = plist[1 - i]
+        ab, oab = me["team"]["abbreviation"], opp["team"]["abbreviation"]
+        sacks = cat_sum(me, "defensive", "sacks")
+        ints = cat_sum(opp, "passing", "interceptions")
+        fum_rec = cat_sum(opp, "fumbles", "fumblesLost")
+        ff = cat_sum(opp, "fumbles", "fumbles")
+        st_td = cat_sum(me, "kickReturns", "kickReturnTouchdowns") + cat_sum(me, "puntReturns", "puntReturnTouchdowns")
+        def_td = safeties = 0
+        for p in summary.get("scoringPlays", []):
+            if (p.get("team") or {}).get("abbreviation") != ab:
+                continue
+            ty = (p.get("type") or {})
+            if ty.get("abbreviation") == "SF" or "safety" in ty.get("text", "").lower():
+                safeties += 1
+            elif re.search(r"interception return|fumble return|fumble recovery", p.get("text", ""), re.I):
+                def_td += 1
+        allowed = scores.get(oab)
+        pa = 0.0
+        if allowed is not None:
+            for lo, hi, k in ((0, 0, "pts_allow_0"), (1, 6, "pts_allow_1_6"), (7, 13, "pts_allow_7_13"),
+                              (14, 20, "pts_allow_14_20"), (21, 27, "pts_allow_21_27"), (28, 34, "pts_allow_28_34"),
+                              (35, 999, "pts_allow_35p")):
+                if lo <= allowed <= hi:
+                    pa = v(k)
+        pts = (sacks * v("sack") + ints * v("int") + fum_rec * v("fum_rec") + ff * v("ff") + safeties * v("safe")
+               + def_td * v("def_td") + st_td * v("def_st_td") + pa)
+        bits = []
+        if sacks: bits.append(f"{sacks:g} sack{'s' if sacks != 1 else ''}")
+        if ints: bits.append(f"{int(ints)} INT")
+        if fum_rec: bits.append(f"{int(fum_rec)} fumble rec")
+        if def_td + st_td: bits.append(f"{int(def_td + st_td)} TD")
+        if safeties: bits.append(f"{safeties} safety")
+        if allowed is not None: bits.append(f"{allowed} pts allowed")
+        sl = sl_team(ab)
+        name = f"{(me['team'].get('displayName') or me['team'].get('name') or ab).split()[-1]} D/ST"
+        out.append({"id": f"def:{sl}", "name": name, "team": ab, "pos": "DEF", "pts": pts,
+                    "line": " · ".join(bits), "elite": pts >= CONFIG["nfl"]["elite_threshold"]["other"]})
+    return out
+
+
+_nfl_fantasy_k = nfl_fantasy
+
+
+def nfl_fantasy(summary):
+    """Players + kickers + team defences, best first."""
+    out = _nfl_fantasy_k(summary)
+    try:
+        out = out + [d for d in nfl_defenses(summary) if d["pts"]]
+    except Exception as e:  # noqa: BLE001
+        log(f"defence points unavailable: {e}")
+    out.sort(key=lambda x: -x["pts"])
+    return out
+
+
+_nfl_headshot_base = nfl_headshot
+
+
+def nfl_headshot(pid):
+    """Player headshot, or the team logo for a defence ('def:LAR')."""
+    if str(pid or "").startswith("def:"):
+        ab = str(pid)[4:].lower()
+        return f"https://a.espncdn.com/i/teamlogos/nfl/500/{ {'was': 'wsh'}.get(ab, ab) }.png"
+    return _nfl_headshot_base(pid)
 
 
 # ===================================================================== main
