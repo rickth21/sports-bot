@@ -8215,6 +8215,12 @@ TRY_CSS = """
 """
 TRY_GIVE_UP = 600                                          # no try after 10 minutes: stop waiting
 _TRY_TAG = {"tag": None}
+_TEAM_SIDE = {}                                            # team abbreviation -> "away" / "home" (current games)
+
+
+def _note_sides(event):
+    for t in teams_of(event):
+        _TEAM_SIDE[t["team"]["abbreviation"]] = t.get("homeAway") or ""
 
 
 def _td_prev_score(play, summary):
@@ -8240,6 +8246,19 @@ def _td_drive_play(summary, pid):
     return None, None
 
 
+def _try_gain(play, summary):
+    """(points the scoring team got on top of the 6, points the other team got) according to ESPN's score,
+    or (None, None) when the earlier scores can't explain this play (e.g. an incomplete feed)."""
+    a0, h0 = _td_prev_score(play, summary)
+    away = teams_of_play_side(play, summary)
+    a1, h1 = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    mine = (a1 - a0 if away else h1 - h0) - 6
+    theirs = (h1 - h0) if away else (a1 - a0)
+    if not (0 <= mine <= 2 and theirs in (0, 2)):
+        return None, None
+    return mine, theirs
+
+
 def td_try(play, summary):
     """Result of the try after this touchdown, or None while it isn't in yet (or never comes).
     dict(label, cls ok/no). The score is the judge: a "good" try only counts once ESPN's score shows it."""
@@ -8248,20 +8267,16 @@ def td_try(play, summary):
     dp, _ = _td_drive_play(summary, play.get("id"))
     pa = (dp or {}).get("pointAfterAttempt") or {}
     pa_id = pa.get("id") if pa.get("id") not in (0, None) else None
-    a0, h0 = _td_prev_score(play, summary)
-    away = teams_of_play_side(play, summary)
-    a1, h1 = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
-    mine = (a1 - a0 if away else h1 - h0) - 6
-    theirs = (h1 - h0) if away else (a1 - a0)
-    if theirs >= 2:
+    mine, theirs = _try_gain(play, summary)
+    known = mine is not None
+    if known and theirs == 2:
         return {"label": "✗ DEFENSIVE 2-PT RETURN", "cls": "no"}
-    if not pat and pa_id is None and mine <= 0:
+    if not pat and pa_id is None and (not known or mine == 0):
         return None                                        # nothing yet
     two = bool(re.search(r"two-point|2pt|2-pt", pat)) or pa_id in (15, 16) or mine == 2
     failed = bool(re.search(r"fail|miss|block|no good", pat)) or pa_id in (62, 43) \
         or (pa_id in (15, 16) and not pa.get("value"))
-    need = 2 if two else 1
-    if not failed and mine < need:
+    if known and not failed and mine < (2 if two else 1):
         return None                                        # feed says good but the score isn't there yet
     if two:
         return {"label": "✓ 2-PT GOOD", "cls": "ok"} if not failed else {"label": "✗ 2-PT FAILED", "cls": "no"}
@@ -8276,20 +8291,28 @@ def teams_of_play_side(play, summary):
     comps = ((summary.get("header") or {}).get("competitions") or [{}])[0].get("competitors") or []
     abbr = (play.get("team") or {}).get("abbreviation")
     for c in comps:
-        if (c.get("team") or {}).get("abbreviation") == abbr:
+        if (c.get("team") or {}).get("abbreviation") == abbr and c.get("homeAway"):
             return c.get("homeAway") == "away"
-    return False
+    if abbr in _TEAM_SIDE:                                 # header can't tell: from the scoreboard
+        return _TEAM_SIDE[abbr] == "away"
+    a0, h0 = _td_prev_score(play, summary)
+    return int(num(play.get("awayScore"))) - a0 >= 6
 
 
 def td_only_play(play, summary):
     """The scoring play as it stood the moment the touchdown was scored: no try, score +6 only."""
     p = _copy.deepcopy(play)
     p["text"] = re.sub(r"\s*\([^()]*\)\s*$", "", p.get("text") or "")
-    a0, h0 = _td_prev_score(play, summary)
+    mine, theirs = _try_gain(play, summary)
+    if mine is None:                                       # earlier scores unknown: go by the try itself
+        res = td_try(play, summary) or {}
+        mine, theirs = (2 if "2-PT GOOD" in res.get("label", "") else 1 if "POINT GOOD" in res.get("label", "")
+                        else 0), (2 if "DEFENSIVE" in res.get("label", "") else 0)
+    a1, h1 = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
     if teams_of_play_side(play, summary):
-        p["awayScore"], p["homeScore"] = a0 + 6, h0
+        p["awayScore"], p["homeScore"] = a1 - mine, h1 - theirs
     else:
-        p["awayScore"], p["homeScore"] = a0, h0 + 6
+        p["awayScore"], p["homeScore"] = a1 - theirs, h1 - mine
     return p
 
 
@@ -8331,13 +8354,14 @@ _post_td_try = post_td_fantasy
 
 def post_td_fantasy(event, play, summary, ctx):
     """Post the touchdown with the try only if it's old enough to show; otherwise remember to edit it in."""
+    _note_sides(event)
     st = _NFL_ST.get("st")
     res = None
     try:
         res = td_try(play, summary)
     except Exception as ex:  # noqa: BLE001
         _log_plain(f"try check skipped: {ex}")
-    send_at = _SEND_AT.get("t") or time.time()
+    send_at = max(_SEND_AT.get("t") or 0, time.time())    # a late post goes out now
     show = res is not None and st is not None and _try_moment(st, play, summary) + spoiler_delay() <= send_at + 1
     if res is not None and st is None:
         show = True
@@ -8398,8 +8422,13 @@ def td_try_tick(st, slot, getctx):
             res = td_try(p, summary) if p else None
             if res is None:
                 if age > TRY_GIVE_UP or (over and age > 300) or (p is None and age > 300):
-                    r["try"] = "gave_up"                   # no try (walk-off, kneel, feed never had it)
-                    _log_plain(f"touchdown {pid}: no try after {age / 60:.0f} min, leaving the post as it is")
+                    r["try"] = "gave_up"                   # no try (walk-off, game over, feed never had it)
+                    _log_plain(f"touchdown {pid}: no try after {age / 60:.0f} min")
+                    ctx = getctx() if p else None
+                    if ctx:                                # take "conversion to come" off the card (nothing new shown)
+                        img, name, _ = _rebuild_td_image(e, td_only_play(p, summary), summary, ctx, None)
+                        if img and not r.get("done"):
+                            discord_edit(NFL_HOOK, r["msg"], img, name)
                 else:
                     waiting = True
                 continue
@@ -8435,10 +8464,27 @@ def td_try_tick(st, slot, getctx):
     return waiting
 
 
+_td_ready_try = td_ready
+
+
+def td_ready(summary, play, first_seen):
+    """Also note the moment we first see the try of a touchdown that isn't posted yet (for the spoiler rule)."""
+    st = _NFL_ST.get("st")
+    if st is not None and (play.get("type") or {}).get("abbreviation") == "TD":
+        try:
+            if td_try(play, summary) is not None:
+                _try_moment(st, play, summary)
+        except Exception:  # noqa: BLE001
+            pass
+    return _td_ready_try(summary, play, first_seen)
+
+
 _nfl_prime_slot_try = nfl_prime_slot
 
 
 def nfl_prime_slot(slot, st, getctx, force=False):
+    for e in slot:
+        _note_sides(e)
     active = _nfl_prime_slot_try(slot, st, getctx, force)
     try:
         if td_try_tick(st, slot, getctx):
