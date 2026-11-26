@@ -1,6 +1,6 @@
 {
   "bot": {
-    "name": "Donald Claude",
+    "name": "Donald 🏈",
     "image_only": true,
     "avatar_url": "https://raw.githubusercontent.com/rickth21/sports-bot/main/avatar.png"
   },
@@ -86,7 +86,8 @@
         "Friday"
       ],
       "every_post_weeks_before_playoffs": 6
-    }
+    },
+    "bot_name": "Donald 🏀"
   },
   "spoiler_delay_seconds": 60,
   "live_poll_seconds": 15

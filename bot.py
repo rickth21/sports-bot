@@ -48,6 +48,7 @@ STALE_HOURS = 30         # never post results for games older than this
 TD_PAT_WAIT = 0          # seconds to wait for the extra point to be added to a TD (0 = post straight away)
 
 SILENT = False           # True on the very first run: mark everything as seen, post nothing
+_POSTER = {}              # per-post webhook name override (NBA posts use their own name)
 CAPTURE = None           # list -> collect embeds instead of posting (simulator)
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -112,7 +113,7 @@ def discord(hook, embed, label="", content=None, files=None):
                     fp = Path(_tf2.mkdtemp()) / name
                     fp.write_bytes(data)
                     atts.append(fp.as_uri())
-            CAPTURE.append({"content": content, "embeds": ems, "attachments": atts})
+            CAPTURE.append({"content": content, "embeds": ems, "attachments": atts, "username": _POSTER.get("name")})
         else:
             CAPTURE.append(embed)
         return True
@@ -130,7 +131,7 @@ def discord(hook, embed, label="", content=None, files=None):
                 print(f"({em['footer']['text']})")
         return True
     who = CONFIG.get("bot") or {}
-    payload = {"username": who.get("name", "Donald Claude"), "embeds": embeds[:10]}
+    payload = {"username": _POSTER.get("name") or who.get("name", "Donald Claude"), "embeds": embeds[:10]}
     if who.get("avatar_url"):
         payload["avatar_url"] = who["avatar_url"]
     if content:
@@ -5232,6 +5233,80 @@ def _pre_total(play, a_s, h_s, abbr, away):
     if m and not re.search(r"fail|miss|block|no good", m.group(1), re.I):
         pts += 2 if re.search(r"two-point|2pt|2-pt", m.group(1), re.I) else 1
     return a_s + h_s - pts
+
+
+# ------------------------------------------------ NBA: its own look so it never blends in with the NFL posts
+
+NBA_THEME_CSS = """
+.bg{opacity:1!important;background:
+ radial-gradient(circle at 50% -6%,transparent 0 210px,rgba(255,255,255,.22) 210px 214px,transparent 215px),
+ linear-gradient(180deg,rgba(14,9,5,.62) 0%,rgba(14,9,5,.86) 55%,rgba(14,9,5,.92) 100%),
+ repeating-linear-gradient(90deg,#c26a24 0 58px,#b45f1e 58px 60px,#cf7630 60px 118px,#b45f1e 118px 120px)!important}
+.nbar{margin:-26px -32px 14px;padding:10px 32px;display:flex;align-items:center;gap:12px;
+ background:linear-gradient(90deg,#ee6730,#f58426 55%,#ffb347);color:#1a0f06;font-weight:900;font-size:17px;letter-spacing:3px;
+ box-shadow:0 4px 18px rgba(245,132,38,.45)}
+.nbar img{width:30px;height:30px;background:#fff;border-radius:7px;padding:2px}
+.nbar .b{font-size:22px}
+.pr2,.lg2,.hl,.sbx{background:rgba(16,11,7,.78)!important}
+.pr2.lead{background:rgba(52,30,14,.88)!important}
+.hl{border-left-color:#f58426!important}
+.sbx .clk{color:#ffb347!important}
+"""
+
+
+def _nba_theme(html_text, event=None, label="FULL-TIME"):
+    ribbon = f"<div class='nbar'><span class='b'>🏀</span><img src='{NBA_LOGO}'>NBA · {label}</div>"
+    i = html_text.find("<div class='in'>")
+    if i >= 0:
+        html_text = html_text[:i + 16] + ribbon + html_text[i + 16:]
+    if event is not None:                                   # single game: big scoreline under the top bar
+        away, home = teams_of(event)
+        a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+        st = event["status"]["type"]
+        clock = "FINAL" + (" · OT" if event["status"].get("period", 0) > 4 else "") if st.get("state") == "post" else "HALF-TIME"
+        j = html_text.find("<div class='top'>")
+        k = html_text.find("</div></div>", j) + len("</div></div>")
+        if j >= 0:
+            html_text = html_text[:k] + score_hero(event, a_s, h_s, clock) + html_text[k:]
+        html_text = re.sub(r"<div class='sm'>.*?</div>(?=</div>)", "", html_text, count=1, flags=re.S)
+    return html_text.replace("</style>", SB_CSS + NBA_THEME_CSS + "</style>", 1)
+
+
+_nba_game_html_themed = nba_game_fantasy_html
+
+
+def nba_game_fantasy_html(event, summary, live, max_rows=7):
+    return _nba_theme(_nba_game_html_themed(event, summary, live, max_rows), event)
+
+
+_nba_batch_html_themed = nba_batch_html
+
+
+def nba_batch_html(mode, events, summaries, live, title):
+    return _nba_theme(_nba_batch_html_themed(mode, events, summaries, live, title), None,
+                      "HALF-TIME" if "HALF" in str(mode).upper() else "FULL-TIME")
+
+
+def _nba_post(html_text, content, embed, name):
+    _POSTER["name"] = (CONFIG.get("nba") or {}).get("bot_name") or "Donald 🏀"
+    try:
+        return _post_card(NBA_HOOK, html_text, content, embed, name)
+    finally:
+        _POSTER.clear()
+
+
+# ------------------------------------------------ poster names: Donald 🏈 for NFL, Donald 🏀 for NBA
+
+_post_weekly_recap_named = post_weekly_recap
+
+
+def post_weekly_recap(sport, week, live, settings):
+    if sport == "nba":
+        _POSTER["name"] = (CONFIG.get("nba") or {}).get("bot_name") or "Donald 🏀"
+    try:
+        return _post_weekly_recap_named(sport, week, live, settings)
+    finally:
+        _POSTER.clear()
 
 
 # ===================================================================== main
