@@ -26,6 +26,12 @@
   },
   "401909320": {
    "date": "2026-11-26"
+  },
+  "401909321": {
+   "date": "2026-11-26"
+  },
+  "401909322": {
+   "date": "2026-11-26"
   }
  },
  "nfl": {
@@ -38,85 +44,100 @@
   "401873080": {
    "date": "2026-11-26",
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873081": {
    "date": "2026-11-26",
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873082": {
    "date": "2026-11-27",
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873083": {
    "date": "2026-11-27",
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873084": {
    "date": "2026-11-29",
    "final": true,
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873085": {
    "date": "2026-11-29",
    "final": true,
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873086": {
    "date": "2026-11-30",
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873087": {
    "date": "2026-11-29",
    "final": true,
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873088": {
    "date": "2026-11-29",
    "final": true,
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873089": {
    "date": "2026-11-29",
    "final": true,
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873090": {
    "date": "2026-11-29",
    "final": true,
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873091": {
    "date": "2026-11-29",
    "final": true,
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873092": {
    "date": "2026-11-29",
    "final": true,
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873093": {
    "date": "2026-11-29",
    "final": true,
    "pending": {},
+   "preview": true,
    "tds": []
   },
   "401873094": {
    "date": "2026-12-01",
    "pending": {},
+   "preview": true,
    "tds": []
   }
  },
@@ -125,6 +146,31 @@
    "date": "2026-11-29"
   },
   "2026-11-29T21:05Z": {
+   "date": "2026-11-29"
+  },
+  "p:2026-11-26T01:00Z": {
+   "date": "2026-11-26",
+   "pre": true
+  },
+  "p:2026-11-26T18:00Z": {
+   "date": "2026-11-26"
+  },
+  "p:2026-11-26T21:30Z": {
+   "date": "2026-11-26"
+  },
+  "p:2026-11-27T01:20Z": {
+   "date": "2026-11-27"
+  },
+  "p:2026-11-27T20:00Z": {
+   "date": "2026-11-27"
+  },
+  "p:2026-11-30T01:20Z": {
+   "date": "2026-11-30"
+  },
+  "p:2026-12-01T01:15Z": {
+   "date": "2026-12-01"
+  },
+  "sun:2026-11-29": {
    "date": "2026-11-29"
   }
  }
