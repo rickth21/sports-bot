@@ -1,23 +1,47 @@
 #!/usr/bin/env python3
 """
-NFL + NBA Discord bot.
+NFL + NBA fantasy Discord bot ("Donald 🏈" / "Donald 🏀") for the Rickth21 Sleeper leagues.
 
-Data:    ESPN's free public scoreboard/summary feed (no key needed).
-Posting: Discord channel webhooks (NFL_WEBHOOK_URL, NBA_WEBHOOK_URL env vars).
+Data:    ESPN's free public feeds (scores, box scores, win chance) + the Sleeper API (rosters, matchups,
+         projections, live stats, trades) + FantasyCalc (dynasty trade values).
+Posting: Discord webhooks (NFL_WEBHOOK_URL, NBA_WEBHOOK_URL; health alerts to ALERT_WEBHOOK_URL).
+Cards:   HTML rendered to PNG with headless Chrome; landscape so they read without opening.
 
-NFL
-  * Prime-time games (anything NOT kicking off Sunday 18:00-23:59 UK):
-      live post for every touchdown (scorer, how, PAT/2pt, score)
-  * Every game: FT score + top performer + elite fantasy lines.
-NBA
-  * Games grouped into tip-off batches; one post per batch when all are final:
-      FT scores, each game's standout stat line, other elite fantasy lines.
+What it posts
+  NFL  prime-time games: touchdowns, late field goals, game-changing turnovers, overtime, half-time, full-time.
+       Sunday 18:00-24:00 UK: one preview, then an update every 30 minutes.
+       Daily playoff race (14:00 UK), weekly recap (results + awards + lineup report, then the title race).
+  NBA  full-time per game (grouped only when another game is in its final minute), half-time for grouped
+       tip-offs, weekly recap.
+  Both leagues: every trade, with grades and a verdict (NFL trades ping @NFLfantasy).
+
+How this file is organised
+  It grew in layers. A later section may wrap an earlier function: it saves the old one
+  (`_old = f`) and defines `f` again, calling `_old(...)` and adding to it. The LAST definition of a
+  name is the live one. Sections, top to bottom:
+    HTTP, state, helpers ........................ fetching, state.json, small utilities
+    NFL / Sleeper league rosters / touchdowns .... base NFL data, owners, touchdown parsing
+    NBA ........................................... NBA box scores and full-time card
+    NFL image cards / slates / weekly recap ....... card CSS, Sunday slate cards, league history + odds
+    NBA fantasy-first posts ....................... NBA single-game and grouped cards, NBA dispatcher
+    NFL fantasy-first posts + live outlook ........ win/playoff odds simulation, live league context
+    v2 / live wiring / prime-time / Sunday ........ self-measuring cards, the NFL dispatcher (run_nfl)
+    v4 / daily playoff race ....................... win meters, 14:00 race card
+    kickers, DEF, spoiler delay ................... extra player types, 1-minute delay
+    v5 touchdown card ... scoreline first ......... current in-game cards (TD, FG, game-changer, OT)
+    poster names, NBA race panel, alerts .......... "Donald 🏀" name, error alerts, watchdog
+    accuracy check, Sleeper DEF stats ............. weekly check against Sleeper
+    projections, pins, trades, owner lookup ....... pre-game projections, trade posts, roster matching
+    weekly recap (landscape), landscape cards ..... two-part recap, wide game cards
+    images, starting/bench tags, main ............. embedded images, tag styles, main loop
 
 Usage:
-  python3 bot.py                      normal run (loops while NFL games are live)
-  python3 bot.py --test               send a test message to each webhook
-  python3 bot.py --preview-nfl 20261123   print what it would post for that date
-  python3 bot.py --preview-nba 20261124   (previews never post to Discord)
+  python3 bot.py                          normal run (loops while games are live)
+  python3 bot.py --test                   send a test message to each webhook
+  python3 bot.py --preview-nfl 20261123   print what it would post for that date (never posts)
+  python3 bot.py --preview-nba 20261124
+  python3 tools/check.py                  run before every upload
+  python3 tools/golden.py ...             before/after check for clean-ups (see the file)
 """
 import json
 import os
@@ -230,24 +254,10 @@ def teams_of(event):
     return t["away"], t["home"]
 
 
-def score_line(away, home, a_score=None, h_score=None, bold_winner=False):
-    a = int(num(away.get("score") if a_score is None else a_score))
-    h = int(num(home.get("score") if h_score is None else h_score))
-    an, hn = away["team"]["abbreviation"], home["team"]["abbreviation"]
-    left, right = f"{an} {a}", f"{h} {hn}"
-    if bold_winner and a != h:
-        left, right = (f"**{left}**", right) if a > h else (left, f"**{right}**")
-    return f"{left} – {right}"
-
-
 def ot_tag(event):
     detail = event["status"]["type"].get("shortDetail", "") or ""
     m = re.search(r"(\d*OT)", detail)
     return f" ({m.group(1)})" if m else ""
-
-
-def uk_time(dt_utc):
-    return dt_utc.astimezone(UK).strftime("%a %-d %b, %H:%M")
 
 
 # ====================================================================== NFL
@@ -741,32 +751,6 @@ def post_touchdown(event, play, summary=None):
 
 # -------------------------------------------------------------- pre-game post
 
-def form_line(summary, abbr):
-    for t in summary.get("lastFiveGames") or []:
-        if t.get("team", {}).get("abbreviation") != abbr:
-            continue
-        evs = sorted(t.get("events") or [], key=lambda e: e.get("gameDate", ""))
-        marks = {"W": "🟩", "L": "🟥", "T": "⬜"}
-        return "".join(marks.get(e.get("gameResult"), "⬜") for e in evs)
-    return ""
-
-
-def season_leaders(summary, abbr):
-    out = []
-    for t in summary.get("leaders") or []:
-        if t.get("team", {}).get("abbreviation") != abbr:
-            continue
-        for cat in t.get("leaders") or []:
-            if cat.get("name") not in ("passingYards", "rushingYards", "receivingYards") or not cat.get("leaders"):
-                continue
-            x = cat["leaders"][0]
-            dv = x.get("displayValue", "")
-            if cat["name"] == "passingYards":
-                dv = ", ".join(dv.split(", ")[1:]) or dv
-            dv = dv.replace(" YDS", " yds").replace(" CAR", " car").replace(" REC", " rec")
-            out.append(f"{x['athlete']['displayName']} · {dv}")
-    return out
-
 
 def injury_lines(summary, abbr, limit=4):
     rank = {"Out": 0, "Injured Reserve": 1, "Doubtful": 2, "Questionable": 3}
@@ -874,80 +858,6 @@ def post_nfl_final(event, summary, prime):
     return discord(NFL_HOOK, embed, "NFL FT")
 
 
-def nfl_game(event, st, force=False):
-    """Handle one NFL game. Returns True if the game needs fast polling right now."""
-    gid = event["id"]
-    kick = parse_time(event["date"])
-    g = st["nfl"].setdefault(gid, {"date": event["date"][:10], "tds": [], "pending": {}})
-    stype = event["status"]["type"]
-    state = stype["state"]
-    prime = is_prime(kick)
-    age = (now_utc() - kick).total_seconds() / 3600
-
-    if state == "pre":
-        # pre-game post for prime-time games, about an hour before kick-off
-        if prime and not g.get("preview") and -1.1 <= age < -0.15:
-            summary = fetch(f"football/nfl/summary?event={gid}")
-            if post_nfl_preview(event, summary):
-                g["preview"] = True
-        # prime time: stay on from ~70 min before kick-off so one run covers preview + game
-        return (-1.2 < age < 0.5) if prime else (-0.4 < age < 0.5)
-
-    if state == "in" or force:
-        if prime:
-            summary = fetch(f"football/nfl/summary?event={gid}")
-            plays = [p for p in summary.get("scoringPlays", [])
-                     if p.get("type", {}).get("abbreviation") == "TD"
-                     or "touchdown" in (p.get("type", {}).get("text", "").lower())]
-            for i, p in enumerate(plays):
-                if p["id"] in g["tds"]:
-                    continue
-                # wait briefly for the PAT to be attached so the score is right
-                has_pat = "(" in (p.get("text") or "")
-                first = g["pending"].setdefault(p["id"], time.time())
-                is_latest = i == len(plays) - 1
-                if not force and not has_pat and is_latest and time.time() - first < TD_PAT_WAIT \
-                        and state == "in":
-                    continue
-                if not force and state == "in" and not td_ready(summary, p, first):
-                    continue
-                if post_touchdown(event, p, summary):
-                    g["tds"].append(p["id"])
-                    g["pending"].pop(p["id"], None)
-        if state == "in":
-            return True
-
-    if state == "post" and not g.get("final"):
-        if not stype.get("completed"):
-            g["final"] = True            # postponed / cancelled
-            return False
-        if age > STALE_HOURS and not force:
-            g["final"] = True
-            return False
-        summary = fetch(f"football/nfl/summary?event={gid}")
-        if post_nfl_final(event, summary, prime):
-            g["final"] = True
-    return False
-
-
-def run_nfl(st, date=None, force=False):
-    path = "football/nfl/scoreboard" + (f"?dates={date}" if date else "")
-    events = fetch(path).get("events", [])
-    active = False
-    for slot in nfl_slots(events):
-        if len(slot) >= 2:               # games kicking off together: grouped slate posts
-            try:
-                active |= bool(nfl_slot(slot, st, force=force))
-            except Exception as ex:  # noqa: BLE001
-                log(f"NFL slate {slot[0].get('date')} error: {ex}")
-            continue
-        try:
-            active |= bool(nfl_game(slot[0], st, force=force))
-        except Exception as ex:  # noqa: BLE001
-            log(f"NFL game {slot[0].get('id')} error: {ex}")
-    return active
-
-
 # ====================================================================== NBA
 
 def nba_players(summary):
@@ -997,77 +907,7 @@ def nba_players(summary):
     return out
 
 
-def nba_batches(events):
-    gap = CONFIG["nba"]["batch_gap_minutes"] * 60
-    evs = sorted(events, key=lambda e: e["date"])
-    batches, cur, last = [], [], None
-    for e in evs:
-        t = parse_time(e["date"])
-        if cur and (t - last).total_seconds() > gap:
-            batches.append(cur)
-            cur = []
-        cur.append(e)
-        last = t
-    if cur:
-        batches.append(cur)
-    return batches
-
-
 NBA_LOGO = "https://a.espncdn.com/i/teamlogos/leagues/500/nba.png"
-
-
-def post_nba_batch(events):
-    """One message per tip-off batch, one card per game (Discord allows 10 cards per message)."""
-    if len(events) == 1 and events[0]["status"]["type"].get("completed"):
-        return post_nba_game(events[0])
-    cards = []
-    first = parse_time(events[0]["date"])
-    league = CONFIG["nba"].get("league_name", "league")
-    for e in events:
-        away, home = teams_of(e)
-        an = away["team"].get("name") or away["team"]["abbreviation"]
-        hn = home["team"].get("name") or home["team"]["abbreviation"]
-        if not e["status"]["type"].get("completed"):
-            cards.append({"author": {"name": "NBA · " + e["status"]["type"].get("description", "Postponed").upper(),
-                                     "icon_url": NBA_LOGO},
-                          "title": f"{an} @ {hn}", "color": 0x5865F2})
-            continue
-        a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
-        winner, loser = (away, home) if a_s > h_s else (home, away)
-        rec_w, rec_l = record_of(winner), record_of(loser)
-        desc = [f"🏆 **{winner['team'].get('displayName')}** win"
-                + (f" · {rec_w}" if rec_w else "")
-                + (f"  |  {loser['team'].get('name')} {rec_l}" if rec_l else "")]
-        try:
-            ps = nba_players(fetch(f"basketball/nba/summary?event={e['id']}"))
-        except Exception as ex:  # noqa: BLE001
-            log(f"NBA summary {e['id']} error: {ex}")
-            ps = []
-        if ps:
-            top = ps[0]
-            fire = " 🔥" if top["elite"] else ""
-            desc.append(f"\n⭐ **{top['name']}** ({top['team']}){fire}\n{top['line']}")
-            o = league_owner("", top["name"], "nba")
-            desc.append(f"↳ 🧢 {owner_text('', top['name'], 'nba')}" if o else "↳ 🆓 unrostered in the league")
-            more = [p for p in ps[1:] if p["elite"]]
-            if more:
-                desc.append("\n🔥 **Also elite:** " + " · ".join(
-                    f"{p['name']} ({p['team']}) {fmt_pts(p['fp'])} fpts" for p in more))
-        cards.append({
-            "author": {"name": "NBA · FULL TIME" + ot_tag(e).upper(), "icon_url": NBA_LOGO},
-            "title": f"{an} {a_s} – {h_s} {hn}",
-            "description": "\n".join(desc)[:4000],
-            "color": color(winner["team"].get("color"), 0xC9082A),
-            "thumbnail": {"url": winner["team"].get("logo", "")},
-        })
-    if not cards:
-        return True
-    cards[-1]["footer"] = {"text": f"Tip-offs from {uk_time(first)} UK  ·  fpts = {league} scoring",
-                           "icon_url": NBA_LOGO}
-    ok = True
-    for i in range(0, len(cards), 10):
-        ok = discord(NBA_HOOK, cards[i:i + 10], "NBA batch") and ok
-    return ok
 
 
 # ------------------------------------------------------ NBA full-time card post
@@ -1114,36 +954,6 @@ def team_stats(summary, abbr):
     return {}
 
 
-def conf_rank(summary, team_id):
-    for grp in (summary.get("standings") or {}).get("groups", []):
-        entries = (grp.get("standings") or {}).get("entries", [])
-        for i, e in enumerate(entries, 1):
-            if str(e.get("id")) == str(team_id):
-                hdr = grp.get("header", "") or grp.get("name", "") or ""
-                div = re.sub(r"^\d{4}(-\d{2})?\s*|\s*Standings$", "", hdr).strip()
-                return i, div
-    return None, ""
-
-
-def ordinal(n):
-    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
-
-
-def top_scorers(summary, abbr, n=2):
-    rows = []
-    for team in summary.get("boxscore", {}).get("players", []):
-        if team["team"]["abbreviation"] != abbr:
-            continue
-        for block in team.get("statistics", []):
-            keys = block.get("keys", [])
-            for a in block.get("athletes", []):
-                if a.get("stats"):
-                    s = dict(zip(keys, a["stats"]))
-                    rows.append((num(s.get("points")), a["athlete"]["displayName"]))
-    rows.sort(key=lambda r: -r[0])
-    return rows[:n]
-
-
 def headshot(summary, name):
     for team in summary.get("boxscore", {}).get("players", []):
         for block in team.get("statistics", []):
@@ -1151,67 +961,6 @@ def headshot(summary, name):
                 if a["athlete"]["displayName"] == name:
                     return (a["athlete"].get("headshot") or {}).get("href", "")
     return ""
-
-
-def nba_story(event, summary, players):
-    """Headline, recap sentences and bullet insights, written from the box score."""
-    away, home = teams_of(event)
-    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
-    w, l = (away, home) if a_s > h_s else (home, away)
-    ws, ls = max(a_s, h_s), min(a_s, h_s)
-    wn, ln = w["team"].get("name"), l["team"].get("name")
-    wcity = w["team"].get("location") or w["team"].get("displayName")
-    margin = ws - ls
-    ot = ot_tag(event).strip(" ()")
-    tw, tl = team_stats(summary, w["team"]["abbreviation"]), team_stats(summary, l["team"]["abbreviation"])
-    lead_l = int(num(tl.get("largestLead")))
-    lead_w = int(num(tw.get("largestLead")))
-
-    if ot:
-        head, verb, tag = f"{wn} outlast the {ln} in {ot}", "outlasted", f"{ot} THRILLER"
-    elif lead_l >= 12:
-        head, verb, tag = f"{wn} storm back to stun the {ln}", "came back to beat", "COMEBACK WIN"
-    elif margin >= 20:
-        head, verb, tag = f"{wn} rout the {ln}", "routed", f"{ws}-{ls} ROUT"
-    elif margin >= 10:
-        head, verb, tag = f"{wn} cruise past the {ln}", "beat", "COMFORTABLE WIN"
-    elif margin >= 4:
-        head, verb, tag = f"{wn} hold off the {ln}", "held off", f"{wn.upper()} HOLD ON"
-    else:
-        head, verb, tag = f"{wn} edge the {ln} in a thriller", "edged", f"{margin}-POINT THRILLER"
-
-    rec = record_of(w)
-    s = [f"{wcity} {verb} the {ln} {ws}-{ls}" + (f" to move to {rec}" if rec else "") + "."]
-    pog = players[0] if players else None
-    if pog:
-        bits = pog["raw"]
-        line = f"{bits['pts']} points, {bits['reb']} rebounds and {bits['ast']} assists"
-        s.append(f"{pog['name']} {'led the way' if pog['team'] == w['team']['abbreviation'] else 'starred in defeat'} with {line}"
-                 + (f", hitting {bits['tpm']} threes" if bits["tpm"] >= 4 else "") + ".")
-    lt = top_scorers(summary, l["team"]["abbreviation"], 1)
-    if lt and (not pog or lt[0][1] not in pog["name"]):
-        why = ""
-        if num(tl.get("threePointFieldGoalPct")) and num(tl.get("threePointFieldGoalPct")) < 32:
-            why = f", but the {ln} shot just {tl.get('threePointFieldGoalsMade-threePointFieldGoalsAttempted')} from deep"
-        elif num(tl.get("totalTurnovers")) >= 16:
-            why = f", but the {ln} gave it away {int(num(tl.get('totalTurnovers')))} times"
-        elif num(tw.get("totalRebounds")) - num(tl.get("totalRebounds")) >= 8:
-            why = f", but the {ln} were beaten {tw.get('totalRebounds')}-{tl.get('totalRebounds')} on the glass"
-        s.append(f"{lt[0][1]} scored {int(lt[0][0])} for the {ln}{why}.")
-
-    bullets = []
-    if lead_l >= 10:
-        bullets.append(f"{wn} overturned a {lead_l}-point deficit")
-    elif lead_w >= 15:
-        bullets.append(f"{wn} led by as many as {lead_w}")
-    tp_w, tp_l = num(tw.get("threePointFieldGoalPct")), num(tl.get("threePointFieldGoalPct"))
-    if tp_w and tp_l and abs(tp_w - tp_l) >= 12:
-        hi, lo = (w, l) if tp_w > tp_l else (l, w)
-        bullets.append(f"From three: {hi['team'].get('name')} {max(tp_w, tp_l):.0f}% vs {lo['team'].get('name')} {min(tp_w, tp_l):.0f}%")
-    tov_w, tov_l = num(tw.get("totalTurnovers")), num(tl.get("totalTurnovers"))
-    if abs(tov_w - tov_l) >= 6:
-        bullets.append(f"Turnovers: {wn} {int(tov_w)} · {ln} {int(tov_l)}")
-    return head, tag, " ".join(s), bullets[:2]
 
 
 CARD_CSS = """
@@ -1258,91 +1007,6 @@ body{width:880px;height:530px;font-family:Inter,'Helvetica Neue',Arial,sans-seri
 """
 
 
-def nba_card_html(event, summary, players, tag):
-    import html as H
-    away, home = teams_of(event)
-    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
-    ca = bright(away["team"].get("color"))
-    ch = bright(home["team"].get("color"))
-    if sum(abs(x - y) for x, y in zip(hex_rgb(ca), hex_rgb(ch))) < 120:
-        ch = bright(home["team"].get("alternateColor")) if home["team"].get("alternateColor") else "#cfd5e1"
-        if sum(abs(x - y) for x, y in zip(hex_rgb(ca), hex_rgb(ch))) < 120:
-            ch = "#cfd5e1"
-    ta, th = team_stats(summary, away["team"]["abbreviation"]), team_stats(summary, home["team"]["abbreviation"])
-    ot = ot_tag(event).strip(" ()")
-
-    def side(t, right):
-        rank, conf = conf_rank(summary, t["team"].get("id"))
-        rk = (f"{ordinal(rank)} in {conf} · " if rank and conf else "") + (record_of(t) or "")
-        sc = " · ".join(f"{H.escape(([w for w in n.split(' ') if w.rstrip('.').lower() not in ('jr', 'sr', 'ii', 'iii', 'iv')] or [n])[-1])} {int(p)}"
-                        for p, n in top_scorers(summary, t["team"]["abbreviation"]))
-        txt = (f"<div><div class='nm'>{H.escape(t['team'].get('name', ''))}</div>"
-               f"<div class='rk'>{H.escape(rk)}</div><div class='sc'>{sc}</div></div>")
-        img = f"<img src='{H.escape(t['team'].get('logo', ''))}'>"
-        return f"<div class='tm{' r' if right else ''}' style='{'text-align:right' if right else ''}'>" + \
-            (txt + img if right else img + txt) + "</div>"
-
-    # quarter table
-    la = [str(int(num(x.get("value", x.get("displayValue", 0))))) for x in away.get("linescores", [])]
-    lh = [str(int(num(x.get("value", x.get("displayValue", 0))))) for x in home.get("linescores", [])]
-    n = max(len(la), len(lh))
-    hdr = "".join(f"<th>{q}</th>" for q in (["Q1", "Q2", "Q3", "Q4"] + [f"OT{i}" if i > 1 else "OT" for i in range(1, n - 3)])[:n])
-    rows = "".join(f"<tr><td class='n'>{t['team']['abbreviation']}</td>" + "".join(f"<td>{v}</td>" for v in ls)
-                   + f"<td class='t'>{sc}</td></tr>" for t, ls, sc in ((away, la, a_s), (home, lh, h_s)))
-    qtable = f"<table><tr><th></th>{hdr}<th>T</th></tr>{rows}</table>" if n else ""
-
-    def tile(label, av, hv, fmt=lambda v: f"{v:g}", lower_better=False, show=None):
-        a, h = num(av), num(hv)
-        tot = (a + h) or 1
-        better_a = (a < h) if lower_better else (a > h)
-        sa, sh = show or (fmt(a), fmt(h))
-        return (f"<div class='tile'><div class='tl'>{label}</div><div class='tv'>"
-                f"<span class='{'' if better_a or a == h else 'lo'}'>{sa}</span><i>·</i>"
-                f"<span class='{'' if (not better_a) or a == h else 'lo'}'>{sh}</span></div>"
-                f"<div class='bars'><div style='flex:{a / tot:.3f};background:{ca}'></div>"
-                f"<div style='flex:{h / tot:.3f};background:{ch}'></div></div></div>")
-
-    tiles = "".join([
-        tile("FIELD GOAL %", ta.get("fieldGoalPct"), th.get("fieldGoalPct"), lambda v: f"{v:.0f}%"),
-        tile("THREE POINTERS", ta.get("threePointFieldGoalsMade-threePointFieldGoalsAttempted", "0").split("-")[0],
-             th.get("threePointFieldGoalsMade-threePointFieldGoalsAttempted", "0").split("-")[0]),
-        tile("REBOUNDS", ta.get("totalRebounds"), th.get("totalRebounds")),
-        tile("ASSISTS", ta.get("assists"), th.get("assists")),
-        tile("TURNOVERS", ta.get("totalTurnovers"), th.get("totalTurnovers"), lower_better=True),
-        tile("POINTS IN PAINT", ta.get("pointsInPaint"), th.get("pointsInPaint")),
-    ])
-
-    pog = players[0] if players else None
-    pog_html = own_html = ""
-    if pog:
-        hs = headshot(summary, pog["name"])
-        r = pog["raw"]
-        st = f"{r['pts']} PTS · {r['reb']} REB · {r['ast']} AST" + (f" · {r['stl']} STL" if r["stl"] >= 1 else "") + \
-             (f" · {r['blk']} BLK" if r["blk"] >= 1 else "")
-        pog_html = (f"<div class='pog'>{'<img src=' + chr(39) + H.escape(hs) + chr(39) + '>' if hs else ''}<div>"
-                    f"<div class='pl'>PLAYER OF THE GAME</div><div class='pn'>{H.escape(pog['name'])}"
-                    f"<span class='chip'>{fmt_pts(pog['fp'])}</span></div><div class='ps'>{st}</div></div></div>")
-        o = league_owner("", pog["name"], "nba")
-        league = CONFIG["nba"].get("league_name", "League")
-        own_html = (f"<div class='own'>{H.escape(league)} league<br><b>{H.escape(o['manager'])}</b>"
-                    f"{' · starting' if o['starting'] else ' · bench'}</div>") if o else \
-                   f"<div class='own'>{H.escape(league)} league<br><b>Unrostered</b> · waiver pickup?</div>"
-
-    w_col = ca if a_s > h_s else ch
-    return (f"<!doctype html><html><head><meta charset='utf-8'>"
-            f"<link href='https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800&display=swap' rel='stylesheet'>"
-            f"<style>{CARD_CSS}</style></head><body><div class='card' style='--a:{ca};--h:{ch}'>"
-            f"<div class='bg'></div><div class='split'></div><div class='in'>"
-            f"<div class='top'><div class='lg'><img src='{NBA_LOGO}'>NBA</div>"
-            f"<div class='pill'>{'FINAL · ' + ot if ot else 'FULL-TIME'}</div></div>"
-            f"<div class='score'>{side(away, False)}<div><div class='nums'>"
-            f"<div class='box{' w' if a_s > h_s else ''}'>{a_s}</div><div class='dot'></div>"
-            f"<div class='box{' w' if h_s > a_s else ''}'>{h_s}</div></div>"
-            f"<div class='tag' style='color:{w_col}'>{H.escape(tag)}</div></div>{side(home, True)}</div>"
-            f"<div class='qs'>{qtable}</div><div class='tiles'>{tiles}</div>"
-            f"<div class='bot'>{pog_html}{own_html}</div></div></div></body></html>")
-
-
 def render_png(html_text, width=880, height=530):
     """HTML -> PNG with headless Chrome. Returns bytes, or None if Chrome isn't available."""
     import subprocess
@@ -1364,42 +1028,6 @@ def render_png(html_text, width=880, height=530):
         except Exception as e:  # noqa: BLE001
             log(f"card render failed: {e}")
             return None
-
-
-def post_nba_game(e):
-    """One full-time post for a single game: headline, recap, insights and a graphic card."""
-    summary = fetch(f"basketball/nba/summary?event={e['id']}")
-    players = nba_players(summary)
-    away, home = teams_of(e)
-    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
-    winner = away if a_s > h_s else home
-    head, tag, recap, bullets = nba_story(e, summary, players)
-
-    extra = []
-    if players:
-        p = players[0]
-        o = league_owner("", p["name"], "nba")
-        extra.append(f"🧢 **{p['name']}** {fmt_pts(p['fp'])} fpts — "
-                     + (f"**{o['manager']}**{' ⭐ starting' if o['starting'] else ' (bench)'}" if o else "unrostered 👀"))
-        more = [x for x in players[1:] if x["elite"]]
-        if more:
-            extra.append("🔥 Also elite: " + " · ".join(f"{x['name']} {fmt_pts(x['fp'])}" for x in more[:3]))
-    desc = "> " + recap + "\n\n" + "\n".join(f"• {b}" for b in bullets + extra)
-
-    embed = {
-        "author": {"name": "NBA", "icon_url": NBA_LOGO},
-        "title": f"{head} · {max(a_s, h_s)}-{min(a_s, h_s)}{ot_tag(e)}",
-        "url": f"https://www.espn.com/nba/game/_/gameId/{e['id']}",
-        "description": desc[:4000],
-        "color": color(winner["team"].get("color"), 0xC9082A),
-        "footer": {"text": f"fpts = {CONFIG['nba'].get('league_name', 'league')} scoring", "icon_url": NBA_LOGO},
-    }
-    content = (f"🏁 **FULL-TIME** · {away['team'].get('displayName')} {a_s}–{h_s} {home['team'].get('displayName')}"
-               f"{ot_tag(e)}")
-    png = render_png(nba_card_html(e, summary, players, tag))
-    if png:
-        embed["image"] = {"url": "attachment://card.png"}
-    return discord(NBA_HOOK, embed, "NBA FT", content=content, files={"card.png": png} if png else None)
 
 
 # ------------------------------------------------------------ NFL image cards
@@ -1822,21 +1450,6 @@ def league_live(sport="nfl", week=None):
     return {"week": week, "rosters": rmap, "pairs": [v for k, v in sorted(pairs.items()) if len(v) == 2]}
 
 
-def slot_players(live, teams):
-    """Every league-rostered player on the given NFL teams: (name, pos, team, pts, manager, starting)."""
-    players = sleeper_players()
-    out = []
-    for rid, x in live["rosters"].items():
-        for pid in x["players"]:
-            p = players.get(pid) or {}
-            if p.get("team") in teams:
-                nm = p.get("full_name") or (f"{p.get('last_name', pid)} D/ST" if p.get("position") == "DEF" else pid)
-                out.append({"pid": pid, "name": nm, "pos": p.get("position", ""),
-                            "team": p.get("team"), "pts": float(x["pp"].get(pid) or 0), "manager": x["manager"],
-                            "starting": pid in x["starters"], "rid": rid})
-    return out
-
-
 def nfl_slots(events):
     gap = CONFIG["nfl"].get("slot_minutes", 30) * 60
     slots, cur, first = [], [], None
@@ -1890,210 +1503,6 @@ SLOT_CSS = """
 .foot{display:flex;gap:10px;margin-top:10px}
 .foot .col{flex:1;font-size:14px;color:#cfd5e1}.foot b{color:#fff}
 """
-
-
-def slot_card_html(mode, slot, rows_info, live, foot=None, title=""):
-    """mode: PRE-GAME / HALF-TIME / FULL-TIME. rows_info: per event a short HTML fantasy line."""
-    import html as H
-    rows = []
-    for e, info in zip(slot, rows_info):
-        away, home = teams_of(e)
-        a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
-        stt = game_status(e)
-        cls = "fin" if stt.startswith("FINAL") else ("" if e["status"]["type"].get("state") == "pre" else "live")
-        if mode == "PRE-GAME":
-            mid = (f"<span class='rc'>{H.escape(record_of(away) or '')}</span><span class='d'>@</span>"
-                   f"<span class='rc'>{H.escape(record_of(home) or '')}</span>")
-        else:
-            mid = (f"<span class='s{' lo' if a_s < h_s else ''}'>{a_s}</span><span class='d'>–</span>"
-                   f"<span class='s{' lo' if h_s < a_s else ''}'>{h_s}</span>")
-        rows.append(f"<div class='grow'><div class='gm'><img src='{H.escape(away['team'].get('logo', ''))}'>"
-                    f"<span class='ab'>{away['team']['abbreviation']}</span>{mid}"
-                    f"<span class='ab r'>{home['team']['abbreviation']}</span>"
-                    f"<img src='{H.escape(home['team'].get('logo', ''))}'></div>"
-                    f"<div class='st {cls}'>{H.escape(stt)}</div><div class='info'>{info}</div></div>")
-
-    lg = ""
-    if live and live["pairs"]:
-        league = CONFIG["nfl"].get("league_name", "League")
-        teams = {sl_team(t["team"]["abbreviation"]) for e in slot for t in teams_of(e)}
-        players = sleeper_players()
-        cells = []
-        for ra, rb in live["pairs"]:
-            A, B = live["rosters"][ra], live["rosters"][rb]
-            if mode == "PRE-GAME":
-                la = sum(1 for p in A["starters"] if (players.get(p) or {}).get("team") in teams)
-                lb = sum(1 for p in B["starters"] if (players.get(p) or {}).get("team") in teams)
-                cells.append(f"<div class='mu'><span class='n'>{H.escape(A['manager'])}</span>"
-                             f"<span class='c'>{la}</span><span class='p'>{A['points']:.1f}</span><i>·</i>"
-                             f"<span class='p'>{B['points']:.1f}</span><span class='c'>{lb}</span>"
-                             f"<span class='n r'>{H.escape(B['manager'])}</span></div>")
-            else:
-                aw = A["points"] >= B["points"]
-                cells.append(f"<div class='mu'><span class='n{' w' if aw else ''}'>{H.escape(A['manager'])}</span><span></span>"
-                             f"<span class='p{'' if aw else ' lo'}'>{A['points']:.1f}</span><i>·</i>"
-                             f"<span class='p{' lo' if aw else ''}'>{B['points']:.1f}</span><span></span>"
-                             f"<span class='n r{'' if aw else ' w'}'>{H.escape(B['manager'])}</span></div>")
-        head = (f"{H.escape(league.upper())} · WEEK {live['week']} MATCHUPS"
-                + (" · LIVE" if mode == "HALF-TIME" else (" · POINTS SO FAR  ·  BADGE = STARTERS IN THIS SLATE" if mode == "PRE-GAME" else "")))
-        lg = f"<div class='lg2'><div class='ch'>{head}</div><div class='mus'>{''.join(cells)}</div></div>"
-
-    foot_html = ""
-    if foot:
-        foot_html = "<div class='foot'>" + "".join(f"<div class='col'><div class='ch'>{H.escape(k)}</div>{v}</div>"
-                                                   for k, v in foot) + "</div>"
-    n = len(slot)
-    pairs = len(live["pairs"]) if live else 0
-    mu_rows = (pairs + 1) // 2
-    height = 70 + n * 58 + (44 + mu_rows * 26 if lg else 0) + (80 if foot else 0) - 4
-    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL{' · WEEK ' + str(live['week']) if live else ''}"
-            f" · {H.escape(title.upper())}</div><div class='pill'>{mode}</div></div>"
-            f"<div class='rows'>{''.join(rows)}</div>{lg}{foot_html}")
-    html_text = (f"<!doctype html><html><head><meta charset='utf-8'>"
-                 f"<link href='https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800;900&display=swap' rel='stylesheet'>"
-                 f"<style>{NFL_CSS}{SLOT_CSS}body,.card{{height:{height}px}}</style></head><body>"
-                 f"<div class='card' style='--a:#5b7bd5;--h:#d50a0a'><div class='bg'></div>"
-                 f"<div class='in'>{body}</div></div></body></html>")
-    return html_text, height
-
-
-def slot_title(slot):
-    k = parse_time(slot[0]["date"]).astimezone(UK)
-    return f"{k.strftime('%A')} {k.strftime('%H:%M')} slate"
-
-
-def best_line(e, live, summary=None):
-    """One fantasy line for a game: best league-rostered player so far (Sleeper points), with owner."""
-    import html as H
-    away, home = teams_of(e)
-    teams = {sl_team(away["team"]["abbreviation"]), sl_team(home["team"]["abbreviation"])}
-    if live:
-        ps = sorted(slot_players(live, teams), key=lambda p: -p["pts"])
-        if ps and ps[0]["pts"] > 0:
-            p = ps[0]
-            return (f"⭐ <b>{H.escape(p['name'])}</b> {p['pts']:.1f} <span class='m'>· {H.escape(p['manager'])}"
-                    f"{'' if p['starting'] else ' (bench)'}</span>")
-    if summary:
-        ff = nfl_fantasy(summary)
-        if ff:
-            p = ff[0]
-            o = league_owner(p.get("id"), p["name"])
-            return (f"⭐ <b>{H.escape(p['name'])}</b> {fmt_pts(p['pts'])} <span class='m'>· "
-                    f"{H.escape(o['manager']) if o else 'unrostered'}</span>")
-    return "<span class='m'>No fantasy points yet</span>"
-
-
-def pre_line(e, live):
-    import html as H
-    away, home = teams_of(e)
-    teams = {sl_team(away["team"]["abbreviation"]), sl_team(home["team"]["abbreviation"])}
-    odds = ""
-    try:
-        o = (e["competitions"][0].get("odds") or [{}])[0]
-        odds = o.get("details") or ""
-    except (IndexError, AttributeError):
-        pass
-    starters = [p for p in slot_players(live, teams) if p["starting"]] if live else []
-    starters.sort(key=lambda p: p["pos"] == "DEF")
-    names = ", ".join(H.escape(p["name"] if p["pos"] == "DEF" else short_name(p["name"])) for p in starters[:4]) + ("…" if len(starters) > 4 else "")
-    s = f"<span class='m'>{H.escape(odds)}</span>" if odds else ""
-    if starters:
-        s += f"{' · ' if s else ''}<b>{len(starters)}</b> <span class='m'>starters:</span> {names}"
-    return s or "<span class='m'>No league starters</span>"
-
-
-def post_slot(mode, slot, live):
-    title = slot_title(slot)
-    if mode == "PRE-GAME":
-        infos = [pre_line(e, live) for e in slot]
-        foot = None
-    else:
-        infos, sums = [], []
-        for e in slot:
-            try:
-                summ = fetch(f"football/nfl/summary?event={e['id']}")
-            except Exception:  # noqa: BLE001
-                summ = None
-            sums.append(summ)
-            infos.append(best_line(e, live, summ))
-        foot = None
-        if mode == "FULL-TIME" and live:
-            import html as H
-            teams = {sl_team(t["team"]["abbreviation"]) for e in slot for t in teams_of(e)}
-            ps = slot_players(live, teams)
-            mvp = max(ps, key=lambda p: p["pts"], default=None)
-            bench = max((p for p in ps if not p["starting"]), key=lambda p: p["pts"], default=None)
-            foot = []
-            if mvp and mvp["pts"] > 0:
-                foot.append(("SLATE MVP", f"<b>{H.escape(mvp['name'])}</b> {mvp['pts']:.1f} fpts · {H.escape(mvp['manager'])}"))
-            if bench and bench["pts"] >= 10:
-                foot.append(("BENCH BLUNDER", f"<b>{H.escape(bench['name'])}</b> {bench['pts']:.1f} fpts left on "
-                                              f"{H.escape(bench['manager'])}'s bench"))
-            foot = foot or None
-    html_text, height = slot_card_html(mode, slot, infos, live, foot, title)
-    png = render_png(html_text, 880, height)
-    emoji = {"PRE-GAME": "🏈", "HALF-TIME": "⏸️", "FULL-TIME": "🏁"}[mode]
-    content = f"{emoji} **{mode}** · {title} · {len(slot)} games"
-    lines = []
-    if live and live["pairs"] and mode != "PRE-GAME":
-        diffs = []
-        for ra, rb in live["pairs"]:
-            A, B = live["rosters"][ra], live["rosters"][rb]
-            diffs.append((abs(A["points"] - B["points"]), A, B))
-        close = min(diffs, key=lambda d: d[0])
-        lines.append(f"🔥 Closest matchup: **{close[1]['manager']}** {close[1]['points']:.1f} – "
-                     f"{close[2]['points']:.1f} **{close[2]['manager']}**")
-    if not png:
-        for e in slot:
-            away, home = teams_of(e)
-            lines.append(f"{away['team']['abbreviation']} {away.get('score', '')} – {home.get('score', '')} "
-                         f"{home['team']['abbreviation']} ({game_status(e)})")
-    embed = {"color": 0x013369, "author": {"name": f"NFL · {title}", "icon_url": NFL_LOGO}}
-    if lines:
-        embed["description"] = "\n".join(lines)
-    if png:
-        embed["image"] = {"url": "attachment://slate.png"}
-    return discord(NFL_HOOK, embed, f"NFL slate {mode}", content=content, files={"slate.png": png} if png else None)
-
-
-def passed_half(e):
-    t = e["status"]["type"]
-    return t.get("state") == "post" or t.get("name") == "STATUS_HALFTIME" or e["status"].get("period", 0) >= 3
-
-
-def nfl_slot(slot, st, force=False):
-    """Handle a group of games kicking off together. Returns True when fast polling is needed."""
-    key = slot[0]["date"]
-    s = st.setdefault("nfl_slots", {}).setdefault(key, {"date": key[:10]})
-    for e in slot:                      # keep per-game state so single-game logic never double-posts
-        st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})["final"] = True
-    age = (now_utc() - parse_time(key)).total_seconds() / 3600
-    if age > STALE_HOURS and not force:
-        s.update(pre=True, half=True, ft=True)
-        return False
-    states = [e["status"]["type"]["state"] for e in slot]
-    live = None
-
-    def L():
-        nonlocal live
-        if live is None:
-            live = league_live("nfl") or {}
-        return live or None
-
-    if not s.get("pre"):
-        if force or (-0.8 <= age < -0.03 and all(x == "pre" for x in states)):
-            if post_slot("PRE-GAME", slot, L()):
-                s["pre"] = True
-        elif age >= -0.03:
-            s["pre"] = True
-    done = all(e["status"]["type"].get("completed") or e["status"]["type"]["state"] == "post" for e in slot)
-    if not s.get("half") and not done and all(x != "pre" for x in states) and all(passed_half(e) for e in slot):
-        if post_slot("HALF-TIME", slot, L()):
-            s["half"] = True
-    if not s.get("ft") and done:
-        if post_slot("FULL-TIME", slot, L()):
-            s.update(ft=True, half=True)
-    return any(x == "in" for x in states) or -0.8 <= age < 0.2
 
 
 # ------------------------------------------------------ weekly league recap
@@ -2230,124 +1639,6 @@ def simulate_odds(sport, settings, scores, rec, upto, sims=4000):
     return {r: (100 * po_count[r] / sims, 100 * title[r] / sims) for r in rids}, po_start, n_po
 
 
-def recap_card_html(sport, week, live, settings):
-    import html as H
-    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
-    league = CONFIG[sport].get("league_name", "League")
-    players = sleeper_players(sport)
-    names = {rid: x["manager"] for rid, x in live["rosters"].items()}
-
-    games, starters, bench = [], [], []
-    for ra, rb in live["pairs"]:
-        A, B = live["rosters"][ra], live["rosters"][rb]
-        games.append((A, B) if A["points"] >= B["points"] else (B, A))
-    for rid, x in live["rosters"].items():
-        for pid in x["players"]:
-            p = players.get(pid) or {}
-            nm = p.get("full_name") or (f"{p.get('last_name', pid)} D/ST" if p.get("position") == "DEF" else pid)
-            row = {"name": nm, "pts": float(x["pp"].get(pid) or 0), "manager": x["manager"]}
-            (starters if pid in x["starters"] else bench).append(row)
-
-    scores, rec = season_history(sport, week)
-    odds, po_start, n_po = simulate_odds(sport, settings, scores, rec, week)
-    table = sorted(rec.keys(), key=lambda r: (-(rec[r]["w"] + 0.5 * rec[r]["t"]), -rec[r]["pf"]))
-
-    # ---- results + awards
-    rows = "".join(
-        f"<div class='rr'><span class='n'>{H.escape(w['manager'])}</span><span class='p'>{w['points']:.1f}</span><i>·</i>"
-        f"<span class='p lo'>{l['points']:.1f}</span><span class='n r lo'>{H.escape(l['manager'])}</span></div>"
-        for w, l in games)
-    allr = [x for x in live["rosters"].values() if x.get("matchup_id")]
-    top = max(allr, key=lambda x: x["points"])
-    blow = max(games, key=lambda g: g[0]["points"] - g[1]["points"])
-    close = min(games, key=lambda g: g[0]["points"] - g[1]["points"])
-    pow_ = max(starters, key=lambda p: p["pts"], default=None)
-    bb = max(bench, key=lambda p: p["pts"], default=None)
-    unlucky = max((l for _, l in games), key=lambda x: x["points"])
-    fav = max(odds, key=lambda r: odds[r][1])
-    tiles = [
-        ("🏆 TOP SCORE", top["manager"], f"{top['points']:.1f} pts"),
-        ("⭐ PLAYER OF THE WEEK", pow_["name"] if pow_ else "—",
-         f"{pow_['pts']:.1f} pts · {pow_['manager']}" if pow_ else ""),
-        ("💥 BIGGEST WIN", blow[0]["manager"], f"by {blow[0]['points'] - blow[1]['points']:.1f} over {blow[1]['manager']}"),
-        ("😬 CLOSEST FINISH", close[0]["manager"], f"by {close[0]['points'] - close[1]['points']:.1f} over {close[1]['manager']}"),
-        ("🪑 BENCH BLUNDER", bb["name"] if bb else "—", f"{bb['pts']:.1f} pts on {bb['manager']}'s bench" if bb else ""),
-        ("🥶 UNLUCKIEST LOSS", unlucky["manager"], f"{unlucky['points']:.1f} pts and still lost"),
-    ]
-    tiles_html = "".join(f"<div class='at'><div class='k'>{H.escape(k)}</div><div class='v'>{H.escape(v)}</div>"
-                         f"<div class='x'>{H.escape(x)}</div></div>" for k, v, x in tiles)
-
-    # ---- standings + odds
-    def bar(pct, col):
-        return f"<div class='bar'><div style='width:{max(pct, 1.5):.1f}%;background:{col}'></div></div>"
-    trs = ["<div class='tr h'><span>#</span><span>MANAGER</span><span>W-L</span><span>PF</span>"
-           "<span>PLAYOFFS</span><span>TITLE</span></div>"]
-    for i, r in enumerate(table, 1):
-        x = rec[r]
-        wl = f"{x['w']}-{x['l']}" + (f"-{x['t']}" if x["t"] else "")
-        po, ti = odds[r]
-        trs.append(f"<div class='tr{' cut' if i == n_po else ''}'><span class='rk5'>{i}</span>"
-                   f"<span class='m'>{H.escape(names.get(r, '?'))}</span><span>{wl}</span><span>{x['pf']:.0f}</span>"
-                   f"<span class='o'><span>{po:.0f}%</span>{bar(po, 'linear-gradient(90deg,#d97757,#f2a77f)')}</span>"
-                   f"<span class='o'><span>{ti:.0f}%</span>{bar(ti * 2.5, 'linear-gradient(90deg,#e8b13c,#ffe08a)')}</span></div>")
-
-    # ---- next week + context
-    nxt = ""
-    try:
-        lid = str(CONFIG[sport].get("sleeper_league_id")).strip()
-        ms = fetch_url(f"{SLEEPER}/league/{lid}/matchups/{week + 1}", tries=2) if week + 1 < po_start else []
-        by = {}
-        for m in ms:
-            if m.get("matchup_id"):
-                by.setdefault(m["matchup_id"], []).append(m["roster_id"])
-        pairs = [p for p in by.values() if len(p) == 2]
-        if pairs:
-            a, b = max(pairs, key=lambda p: min(odds[p[0]][0], odds[p[1]][0]) + 0.3 * (odds[p[0]][0] + odds[p[1]][0]))
-            wl = lambda r: f"{rec[r]['w']}-{rec[r]['l']}"  # noqa: E731
-            nxt = (f"<b>{H.escape(names[a])}</b> ({wl(a)}) vs <b>{H.escape(names[b])}</b> ({wl(b)})"
-                   f" — playoff odds {odds[a][0]:.0f}% & {odds[b][0]:.0f}%")
-    except Exception as e:  # noqa: BLE001
-        log(f"recap next week unavailable: {e}")
-    left = max(0, po_start - week - 1)
-    ctx = (f"Playoffs start week <b>{po_start}</b> · top <b>{n_po}</b> of {len(table)} qualify · "
-           f"<b>{left}</b> regular-season week{'s' if left != 1 else ''} left") if left else \
-          f"Playoffs start week <b>{po_start}</b> · top <b>{n_po}</b> qualify"
-    gw = (f"<div class='gw'>{'<div class=' + chr(39) + 'col' + chr(39) + '><div class=' + chr(39) + 'ch' + chr(39) + '>GAME TO WATCH NEXT WEEK</div>' + nxt + '</div>' if nxt else ''}"
-          f"<div class='col'><div class='ch'>THE RACE</div>{ctx}<br>Title favourite: <b>{H.escape(names[fav])}</b> "
-          f"{odds[fav][1]:.0f}%</div></div>")
-
-    res_rows = (len(games) + 1) // 2
-    height = 64 + 22 + res_rows * 49 + 22 + 2 * 80 + 22 + 12 + (len(table) + 1) * 27 + 74 + 30
-    body = (f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape(league.upper())} · WEEK {week}</div>"
-            f"<div class='pill'>WEEKLY RECAP</div></div>"
-            f"<div class='sec'>RESULTS</div><div class='res'>{rows}</div>"
-            f"<div class='sec'>AWARDS</div><div class='aw'>{tiles_html}</div>"
-            f"<div class='sec'>TITLE RACE · SIMULATED {4000:,} TIMES</div><div class='tbl'>{''.join(trs)}</div>{gw}")
-    html_text = (f"<!doctype html><html><head><meta charset='utf-8'>"
-                 f"<link href='https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800;900&display=swap' rel='stylesheet'>"
-                 f"<style>{NFL_CSS}{RECAP_CSS}body,.card{{height:{height}px}}</style></head><body>"
-                 f"<div class='card' style='--a:#1faa59;--h:#5b7bd5'><div class='bg'></div>"
-                 f"<div class='in'>{body}</div></div></body></html>")
-    lines = [f"🏆 **{top['manager']}** top-scored with {top['points']:.1f}",
-             f"😬 Closest: **{close[0]['manager']}** beat {close[1]['manager']} by {close[0]['points'] - close[1]['points']:.1f}",
-             f"📈 Title favourite: **{names[fav]}** {odds[fav][1]:.0f}%"]
-    return html_text, height, lines
-
-
-def post_weekly_recap(sport, week, live, settings):
-    html_text, height, lines = recap_card_html(sport, week, live, settings)
-    league = CONFIG[sport].get("league_name", "League")
-    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
-    hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
-    html_text = html_text.replace("body,.card{height:", "body,.card{height:auto!important;min-height:").replace(
-        "</body>", "<script>addEventListener('load',()=>document.body.setAttribute('data-h',"
-                   "Math.ceil(document.querySelector('.card').getBoundingClientRect().height)))</script></body>")
-    embed = {"author": {"name": f"{league} · Week {week}", "icon_url": logo}, "color": 0x1FAA59,
-             "img_title": f"Week {week} recap", "img_desc": "\n".join(lines)}
-    emoji = "🏈" if sport == "nfl" else "🏀"
-    return _post_card(hook, html_text, f"📊 **WEEK {week} RECAP** · {emoji} {league}", embed, "recap.png")
-
-
 def maybe_weekly_recap(st, sport, force_week=None):
     """From the recap day/time (UK) until the end of the next day: recap the last week Sleeper has scored."""
     cfg = CONFIG[sport].get("weekly_recap") or {}
@@ -2377,7 +1668,7 @@ def maybe_weekly_recap(st, sport, force_week=None):
         st["recaps"] = (done + [key])[-40:]
 
 
-# ------------------------------------------------ NBA fantasy-first posts (concept)
+# ------------------------------------------------ NBA fantasy-first posts
 
 FAN_CSS = """
 .sm{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;color:#cfd5e1;font-variant-numeric:tabular-nums}
@@ -2446,13 +1737,6 @@ def nba_league_rows(summary):
         rows.append({**p, "owner": o["manager"] if o else None, "starting": bool(o and o["starting"]),
                      "hs": headshot(summary, p["name"])})
     return rows
-
-
-def _card(css_vars, body, height, extra_css=""):
-    return (f"<!doctype html><html><head><meta charset='utf-8'>"
-            f"<link href='https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800;900&display=swap' rel='stylesheet'>"
-            f"<style>{NFL_CSS}{SLOT_CSS}{FAN_CSS}{extra_css}body,.card{{height:{height}px}}</style></head><body>"
-            f"<div class='card' style='{css_vars}'><div class='bg'></div><div class='in'>{body}</div></div></body></html>")
 
 
 def nba_game_fantasy_html(event, summary, live, max_rows=7):
@@ -2567,14 +1851,6 @@ def nba_batch_html(mode, events, summaries, live, title):
     body = (f"<div class='top'><div class='lg'><img src='{NBA_LOGO}'>NBA · {H.escape(title.upper())}</div>"
             f"<div class='pill'>{mode}</div></div><div class='rows' style='gap:6px'>{''.join(lines)}</div>{lg}")
     return _card("--a:#c9082a;--h:#17408b", body, 64 + len(events) * 56 + (44 + rows_mu * 26 if lg else 0) + 26)
-
-
-def _nba_post(html_text, content, embed, name):
-    m = re.search(r"body,\.card\{height:(\d+)px", html_text)
-    png = render_png(html_text, 880, int(m.group(1)) if m else 600)
-    if png:
-        embed["image"] = {"url": f"attachment://{name}"}
-    return discord(NBA_HOOK, embed, f"NBA {name}", content=content, files={name: png} if png else None)
 
 
 def closest_matchup_line(live):
@@ -2873,34 +2149,6 @@ def _pct(v):
     return "—" if v is None else f"{v:.0f}%"
 
 
-def matchup_rows_html(live, ol, focus_teams=None, show_left=True):
-    """One row per league matchup: who's playing, score, live win chance, playoff stakes."""
-    import html as H
-    players = sleeper_players("nfl")
-    rows = []
-    for a, b in live["pairs"]:
-        A, B = live["rosters"][a], live["rosters"][b]
-        oa, ob = ol[a], ol[b]
-
-        def blk(x, o, right):
-            names = [short_name((players.get(p) or {}).get("full_name") or
-                                f"{(players.get(p) or {}).get('last_name', p)} D/ST") for p in o["left"]]
-            pl = (f"<b>{len(names)}</b> playing: " + ", ".join(H.escape(n) for n in names[:4]) +
-                  ("…" if len(names) > 4 else "")) if names else "nobody left to play"
-            return (f"<div class='mg{' r' if right else ''}'><div class='mn'>{H.escape(x['manager'])}</div>"
-                    f"<div class='pl'>{pl}</div>"
-                    f"<div class='st2'>playoffs: win <span class='g'>{_pct(o['po_w'])}</span> · lose "
-                    f"<span class='b'>{_pct(o['po_l'])}</span></div></div>")
-        lead_a = oa["cur"] >= ob["cur"]
-        mid = (f"<div class='mid'><div class='sc3'><span class='{'' if lead_a else 'lo'}'>{oa['cur']:.1f}</span> – "
-               f"<span class='{'lo' if lead_a else ''}'>{ob['cur']:.1f}</span></div>"
-               f"<div class='wc'><div style='width:{oa['win']:.0f}%;background:#5b7bd5'></div>"
-               f"<div style='width:{100 - oa['win']:.0f}%;background:#d9534f'></div></div>"
-               f"<div class='wcl'>WIN CHANCE {oa['win']:.0f}% · {ob['win']:.0f}%</div></div>")
-        rows.append(f"<div class='mrw'>{blk(A, oa, False)}{mid}{blk(B, ob, True)}</div>")
-    return "".join(rows)
-
-
 def playoff_panel_html(live, ol, base, title="PLAYOFF ODDS NOW · CHANGE SINCE THE WEEK STARTED"):
     import html as H
     rids = sorted(ol, key=lambda r: -ol[r]["po"])
@@ -2915,27 +2163,6 @@ def playoff_panel_html(live, ol, base, title="PLAYOFF ODDS NOW · CHANGE SINCE T
     return f"<div class='lg2'><div class='ch'>{title}</div><div class='po2'>{''.join(cells)}</div></div>"
 
 
-def nfl_preview_fantasy_html(events, live, ol, title):
-    import html as H
-    league = CONFIG["nfl"].get("league_name", "League")
-    k = parse_time(events[0]["date"]).astimezone(UK)
-    strip = "".join(
-        f"<div class='gs'><img src='{H.escape(teams_of(e)[0]['team'].get('logo', ''))}'>{teams_of(e)[0]['team']['abbreviation']}"
-        f" @ {teams_of(e)[1]['team']['abbreviation']}<img src='{H.escape(teams_of(e)[1]['team'].get('logo', ''))}'></div>"
-        for e in events)
-    stakes = max(ol, key=lambda r: (ol[r]["po_w"] or 0) - (ol[r]["po_l"] or 0))
-    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL · WEEK {live['week']} · {H.escape(title.upper())}</div>"
-            f"<div class='pill'>KICK-OFF {k.strftime('%H:%M')} UK</div></div>"
-            f"<div class='gstrip'>{strip}</div>"
-            f"<div class='sec'>{H.escape(league.upper())} MATCHUPS · SCORE SO FAR · WHO'S STILL TO PLAY · WHAT'S AT STAKE</div>"
-            f"<div class='rows' style='gap:6px;margin-top:6px'>{matchup_rows_html(live, ol)}</div>"
-            f"<div class='foot'><div class='col'><div class='ch'>BIGGEST STAKES</div><b>{H.escape(live['rosters'][stakes]['manager'])}</b>"
-            f" — playoffs {_pct(ol[stakes]['po_w'])} with a win, {_pct(ol[stakes]['po_l'])} with a loss</div></div>")
-    n_strip_rows = (len(events) + 4) // 5
-    h = 64 + n_strip_rows * 36 + 30 + len(live["pairs"]) * 72 + 86
-    return _card("--a:#5b7bd5;--h:#d50a0a", body, h, OUT_CSS + RECAP_CSS)
-
-
 def play_fpts(td, pos=""):
     """Fantasy points a touchdown play is worth to the scorer and the passer (league scoring)."""
     sc = league_scoring("nfl")
@@ -2947,51 +2174,6 @@ def play_fpts(td, pos=""):
     if td["kind"] == "rush":
         return v("rush_td") + yds * v("rush_yd"), 0.0
     return v("st_td") or 6.0, 0.0
-
-
-def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
-    import html as H
-    away, home = teams_of(event)
-    td = td_parse(play)
-    pid = boxscore_id(summary, td["scorer"])
-    o = league_owner(pid, td["scorer"])
-    gain, qb_gain = play_fpts(td, (o or {}).get("pos", ""))
-    qo = league_owner(boxscore_id(summary, td["qb"]), td["qb"]) if td.get("qb") else None
-    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
-    q = play.get("period", {}).get("number", 0)
-    how = (f"{td['yds']}-yd TD catch from {td['qb']}" if td["kind"] == "pass" else
-           f"{td['yds']}-yd TD run" if td["kind"] == "rush" else "defensive / return TD")
-    own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '(bench — ouch)'}" if o
-           else "<b>Unrostered</b> — waiver alert")
-    qline = (f"<br>QB {H.escape(td['qb'])} +{qb_gain:.1f} → <b>{H.escape(qo['manager'])}</b>"
-             f"{'' if qo['starting'] else ' (bench)'}") if qo else ""
-    rid = next((r for r, x in live["rosters"].items() if o and x["manager"] == o["manager"]), None)
-    mu = ""
-    if rid:
-        opp = next((b if a == rid else a for a, b in live["pairs"] if rid in (a, b)), None)
-        if opp:
-            me, op = ol[rid], ol[opp]
-            d = me["po"] - base[rid]["po"]
-            mu = (f"<div class='lg2'><div class='ch'>{H.escape(o['manager'].upper())}'S MATCHUP</div>"
-                  f"<div class='mrw' style='background:none;padding:0;height:auto'>"
-                  f"<div class='mg'><div class='mn'>{H.escape(live['rosters'][rid]['manager'])}</div>"
-                  f"<div class='st2'>playoffs now <span class='g'>{me['po']:.0f}%</span> "
-                  f"({'▲' if d >= 0 else '▼'}{abs(d):.0f} this week)</div></div>"
-                  f"<div class='mid'><div class='sc3'>{me['cur']:.1f} – <span class='lo'>{op['cur']:.1f}</span></div>"
-                  f"<div class='wc'><div style='width:{me['win']:.0f}%;background:#5b7bd5'></div>"
-                  f"<div style='width:{100 - me['win']:.0f}%;background:#d9534f'></div></div>"
-                  f"<div class='wcl'>WIN CHANCE {me['win']:.0f}%</div></div>"
-                  f"<div class='mg r'><div class='mn'>{H.escape(live['rosters'][opp]['manager'])}</div>"
-                  f"<div class='st2'>{len(op['left'])} starters still to play</div></div></div></div>")
-    hs = nfl_headshot(pid) or (away if play["team"]["abbreviation"] == away["team"]["abbreviation"] else home)["team"].get("logo", "")
-    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>TOUCHDOWN · Q{q} {play.get('clock', {}).get('displayValue', '')}"
-            f" · {away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div>"
-            f"<div class='pill'>{H.escape(tag)}</div></div>"
-            f"<div class='tdh'><img class='hs2' src='{H.escape(hs)}'>"
-            f"<div><div class='gain'>+{gain:.1f} FPTS</div><div class='gname'>{H.escape(td['scorer'])}</div>"
-            f"<div class='gplay'>{H.escape(how)}</div></div>"
-            f"<div class='ownbox'>{own}{qline}</div></div>{mu}")
-    return _card("--a:#1faa59;--h:#5b7bd5", body, 64 + 140 + (120 if mu else 0) + 20, OUT_CSS + RECAP_CSS)
 
 
 def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=7):
@@ -3215,27 +2397,6 @@ def matchup_rows_html(live, ol, base=None, delta=None, players_label="playing", 
     return "".join(rows)
 
 
-def games_strip_html(events, state_at=None, pre=False):
-    """Small chips for every game: logos, score and status (state_at: {event id: (away, home, status)})."""
-    import html as H
-    out = []
-    for e in events:
-        aw, hm = teams_of(e)
-        if state_at and e["id"] in state_at:
-            a_s, h_s, stt = state_at[e["id"]]
-        elif pre or state_at is not None or e["status"]["type"]["state"] == "pre":
-            a_s = h_s = None
-            stt = parse_time(e["date"]).astimezone(UK).strftime("%H:%M")
-        else:
-            a_s, h_s, stt = int(num(aw.get("score"))), int(num(hm.get("score"))), game_status(e)
-        sc = (f" <span class='{'lo2' if a_s < h_s else ''}'>{a_s}</span>–<span class='{'lo2' if h_s < a_s else ''}'>{h_s}</span> "
-              if a_s is not None else " @ ")
-        out.append(f"<div class='gs'><img src='{H.escape(aw['team'].get('logo', ''))}'>{aw['team']['abbreviation']}{sc}"
-                   f"{hm['team']['abbreviation']}<img src='{H.escape(hm['team'].get('logo', ''))}'>"
-                   f"<span class='gst{' f' if str(stt).startswith('FINAL') or ':' in str(stt) and a_s is None else ''}'>{H.escape(str(stt))}</span></div>")
-    return f"<div class='gstrip'>{''.join(out)}</div>"
-
-
 def _preview_rows(live, ol, show_teams, league):
     """Matchups with players in this window as full rows; the rest compact."""
     import html as H
@@ -3271,7 +2432,6 @@ def nfl_preview_fantasy_html(events, live, ol, title, show_teams=None):
     import html as H
     league = CONFIG["nfl"].get("league_name", "League")
     k = parse_time(events[0]["date"]).astimezone(UK)
-    stakes = max(ol, key=lambda r: (ol[r]["po_w"] or 0) - (ol[r]["po_l"] or 0))
     fav = max(live["pairs"], key=lambda p: abs(ol[p[0]]["win"] - 50))
     body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL · WEEK {live['week']} · {H.escape(title.upper())}</div>"
             f"<div class='pill'>{'KICK-OFF IMMINENT' if now_utc() > parse_time(events[0]['date']) else 'KICK-OFF ' + k.strftime('%H:%M') + ' UK'}</div></div>"
@@ -3290,16 +2450,6 @@ def kicker_fpts(yds):
         if lo <= yds <= hi:
             return float(sc.get(k) or sc.get("fgm") or 3)
     return 3.0
-
-
-def scoring_line_html(p):
-    """p: dict(logo, who, what, pts, owner, starting)."""
-    import html as H
-    own = (f"{H.escape(p['owner'])}<small>{'starting' if p['starting'] else 'bench'}</small>" if p["owner"]
-           else "Unrostered<small>free agent</small>")
-    return (f"<div class='spl'><img src='{H.escape(p['logo'])}'><div><div class='w1'>{H.escape(p['who'])}</div>"
-            f"<div class='w2'>{H.escape(p['what'])}</div></div>"
-            f"<div class='gp{'' if p['owner'] and p['starting'] else ' z'}'>+{p['pts']:.1f}</div><div class='o2'>{own}</div></div>")
 
 
 def nfl_live_update_html(stamp, title, events, state_at, scoring, live, ol, base, prev, delta):
@@ -3330,7 +2480,6 @@ def nfl_live_update_html(stamp, title, events, state_at, scoring, live, ol, base
 # ------------------------------------------------ live wiring: NFL fantasy posts + NBA playoff odds
 
 AU_NFL = lambda: {"name": f"NFL · {CONFIG['nfl'].get('league_name', 'League')}", "icon_url": NFL_LOGO}  # noqa: E731
-AU_NBA = lambda: {"name": f"NBA · {CONFIG['nba'].get('league_name', 'League')} league", "icon_url": NBA_LOGO}  # noqa: E731
 
 
 HL_CSS = """
@@ -3907,11 +3056,6 @@ def _with_nba_odds(fn):
 
 post_nba_single = _with_nba_odds(_post_nba_single_v1)
 post_nba_group = _with_nba_odds(_post_nba_group_v1)
-
-
-def _nba_post(html_text, content, embed, name):           # v2 renderer (auto height)
-    return _post_card(NBA_HOOK, html_text, content, embed, name)
-
 
 
 _run_nba_v1 = run_nba
@@ -4547,13 +3691,11 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
     gain, qb_gain = play_fpts(td, (o0 or {}).get("pos", ""))
     owners = []
     if td["kind"] == "pass":
-        what = f"{td['yds']}-yard touchdown pass"
         o1, p1 = panel("RECEIVER", td["scorer"], gain)
         o2, p2 = panel("QUARTERBACK", td["qb"], qb_gain)
         panels, cls = p1 + p2, "pair"
         owners = [o1, o2]
     else:
-        what = (f"{td['yds']}-yard touchdown run" if td["kind"] == "rush" else "defensive / return touchdown")
         o1, p1 = panel("SCORER", td["scorer"], gain)
         panels, cls = p1, "pair one"
         owners = [o1]
@@ -4563,7 +3705,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
         opp = next((b if a == rid else a for a, b in live["pairs"] if rid in (a, b)), None) if rid else None
         if not opp:
             return ""
-        me, op = ol[rid], ol[opp]
+        me = ol[rid]
         pw = prev_win.get(str(rid))
         sw = ""
         if pw is not None and abs(me["win"] - pw) >= 1:
@@ -4701,22 +3843,6 @@ def nfl_fg_html(event, play, summary, live, ol, base):
     tag = ("WALK-OFF" if final and mine > theirs else "TIES IT" if mine == theirs else
            "GO-AHEAD" if mine > theirs and mine - 3 <= theirs else f"LEAD NOW {mine - theirs}" if mine > theirs
            else f"WITHIN {theirs - mine}")
-    wp = ""
-    for w in summary.get("winprobability") or []:
-        if str(w.get("playId")) == str(play.get("id")):
-            hp = float(w.get("homeWinPercentage") or 0) * 100
-            fav, pct = (home, hp) if hp >= 50 else (away, 100 - hp)
-            wp = f"<div class='wp'>ESPN win chance: {fav['team']['abbreviation']} {pct:.0f}%</div>"
-
-    def side(t, sc, lo, right):
-        img = f"<img src='{H.escape(t['team'].get('logo', ''))}'>"
-        name = f"<span>{t['team']['abbreviation']}</span>"
-        score = f"<span class='sc{' lo' if lo else ''}'>{sc}</span>"
-        inner = (score + name + img) if right else (img + name + score)
-        return f"<div class='tm{' r' if right else ''}'>{inner}</div>"
-    sb = (f"<div class='sb5'>{side(away, a_s, a_s < h_s, False)}"
-          f"<div class='mid'><div class='clk'>{'FINAL' if final else ('OT' if q > 4 else 'Q4') + ' · ' + clock + ' LEFT'}</div>{wp}</div>"
-          f"{side(home, h_s, h_s < a_s, True)}</div>")
 
     # kicker panel (same look as the touchdown card)
     k = next((x for x in nfl_kickers(summary) if name_key(x["name"]) == name_key(kicker)), None)
@@ -4801,22 +3927,6 @@ def post_fg_clutch(event, play, summary, ctx):
 
 
 _nfl_prime_slot_fg = nfl_prime_slot
-
-
-def post_overtime(event, summary, ctx):
-    """The game is heading to overtime: everyone's points after regulation + projected matchups."""
-    away, home = teams_of(event)
-    a, h = int(num(away.get("score"))), int(num(home.get("score")))
-    html_text = _no_panel(nfl_game_fantasy_html, event, summary, ctx["live"], ctx["ol"], ctx["base"])
-    html_text = (html_text.replace("<div class='pill'>FULL-TIME</div>", "<div class='pill'>OVERTIME</div>", 1)
-                 .replace("YOUR LEAGUE'S PLAYERS IN THIS GAME", "YOUR LEAGUE'S PLAYERS · POINTS AFTER REGULATION", 1))
-    owned = [(p, o) for p in nfl_fantasy(summary) for o in [league_owner(p.get("id"), p["name"])] if o]
-    desc = (f"{owned[0][0]['name']} leads the way with {fmt_pts(owned[0][0]['pts'])} for {owned[0][1]['manager']}"
-            " · every overtime score gets a post" if owned else "Every overtime score gets a post")
-    embed = {"author": AU_NFL(), "color": 0xD97757,
-             "title": f"We're going to overtime! {away['team'].get('name')} {a}–{h} {home['team'].get('name')}",
-             "description": desc}
-    return _post_card(NFL_HOOK, html_text, "⏱️ **OVERTIME**", embed, "ot.png")
 
 
 def nfl_prime_slot(slot, st, getctx, force=False):
@@ -4923,14 +4033,6 @@ def nfl_gc_html(event, play, summary, live, ol, before, after):
     m2 = re.search(r"([A-Z]\.\s?[A-Za-z'\-]+) pass", text) or re.search(r"([A-Z]\.\s?[A-Za-z'\-]+) FUMBLES", text)
     victim = m2.group(1) if m2 else ""
 
-    def side(t_, sc, lo, right):
-        img = f"<img src='{H.escape(t_['team'].get('logo', ''))}'>"
-        name = f"<span>{t_['team']['abbreviation']}</span>"
-        score = f"<span class='sc{' lo' if lo else ''}'>{sc}</span>"
-        return f"<div class='tm{' r' if right else ''}'>{(score + name + img) if right else (img + name + score)}</div>"
-    sb = (f"<div class='sb5'>{side(away, a_s, a_s < h_s, False)}"
-          f"<div class='mid'><div class='clk'>{'OT' if q > 4 else 'Q' + str(q)} · {clock} LEFT</div></div>"
-          f"{side(home, h_s, h_s < a_s, True)}</div>")
 
     ca = vivid(gt["team"].get("color") or "1faa59")
     co = vivid(lt["team"].get("color") or "5b7bd5")
@@ -5163,15 +4265,6 @@ def nfl_ot_html(event, summary, live, ol):
     return _card("--a:#c81d25;--h:#ffd166", body, extra_css=V4_CSS + TD5_CSS + OT_CSS + bg)
 
 
-def post_overtime(event, summary, ctx):
-    away, home = teams_of(event)
-    a = int(num(away.get("score")))
-    embed = {"author": AU_NFL(), "color": 0xC81D25,
-             "title": f"🚨 WE'RE GOING TO OVERTIME! {away['team'].get('name')} {a}–{a} {home['team'].get('name')}",
-             "description": "Sixty minutes couldn't split them — and your league's matchups are riding on it."}
-    return _post_card(NFL_HOOK, nfl_ot_html(event, summary, ctx["live"], ctx["ol"]), "🚨 **OVERTIME**", embed, "ot.png")
-
-
 _nfl_ot_html_v2 = nfl_ot_html
 
 
@@ -5356,8 +4449,6 @@ def _nba_post(html_text, content, embed, name):
 
 # ------------------------------------------------ poster names: Donald 🏈 for NFL, Donald 🏀 for NBA
 
-_post_weekly_recap_named = post_weekly_recap
-
 
 def post_weekly_recap(sport, week, live, settings):
     if sport == "nba":
@@ -5423,25 +4514,6 @@ RACE5_CSS = """
 .rc .flip{background:#ffd166;color:#1b1305;border-radius:5px;padding:0 5px;font-size:10px;letter-spacing:.8px}
 .rc .note{font-size:11px;color:#a89a8a;margin-top:6px}
 """
-
-
-def _nba_projections_lastrow(week):
-    """Old version (kept for reference): kept whichever game came last."""
-    if week in _NBA_PROJ:
-        return _NBA_PROJ[week]
-    out = {}
-    try:
-        season = fetch_url(f"{SLEEPER}/state/nba").get("season")
-        sc = league_scoring("nba")
-        for r in fetch_url(f"https://api.sleeper.app/projections/nba/{season}/{week}?season_type=regular") or []:
-            s = r.get("stats") or {}
-            gp = float(s.get("gp") or 1) or 1
-            out[str(r.get("player_id"))] = sum(float(v or 0) * float(sc[k]) for k, v in s.items()
-                                               if k in sc and isinstance(v, (int, float))) / gp
-    except Exception as e:  # noqa: BLE001
-        log(f"NBA projections unavailable: {e}")
-    _NBA_PROJ[week] = out
-    return out
 
 
 def nba_games_left():
@@ -5821,7 +4893,6 @@ def nfl_defenses(summary, event=None, week=None):
     return out
 
 
-
 # ------------------------------------------------ pre-game projections on every player row
 
 _PJIDX = {}
@@ -5931,7 +5002,6 @@ FAN_CSS += """
 .tpr .pj5 b{margin-left:5px}.tpr .pj5 b.up{color:#7ee2a8}.tpr .pj5 b.dn{color:#ff9a9e}
 .tpr .pj5.beat{color:#ffd166}.tpr .pj5.beat b.up{color:#ffd166}
 """
-
 
 
 # ------------------------------------------------ pin NFL full-time posts for 16 hours (needs a Discord bot token)
@@ -6059,16 +5129,12 @@ def _final_label(event, *a, **k):
 
 post_prime_final = _pinning(post_prime_final, _final_label)
 post_nfl_final = _pinning(post_nfl_final, _final_label)
-post_slot = _pinning(post_slot, lambda mode, slot, live: f"NFL full-time slate ({len(slot)} games)"
-                     if mode == "FULL-TIME" else None)
-
 
 
 # ------------------------------------------------ trades: every Sleeper trade posted with a verdict
 
 _FC = {}
 _NBA_ROWS = {}
-_TR_CTX = {}
 
 SLOT_ELIG = {
     "QB": {"QB"}, "RB": {"RB"}, "WR": {"WR"}, "TE": {"TE"}, "K": {"K"}, "DEF": {"DEF"},
@@ -6249,7 +5315,6 @@ def trade_eval(sport, t):
         return sum(best_lineup(slots, [p for p in roster if p in d], d, "nba") for d in days.values()) / n_units
 
     fc = fantasycalc_values() if sport == "nfl" else {"players": {}}
-    standings = sorted(people, key=lambda k: people[k]["rank"])
 
     def tier_of(orig_rid):
         r = people.get(orig_rid, {}).get("rank", n_teams // 2)
@@ -6377,7 +5442,7 @@ def trade_take(ev):
         else:
             mood = ""
         out.append(f"{m} ({rec}) {got}" + (f", {mood}," if mood else "") + f" and {how}.")
-    best, worst, vw, nw = ev["best"], ev["worst"], ev["vw"], ev["nw"]
+    best, vw, nw = ev["best"], ev["vw"], ev["nw"]
     lo = min(sides, key=lambda x: x["share"])
     pct = round(vw["share"] * 100)
     what = "long-term value" if sport == "nfl" else "rest-of-season points"
@@ -6655,7 +5720,6 @@ def maybe_daily_race(st):
     return _maybe_daily_race_trades(st)
 
 
-
 # ------------------------------------------------ owner lookup: fresh rosters + careful ESPN -> Sleeper matching
 
 _LEAGUE_T = {}
@@ -6779,8 +5843,6 @@ def nba_players(summary, *a, **k):
         if r.get("team"):
             _SEEN_TEAM[("nba", name_key(r.get("name", "")))] = r["team"]
     return rows
-
-
 
 
 def nba_projections(week):
@@ -7064,7 +6126,6 @@ def nba_game_fantasy_html(event, summary, live, max_rows=7):
     return _widen(_nba_game_fantasy_html_tall(event, summary, live, max_rows))
 
 
-
 # ------------------------------------------------ images: download them ourselves and embed them (no broken pictures)
 
 _IMG = {}
@@ -7149,7 +6210,6 @@ def render_png(html_text, width=880, height=530):
     return _render_png_web(html_text, width, height)
 
 
-
 # ------------------------------------------------ starting / bench / free agent: loud, solid tags + a coloured row edge
 
 FAN_CSS += """
@@ -7167,7 +6227,6 @@ FAN_CSS += """
 .tpr:has(em.s){box-shadow:inset 4px 0 0 #1faa59}
 .tpr:has(em.b){box-shadow:inset 4px 0 0 #64748b}
 """
-
 
 
 _nba_batch_html_narrow = nba_batch_html
