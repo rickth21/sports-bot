@@ -9881,7 +9881,7 @@ body,.card{width:1100px!important}
 .awt .x{font-size:19px;color:#dbe0ea;margin-top:3px;line-height:1.25}
 .awt .x b{color:#fff}
 .awt.pow{background:linear-gradient(120deg,rgba(255,179,71,.22),rgba(255,255,255,.05))}
-.awt .prk{position:absolute!important;right:12px;bottom:10px;left:auto!important;top:auto!important}
+.awt .prk{position:static!important;display:inline-block;vertical-align:middle;margin-left:10px}
 .vb{display:flex;flex-direction:column;gap:6px;margin-top:12px;background:rgba(9,12,22,.55);border-radius:12px;padding:10px 16px}
 .vb div{font-size:20px;color:#dbe0ea;line-height:1.3}.vb b{color:#fff}.vb .c{color:#ff9a9e;font-weight:900}
 .st3{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:16px;margin-top:12px}
@@ -10027,7 +10027,7 @@ def recap_v2_html(sport, week, live, settings):
         f"<div class='rsr{' blow' if (w, l) == blow else ' close' if (w, l) == close else ''}'><b>{H.escape(w['manager'])}</b>"
         f"<span class='s'>{w['points']:.1f}</span><b class='lo'>{H.escape(l['manager'])}</b>"
         f"<span class='s lo'>{l['points']:.1f}</span></div>" for w, l in games)
-    aw = "".join(f"<div class='awt{cls}'>{bd}<div class='k'>{k}</div><div class='v'>{H.escape(v)}</div><div class='x'>{x}</div></div>"
+    aw = "".join(f"<div class='awt{cls}'><div class='k'>{k}</div><div class='v'>{H.escape(v)}{bd}</div><div class='x'>{x}</div></div>"
                  for k, v, x, cls, bd in tiles)
     vb = f"<div class='vb'>{''.join(f'<div>{v}</div>' for v in verdicts[:3])}</div>" if verdicts else ""
     body_a = (_rd_top(sport, f"{league.upper()} · WEEK {week}", "WEEKLY RECAP · 1 OF 2")
