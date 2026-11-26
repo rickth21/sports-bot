@@ -4115,8 +4115,12 @@ GC_CSS = """
 .sw5 .row{display:grid;grid-template-columns:90px 1fr 90px;align-items:center;gap:14px;margin-top:6px}
 .sw5 .lb{font-size:12px;letter-spacing:1.2px;font-weight:800;color:#c3cad8}
 .sw5 .lb.r{text-align:right}
-.sw5 .bar{position:relative;height:14px;border-radius:999px;overflow:hidden;background:rgba(255,255,255,.08);display:flex}
-.sw5 .bar div{height:14px}
+.sw5 .bar{position:relative;height:30px;border-radius:9px;overflow:hidden;background:rgba(255,255,255,.08);display:flex}
+.sw5 .bar div{height:30px}
+.sw5 .row{grid-template-columns:90px 1fr!important}
+.sw5 .sg{display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:900;color:#fff;white-space:nowrap;
+ overflow:hidden;text-shadow:0 1px 2px rgba(0,0,0,.55)}
+.sw5 .sg.o{background:#c9ced8;color:#101522;text-shadow:none}
 .sw5 .big{display:flex;align-items:baseline;justify-content:center;gap:14px;font-size:30px;font-weight:900;margin-top:8px;
  font-variant-numeric:tabular-nums}
 .sw5 .big .from{color:#8b95a8}.sw5 .big .arr{font-size:22px;color:#c3cad8}
@@ -4172,14 +4176,27 @@ def nfl_gc_html(event, play, summary, live, ol, before, after):
     ca = vivid(gt["team"].get("color") or "1faa59")
     co = vivid(lt["team"].get("color") or "5b7bd5")
 
-    def bar(p):
-        return (f"<div class='bar'><div style='width:{p:.1f}%;background:{ca}'></div>"
-                f"<div style='width:{100 - p:.1f}%;background:{co}88'></div></div>")
+    ga_, la_ = gt["team"]["abbreviation"], lt["team"]["abbreviation"]
+    import colorsys as _cs
+
+    def _pop(h):                                         # how much a colour stands out on the dark card
+        r, g_, b_ = (x / 255 for x in hex_rgb(h))
+        hh, ll, ss = _cs.rgb_to_hls(r, g_, b_)
+        return ss * min(ll, 0.6) + (0.25 if not (0.5 < hh < 0.75) else 0)      # blues stand out least on navy
+    cands = [vivid(c) for c in (gt["team"].get("color"), gt["team"].get("alternateColor")) if c]
+    cbar = max(cands, key=_pop) if cands else ca
+
+    def lab(ab, p):
+        return f"{ab} {p:.0f}%" if p >= 27 else (f"{p:.0f}%" if p >= 10 else "")
+
+    def bar(p):                                         # gaining team in its boldest colour, the other side light grey
+        return (f"<div class='bar'><div class='sg' style='width:{p:.1f}%;background:{cbar}'>{lab(ga_, p)}</div>"
+                f"<div class='sg o' style='width:{100 - p:.1f}%'>{lab(la_, 100 - p)}</div></div>")
     sw = (f"<div class='sw5'><div class='ih'>WIN CHANCE · ESPN</div>"
           f"<div class='big'><span>{gt['team']['abbreviation']}</span><span class='from'>{g_before:.0f}%</span>"
           f"<span class='arr'>→</span><span>{g_after:.0f}%</span><span class='d u'>▲{abs(swing):.0f}</span></div>"
-          f"<div class='row'><span class='lb'>BEFORE</span>{bar(g_before)}<span class='lb r'>{lt['team']['abbreviation']} {100 - g_before:.0f}%</span></div>"
-          f"<div class='row'><span class='lb'>AFTER</span>{bar(g_after)}<span class='lb r'>{lt['team']['abbreviation']} {100 - g_after:.0f}%</span></div></div>")
+          f"<div class='row'><span class='lb'>BEFORE</span>{bar(g_before)}</div>"
+          f"<div class='row'><span class='lb'>AFTER</span>{bar(g_after)}</div></div>")
 
     # fantasy: defence that forced it gains, the player who gave it up loses
     sc = league_scoring("nfl")
@@ -9169,7 +9186,9 @@ BIG_MOMENT_CSS = """
 .imp:not(:has(.im+.im)) .im>:nth-child(3){font-size:27px!important}
 .sw5{padding:14px 20px!important;display:flex;flex-direction:column;justify-content:space-evenly}
 .sw5 .ih{font-size:21px!important}.sw5 .lb{font-size:21px!important}
-.sw5 .big{font-size:40px!important}.sw5 .row{grid-template-columns:110px 1fr 120px!important}
+.sw5 .big{font-size:40px!important}.sw5 .row{grid-template-columns:120px 1fr!important;margin-top:10px!important}
+.sw5 .bar,.sw5 .bar div{height:46px!important;border-radius:0}.sw5 .bar{border-radius:12px!important}
+.sw5 .sg{font-size:23px!important}
 """
 
 BIG_LIST_CSS = """
@@ -9327,6 +9346,127 @@ def readable_inline(html_text):
         return html_text
 
 
+
+
+# ------------------------------------------------ league matchups in standings order + readable win-chance meters
+#   Anywhere the bot lists league matchups (pre-game "who needs what", Sunday updates, the race card) they go in
+#   order of the two managers' average standings rank (1 = top of the table), closest win chance first on ties.
+#   (The pinned weekly boards keep Sleeper's matchup order so people find their game in the same place.)
+
+def _rank_sorted(pairs, ol=None, sport="nfl"):
+    try:
+        ppl = _wb_people(sport)
+    except Exception:  # noqa: BLE001
+        return list(pairs)
+
+    def key(p):
+        a, b = p
+        avg = ((ppl.get(a) or {}).get("rank", 99) + (ppl.get(b) or {}).get("rank", 99)) / 2
+        return avg, abs(float((ol or {}).get(a, {}).get("win", 50)) - 50)
+    return sorted(pairs, key=key)
+
+
+_matchup_rows_html_plain = matchup_rows_html
+
+
+def matchup_rows_html(live, ol, *a, **k):
+    return _matchup_rows_html_plain(dict(live, pairs=_rank_sorted(live["pairs"], ol)), ol, *a, **k)
+
+
+_compact_matchups_html_plain = compact_matchups_html
+
+
+def compact_matchups_html(live, ol, pairs):
+    return _compact_matchups_html_plain(live, ol, _rank_sorted(pairs, ol))
+
+
+METER_CSS = """
+.mt2{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;margin-top:8px}
+.mt2 b{font-size:24px;font-weight:900;font-variant-numeric:tabular-nums}.mt2 b.dog{color:#7d879b}
+.mt2 .tk{position:relative;height:16px;border-radius:999px;background:#3a4152;overflow:hidden}
+.mt2 .tk i{position:absolute;top:0;bottom:0;background:linear-gradient(90deg,#4be38e,#1faa59)}
+.mt2 .tk em{position:absolute;left:50%;top:0;bottom:0;width:2px;margin-left:-1px;background:rgba(255,255,255,.55)}
+.mt2.sm b{font-size:17px}.mt2.sm .tk{height:10px}
+"""
+
+
+def meter_html(win_a, size=""):
+    """Win-chance meter: big percentages, a solid green bar growing from the favourite's side."""
+    wa = max(0.0, min(100.0, win_a))
+    fav_left = wa >= 50
+    w = wa if fav_left else 100 - wa
+    side = "left:0" if fav_left else "right:0"
+    return (f"<style>{METER_CSS}</style><div class='mt2 {size}'><b class='{'' if fav_left else 'dog'}'>{wa:.0f}%</b>"
+            f"<div class='tk'><i style='{side};width:{w:.1f}%'></i><em></em></div>"
+            f"<b class='{'dog' if fav_left else ''}'>{100 - wa:.0f}%</b></div>")
+
+
+# ---- pre-game "who needs what": landscape tiles, standings order, readable without opening
+WHO_CSS = """
+body,.card{width:1100px!important}
+.top{font-size:20px!important;letter-spacing:1.5px!important}.top img{width:32px!important;height:32px!important}
+.top .pill{font-size:20px!important;padding:5px 12px!important}
+.hl{margin:10px 0 0!important;padding:10px 18px!important}.hl .h1{font-size:28px!important}.hl .h2{font-size:21px!important}
+.wn{display:grid;grid-template-columns:1fr 1fr;gap:12px 14px;margin-top:12px}
+.wnt{position:relative;background:rgba(255,255,255,.065);border-radius:14px;padding:4px 14px}
+.wnt.cold{opacity:.62}
+.wnr{display:grid;grid-template-columns:44px minmax(0,1fr) auto 92px;gap:10px;align-items:center;padding:7px 0;min-height:70px}
+.wnr+.wnr{border-top:1px solid rgba(255,255,255,.08)}
+.wnr .rk{font-size:22px;font-weight:900;color:#ffd166;text-align:center}
+.wnr .wnm{font-size:24px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:none;letter-spacing:0}
+.wnr .wch2{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px}
+.wnr .wch2 span{background:#f5c542;color:#1b1f2a;font-weight:900;font-size:17px;border-radius:7px;padding:1px 8px;white-space:nowrap}
+.wnr .wch2 span small{font-size:14px;font-weight:800;opacity:.75;margin-left:5px}
+.wnr .no{font-size:18px;color:#8b95a8;font-style:italic;margin-top:3px;white-space:nowrap}
+.wnr .po{text-align:right;font-size:18px;font-weight:800;color:#cfd5e1;white-space:nowrap;line-height:1.25}
+.wnr .po b{color:#fff;font-size:21px}.wnr .po .g{color:#7ee2a8}.wnr .po .r{color:#ff9a9e}.wnr .po .out{color:#7d879b;font-style:italic}
+.wnr .wp{height:52px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:900;
+ background:rgba(255,255,255,.08);color:#8b95a8;font-variant-numeric:tabular-nums}
+.wnr.fav .wp{background:linear-gradient(180deg,#4be38e,#1faa59);color:#062312}
+.wnt .tg{position:absolute;top:-11px;right:14px;font-size:14px;font-weight:900;letter-spacing:1.2px;padding:2px 9px;border-radius:6px;
+ background:#ffd166;color:#1b1305}
+"""
+
+
+def nfl_preview_fantasy_html(events, live, ol, title, show_teams=None):
+    """Pre-game card (30 min before kick-off): every matchup as a tile, best-ranked matchups first; each side shows
+    its standings rank, its players in this game (with projections), playoff odds with a win / a loss, win chance."""
+    import html as H
+    k = parse_time(events[0]["date"]).astimezone(UK)
+    players = sleeper_players("nfl")
+    proj = nfl_projections(live["week"])
+    ppl = _wb_people("nfl")
+
+    def mine(r):
+        return [p for p in ol[r]["left"] if show_teams is None or (players.get(p) or {}).get("team") in show_teams]
+
+    tiles = []
+    for a, b in _rank_sorted(live["pairs"], ol):
+        rows, any_in = [], False
+        for r, w in ((a, ol[a]["win"]), (b, 100 - ol[a]["win"])):
+            pe, o = ppl.get(r) or {}, ol[r]
+            ps = mine(r)
+            any_in = any_in or bool(ps)
+            chips = "".join(
+                f"<span>{H.escape(short_name((players.get(p) or {}).get('full_name') or '') or (players.get(p) or {}).get('last_name', p) + ' D/ST')}"
+                f"<small>{proj.get(str(p), 0):.1f}</small></span>" for p in ps[:3])
+            who = (f"<div class='wch2'>{chips}</div>" if ps else "<div class='no'>nobody in this game</div>")
+            if o["po"] < 0.5 and (o["po_w"] or 0) < 0.5:
+                po = "<div class='po'><span class='out'>out of the race</span></div>"
+            else:
+                po = (f"<div class='po'>playoffs <b>{o['po']:.0f}%</b>"
+                      + (f"<br>win <span class='g'>{_pct(o['po_w'])}</span> · lose <span class='r'>{_pct(o['po_l'])}</span>"
+                         if o["po_w"] is not None and o["po_l"] is not None and abs(o["po_w"] - o["po_l"]) >= 3 else "")
+                      + "</div>")
+            rows.append(f"<div class='wnr{' fav' if w >= 50 else ''}'><div class='rk'>#{pe.get('rank', '–')}</div>"
+                        f"<div style='min-width:0'><div class='wnm'>{H.escape(live['rosters'][r]['manager'])}</div>{who}</div>"
+                        f"{po}<div class='wp'>{w:.0f}%</div></div>")
+        tag = "<div class='tg'>🔥 COIN FLIP</div>" if 42 <= ol[a]["win"] <= 58 and any_in else ""
+        tiles.append(f"<div class='wnt{'' if any_in else ' cold'}'>{tag}{''.join(rows)}</div>")
+    pill = "KICK-OFF IMMINENT" if now_utc() > parse_time(events[0]["date"]) else f"KICK-OFF {k:%H:%M} UK"
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL · WEEK {live['week']} · {H.escape(title.upper())}</div>"
+            f"<div class='pill'>{pill}</div></div><div class='wn'>{''.join(tiles)}</div>")
+    return _card("--a:#5b7bd5;--h:#d50a0a", body, extra_css=WHO_CSS, width=1100)
 
 
 # ---- big games get hype: NFL 30+ "BIG GAME", 40+ "MONSTER GAME"; NBA (lock-in, defence-heavy) 55+ / 70+.
