@@ -55,7 +55,7 @@
     "hide_pin_notice": true,
     "trades": {
       "enabled": true,
-      "mention_role_id": "1410731373425197250"
+      "mention_role_id": ""
     },
     "season_high_min": 20
   },
