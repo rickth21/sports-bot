@@ -45,7 +45,7 @@ POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "45"))
 MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME_MIN", "50")) * 60
 NBA_EVERY = 300          # check NBA every 5 minutes inside the loop
 STALE_HOURS = 30         # never post results for games older than this
-TD_PAT_WAIT = 150        # seconds to wait for the extra point to be added to a TD
+TD_PAT_WAIT = 0          # seconds to wait for the extra point to be added to a TD (0 = post straight away)
 
 SILENT = False           # True on the very first run: mark everything as seen, post nothing
 CAPTURE = None           # list -> collect embeds instead of posting (simulator)
@@ -2646,6 +2646,8 @@ def run_nba(st, dates=None, force=False):
         if not t.get("completed") or (age_h > STALE_HOURS and not force):
             G(e).update(posted=True, ht=True)        # postponed / too old
             continue
+        if not force and now_s < G(e).setdefault("ft_seen", now_s) + spoiler_delay():
+            continue
         finals.append(e)
     if finals:
         first = st.setdefault("nba_ft_wait", now_s)
@@ -2671,7 +2673,10 @@ def run_nba(st, dates=None, force=False):
             continue
         per, name = e["status"].get("period", 0), e["status"]["type"].get("name")
         if name == "STATUS_HALFTIME" or (per == 3 and clock_secs(e) >= 360):
-            at_half.append(e)
+            if now_s >= g.setdefault("ht_seen", now_s) + spoiler_delay():
+                at_half.append(e)
+            else:
+                approaching.append(e)
         elif per >= 3:
             g["ht"] = True                           # missed the window: no half-time post for this one
         elif per == 2 and clock_secs(e) <= 180:
@@ -3329,11 +3334,41 @@ def game_elapsed(e):
     return min(0.99, ((per - 1) * 900 + (900 - clk)) / 3600)
 
 
+def espn_topup(live, events):
+    """Sleeper's live points can trail ESPN by minutes: for games in progress, use the ESPN-based
+    league score when it's higher, and lift each roster's total to match."""
+    npid = nfl_name_pid()
+    for e in events:
+        if e["status"]["type"]["state"] != "in":
+            continue
+        try:
+            s = fetch(f"football/nfl/summary?event={e['id']}")
+            pts = {}
+            for p in nfl_fantasy(s):
+                pid = (p["id"][4:] if str(p.get("id", "")).startswith("def:")
+                       else npid.get((name_key(p["name"]), sl_team(p["team"]))))
+                if pid:
+                    pts[pid] = p["pts"]
+        except Exception as ex:  # noqa: BLE001
+            log(f"ESPN top-up unavailable: {ex}")
+            continue
+        for x in live["rosters"].values():
+            for pid, v in pts.items():
+                if pid in x["players"]:
+                    old = float(x["pp"].get(pid) or 0)
+                    if v > old + 0.05:
+                        x["pp"][pid] = v
+                        if pid in x["starters"]:
+                            x["points"] += v - old
+    return live
+
+
 def nfl_ctx(st, events):
     """Live league context: Sleeper week, matchups, live outlook and the week-start baseline."""
     live = league_live("nfl")
     if not live or not live.get("pairs"):
         return None
+    live = espn_topup(live, events)
     players = sleeper_players("nfl")
     gofteam = {}
     for e in events:
@@ -3503,6 +3538,9 @@ def nfl_prime_slot(slot, st, getctx, force=False):
                 g["final"] = True
                 continue
             summary = fetch(f"football/nfl/summary?event={e['id']}")
+            if not force and not event_ready(g, "ft_seen", summary):
+                active = True
+                continue
             ctx = getctx()
             if (post_prime_final(e, summary, ctx) if ctx else post_nfl_final(e, summary, True)):
                 g["final"] = True
@@ -3647,12 +3685,15 @@ def nfl_sunday_window(win, st, getctx, force=False):
         return age > -0.6
     if mark > end_loc and not all_done:
         mark = end_loc
+    if now < mark + timedelta(seconds=spoiler_delay()):
+        return True
+    cut = now - timedelta(seconds=spoiler_delay())
     ctx = getctx()
     if not ctx:
         return True
     live, ol = ctx["live"], ctx["ol"]
     since = datetime.strptime(s.get("last") or first.strftime("%Y-%m-%dT%H:%M:%SZ"), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    scoring = scoring_since(win, since, now)
+    scoring = scoring_since(win, since, cut)
     snap = s.get("snap") or {}
     prev_raw = s.get("prev") or {}
     delta = {r: x["points"] - float(snap.get(str(r), x["points"])) for r, x in live["rosters"].items()}
@@ -3671,7 +3712,7 @@ def nfl_sunday_window(win, st, getctx, force=False):
                             f"🏈 {len(scoring)} score{'s' if len(scoring) != 1 else ''} since the last update"}
     head = "🏁 **FINAL UPDATE**" if final else f"🔴 **LIVE · {stamp}**"
     if _post_card(NFL_HOOK, html_text, f"{head} · Sunday window", embed, "live.png"):
-        s["last"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        s["last"] = cut.strftime("%Y-%m-%dT%H:%M:%SZ")
         s["snap"] = {str(r): x["points"] for r, x in live["rosters"].items()}
         s["prev"] = {str(r): {"win": v["win"], "po": v["po"]} for r, v in ol.items()}
         if final:
@@ -4098,11 +4139,13 @@ def nfl_prime_slot(slot, st, getctx, force=False):
         g = st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})
         if g.get("half"):
             continue
+        summary = fetch(f"football/nfl/summary?event={e['id']}")
+        if not event_ready(g, "half_seen", summary, period=2):
+            continue
         ctx = getctx()
         if ctx is None:
             g["half"] = True
             continue
-        summary = fetch(f"football/nfl/summary?event={e['id']}")
         if post_prime_half(e, summary, ctx):
             g["half"] = True
     return _nfl_prime_slot_base(slot, st, getctx, force)
@@ -4226,21 +4269,264 @@ def nfl_headshot(pid):
     return _nfl_headshot_base(pid)
 
 
-# ------------------------------------------------ spoiler delay for touchdown posts
+# ------------------------------------------------ spoiler delay (people watching on a delay)
+
+def spoiler_delay():
+    return float(CONFIG.get("spoiler_delay_seconds", 120))
+
+
+def _wallclock_ts(wc):
+    return datetime.strptime(wc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+
 
 def td_ready(summary, play, first_seen):
-    """True once the play is at least nfl.spoiler_delay_seconds old (for people watching on a delay).
-    Uses ESPN's time of the play when it has one, otherwise when the bot first saw it."""
-    delay = float(CONFIG["nfl"].get("spoiler_delay_seconds", 60))
+    """True once the touchdown is at least spoiler_delay() old (ESPN's time of the play, else first seen)."""
     t0 = first_seen
     try:
         _, d = play_detail(summary, play.get("id"))
-        wc = (d or {}).get("wallclock")
-        if wc:
-            t0 = datetime.strptime(wc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        if (d or {}).get("wallclock"):
+            t0 = _wallclock_ts(d["wallclock"])
     except Exception:  # noqa: BLE001
         pass
-    return time.time() >= t0 + delay
+    return time.time() >= t0 + spoiler_delay()
+
+
+def event_ready(g, key, summary=None, period=None):
+    """True once a half-time / full-time moment is at least spoiler_delay() old.
+    Moment = time of the last play (of `period` if given) from ESPN, or when the bot first noticed it."""
+    t0 = g.setdefault(key, time.time())
+    try:
+        drives = (summary or {}).get("drives") or {}
+        pool = list(drives.get("previous") or []) + ([drives["current"]] if drives.get("current") else [])
+        wcs = [_wallclock_ts(p["wallclock"]) for d in pool for p in d.get("plays") or []
+               if p.get("wallclock") and (period is None or (p.get("period") or {}).get("number") == period)]
+        if wcs:
+            t0 = min(t0, max(wcs))
+    except Exception:  # noqa: BLE001
+        pass
+    return time.time() >= t0 + spoiler_delay()
+
+
+# ------------------------------------------------ v5 touchdown card: conversion strip, projections, win swing
+
+TD5_CSS = """
+.pair{gap:10px!important;margin-top:8px!important}
+.pp5{display:grid;grid-template-columns:72px 1fr;gap:12px;align-items:center;background:rgba(255,255,255,.06);border-radius:12px;padding:9px 10px}
+.pp5 img{width:72px;height:72px;border-radius:10px;object-fit:cover;object-position:top;background:rgba(255,255,255,.08)}
+.pp5 .role{font-size:10px;letter-spacing:1.4px;color:#9aa3b5;font-weight:700}
+.pp5 .nm{font-size:17px;font-weight:900;line-height:1.1;margin-top:1px}
+.pp5 .gn{display:flex;align-items:baseline;gap:8px;margin-top:2px}
+.pp5 .gn b{font-size:24px;font-weight:900;color:#7ee2a8;line-height:1}
+.pp5 .gn span{font-size:12.5px;color:#cfd5e1;font-weight:700}.pp5 .gn span em{font-style:normal;color:#fff;font-size:16px;font-weight:900}
+.pb5{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;margin-top:5px}
+.pb5 .bar{height:5px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden}
+.pb5 .bar div{height:5px;border-radius:999px;background:linear-gradient(90deg,#d97757,#f2a77f)}
+.pb5 .bar div.over{background:linear-gradient(90deg,#1faa59,#7ee2a8)}
+.pb5 span{font-size:11px;color:#9aa3b5;font-weight:700;white-space:nowrap}.pb5 span b{color:#e6e9ef}
+.pp5 .ow3{font-size:12.5px;color:#cfd5e1;margin-top:3px}.pp5 .ow3 b{color:#fff}
+.cv{display:flex;align-items:center;gap:9px;margin-top:8px;background:rgba(255,255,255,.045);border-radius:10px;padding:6px 12px;
+ font-size:13px;color:#cfd5e1;flex-wrap:wrap}
+.cv .tg{font-size:10px;letter-spacing:1.3px;font-weight:800;color:#9aa3b5}
+.cv .ok{color:#7ee2a8;font-weight:900;font-size:10.5px;letter-spacing:1px}.cv .no{color:#ff9a9e;font-weight:900;font-size:10.5px;letter-spacing:1px}
+.cv b{color:#fff}.cv .g{color:#7ee2a8;font-weight:900}.cv .sep{color:#5d6679}
+.cv .cvw{white-space:nowrap;font-size:13px;font-weight:600;color:#cfd5e1}
+.mu5{margin-top:8px;background:rgba(255,255,255,.055);border-radius:12px;padding:8px 14px}
+.mu5 .row{display:grid;grid-template-columns:1fr 250px 1fr;align-items:center;gap:12px}
+.mu5 .nm{font-size:16px;font-weight:900;text-transform:none;letter-spacing:0}.mu5 .r{text-align:right}
+.mu5 .pj{font-size:11.5px;color:#9aa3b5;font-weight:700;margin-top:1px}.mu5 .pj b{color:#e6e9ef;font-size:12.5px}
+.mu5 .po{font-size:11.5px;color:#9aa3b5;font-weight:700;margin-top:2px}.mu5 .po b{color:#fff}
+.mu5 .po .g{color:#7ee2a8}.mu5 .po .b{color:#ff9a9e}.mu5 .po .u{color:#7ee2a8}.mu5 .po .dn{color:#ff9a9e}
+.mu5 .sc{text-align:center;font-size:20px;font-weight:900;font-variant-numeric:tabular-nums;margin-bottom:3px}.mu5 .sc .lo{color:#8b95a8}
+.mu5 .wcx{text-align:center;font-size:10px;letter-spacing:1px;color:#9aa3b5;font-weight:700;margin-top:3px}
+.mu5 .wcx .u{color:#7ee2a8}.mu5 .wcx .dn{color:#ff9a9e}
+.mu5 .tc{font-size:11.5px;color:#9aa3b5;margin-top:3px;white-space:nowrap}.mu5 .tc b{color:#e6e9ef;font-weight:700}.mu5 .tc span{color:#6f788b}
+"""
+
+_NFL_ST = {}
+
+
+def _sl_pid(name, espn_team):
+    return nfl_name_pid().get((name_key(name), sl_team(espn_team)))
+
+
+def _proj_total(r, live, ol, event, proj):
+    """Projected final: points so far + projection for what's left (in-game players: the remaining share)."""
+    players = sleeper_players("nfl")
+    here = {sl_team(t["team"]["abbreviation"]) for t in teams_of(event)}
+    rem = max(0.0, 1 - game_elapsed(event))
+    tot = ol[r]["cur"]
+    for p in ol[r]["left"]:
+        pj = proj.get(str(p), 0.0)
+        tot += pj * rem if ((players.get(p) or {}).get("team") or p) in here else pj
+    return tot
+
+
+def _conversion_html(play, summary, team_abbr):
+    import html as H
+    m = re.search(r"\(([^()]*)\)\s*$", play.get("text") or "")
+    if not m:
+        return ""
+    pat = m.group(1)
+    sc = league_scoring("nfl")
+    failed = bool(re.search(r"fail|miss|block|no good", pat, re.I))
+    mark = "<span class='no'>NO GOOD</span>" if failed else "<span class='ok'>GOOD</span>"
+
+    def who_html(name, gain):
+        o = league_owner(boxscore_id(summary, name), name)
+        now = player_now(summary, name)
+        own = (f"{H.escape(o['manager'])}{'' if o['starting'] else ' (bench)'}" if o else "free agent")
+        return (f"<span class='cvw'><b>{H.escape(name)}</b> <span class='g'>+{gain:g}</span>"
+                + (f" · now {fmt_pts(now)}" if now is not None else "") + f" <span class='sep'>·</span> {own}</span>")
+
+    if re.search(r"two-point|2pt|2-pt", pat, re.I):
+        mm = re.match(r"^(.+?)\s+pass to\s+(.+?)\s+for two-point", pat, re.I)
+        if mm:
+            g1, g2 = (0, 0) if failed else (float(sc.get("pass_2pt") or 0), float(sc.get("rec_2pt") or 0))
+            body = f"{who_html(mm.group(1).strip(), g1)} <span class='sep'>➜</span> {who_html(mm.group(2).strip(), g2)}"
+        else:
+            mm = re.match(r"^(.+?)\s+(?:run|rush)\s+for two-point", pat, re.I)
+            body = who_html(mm.group(1).strip(), 0 if failed else float(sc.get("rush_2pt") or 0)) if mm else H.escape(pat)
+        return f"<div class='cv'><span class='tg'>2-PT CONVERSION</span>{mark}{body}</div>"
+    mm = re.match(r"^(.+?)\s+(?:kick|pat|extra point)\b", pat, re.I)
+    name = mm.group(1).strip() if mm else ""
+    if not name:
+        return ""
+    k = next((x for x in nfl_kickers(summary) if name_key(x["name"]) == name_key(name)), None)
+    o = league_owner(k["id"] if k else boxscore_id(summary, name), name)
+    gain = float(sc.get("xpmiss") or 0) if failed else float(sc.get("xpm") or 0)
+    own = (f"{H.escape(o['manager'])}{'' if o['starting'] else ' (bench)'}" if o else "free agent")
+    return (f"<div class='cv'><span class='tg'>EXTRA POINT</span>{mark}<b>{H.escape(name)}</b>"
+            f"<span class='g'>{'+' if gain >= 0 else ''}{gain:g}</span>"
+            + (f" · now {fmt_pts(k['pts'])} pts" if k else "") + f" <span class='sep'>·</span> {own}</div>")
+
+
+_nfl_td_fantasy_html_v4 = nfl_td_fantasy_html
+
+
+def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
+    """v5 touchdown card (switched on with nfl.td_card_v5 in config.json)."""
+    if not CONFIG["nfl"].get("td_card_v5"):
+        return _nfl_td_fantasy_html_v4(event, play, summary, live, ol, base, tag)
+    import html as H
+    away, home = teams_of(event)
+    td = td_parse(play)
+    abbr = play["team"]["abbreviation"]
+    scorer_team = away if abbr == away["team"]["abbreviation"] else home
+    proj = nfl_projections(live["week"])
+    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    q = play.get("period", {}).get("number", 0)
+    st = _NFL_ST.get("st") or {}
+    prev_win = st.get("nfl_td_win") or {}
+
+    def panel(role, name, gain_):
+        pid = boxscore_id(summary, name)
+        o = league_owner(pid, name)
+        hs = nfl_headshot(pid) or scorer_team["team"].get("logo", "")
+        now = player_now(summary, name)
+        pj = proj.get(str(_sl_pid(name, abbr) or ""), 0.0)
+        bar = ""
+        if pj and now is not None:
+            pct = min(100.0, now / pj * 100)
+            bar = (f"<div class='pb5'><div class='bar'><div class='{'over' if now >= pj else ''}' style='width:{max(pct, 3):.0f}%'></div></div>"
+                   f"<span>{'<b>beat</b> ' if now >= pj else ''}proj <b>{pj:.1f}</b></span></div>")
+        own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
+               else "<b>Unrostered</b> — free agent")
+        tot = f"<span>now <em>{fmt_pts(now)}</em> pts</span>" if now is not None else ""
+        return o, (f"<div class='pp5'><img src='{H.escape(hs)}'><div><div class='role'>{role}</div>"
+                   f"<div class='nm'>{H.escape(name)}</div><div class='gn'><b>+{gain_:.1f}</b>{tot}</div>{bar}"
+                   f"<div class='ow3'>{own}</div></div></div>")
+
+    pid0 = boxscore_id(summary, td["scorer"])
+    o0 = league_owner(pid0, td["scorer"])
+    gain, qb_gain = play_fpts(td, (o0 or {}).get("pos", ""))
+    owners = []
+    if td["kind"] == "pass":
+        what = f"{td['yds']}-yard touchdown pass"
+        o1, p1 = panel("RECEIVER", td["scorer"], gain)
+        o2, p2 = panel("QUARTERBACK", td["qb"], qb_gain)
+        panels, cls = p1 + p2, "pair"
+        owners = [o1, o2]
+    else:
+        what = (f"{td['yds']}-yard touchdown run" if td["kind"] == "rush" else "defensive / return touchdown")
+        o1, p1 = panel("SCORER", td["scorer"], gain)
+        panels, cls = p1, "pair one"
+        owners = [o1]
+
+    def matchup(o):
+        rid = next((r for r, x in live["rosters"].items() if x["manager"] == o["manager"]), None)
+        opp = next((b if a == rid else a for a, b in live["pairs"] if rid in (a, b)), None) if rid else None
+        if not opp:
+            return ""
+        me, op = ol[rid], ol[opp]
+        pa, pb = _proj_total(rid, live, ol, event, proj), _proj_total(opp, live, ol, event, proj)
+        pw = prev_win.get(str(rid))
+        sw = ""
+        if pw is not None and abs(me["win"] - pw) >= 1:
+            d = me["win"] - pw
+            sw = f" · <span class='{'u' if d > 0 else 'dn'}'>{'▲' if d > 0 else '▼'}{abs(d):.0f} THIS SCORE</span>"
+        lead = me["cur"] >= op["cur"]
+        players = sleeper_players("nfl")
+        here = {sl_team(x["team"]["abbreviation"]) for x in teams_of(event)}
+
+        def to_come(r):
+            rows = []
+            for p in ol[r]["left"]:
+                pp = players.get(p) or {}
+                if (pp.get("team") or p) in here:
+                    continue                      # already playing in this game
+                nm = short_name(pp["full_name"]) if pp.get("full_name") else f"{p} D/ST"
+                rows.append((proj.get(str(p), 0.0), nm))
+            rows.sort(reverse=True)
+            if not rows:
+                return "<div class='tc'>nobody left to come</div>"
+            top = " · ".join(f"<b>{H.escape(n)}</b> {v:.0f}" for v, n in rows[:2])
+            more = f" <span>+{len(rows) - 2}</span>" if len(rows) > 2 else ""
+            return f"<div class='tc'>to come: {top}{more}</div>"
+        d_po = me["po"] - base[rid]["po"]
+        po = (f"PLAYOFFS <b>{me['po']:.0f}%</b>"
+              + (f" <span class='{'u' if d_po > 0 else 'dn'}'>{'▲' if d_po > 0 else '▼'}{abs(d_po):.0f}</span>" if abs(d_po) >= 1 else ""))
+        if me["po_w"] is not None and me["po_l"] is not None and abs(me["po_w"] - me["po_l"]) >= 2:
+            po += f" · win <span class='g'>{_pct(me['po_w'])}</span> · lose <span class='b'>{_pct(me['po_l'])}</span>"
+        return (f"<div class='mu5'><div class='row'>"
+                f"<div><div class='nm'>{H.escape(live['rosters'][rid]['manager'])}</div>"
+                f"<div class='pj'>proj <b>{pa:.1f}</b></div><div class='po'>{po}</div>{to_come(rid)}</div>"
+                f"<div><div class='sc'><span class='{'' if lead else 'lo'}'>{me['cur']:.1f}</span>"
+                f"<span style='color:#5d6679'> – </span><span class='{'lo' if lead else ''}'>{op['cur']:.1f}</span></div>"
+                f"{meter_html(me['win'], 'sm')}<div class='wcx'>WIN CHANCE{sw}</div></div>"
+                f"<div class='r'><div class='nm'>{H.escape(live['rosters'][opp]['manager'])}</div>"
+                f"<div class='pj'>proj <b>{pb:.1f}</b></div>{to_come(opp)}</div></div></div>")
+
+    seen, mus = set(), []
+    for o in owners:
+        if o and o["starting"] and o["manager"] not in seen:
+            seen.add(o["manager"])
+            mus.append(matchup(o))
+    if not mus:
+        for o in owners:
+            if o and o["manager"] not in seen:
+                seen.add(o["manager"])
+                mus.append(matchup(o))
+                break
+    st["nfl_td_win"] = {str(r): v["win"] for r, v in ol.items()}
+
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>TOUCHDOWN · Q{q} "
+            f"{play.get('clock', {}).get('displayValue', '')} · {away['team']['abbreviation']} {a_s}–{h_s} "
+            f"{home['team']['abbreviation']}</div><div class='pill'>{H.escape(tag)}</div></div>"
+            f"<div class='sec' style='margin-top:10px'>{H.escape(what.upper())}</div>"
+            f"<div class='{cls}'>{panels}</div>{_conversion_html(play, summary, abbr)}{''.join(mus)}")
+    t = scorer_team["team"]
+    ca = bright(t.get("color") or "1faa59")
+    ch = bright(t.get("alternateColor") or t.get("color") or "5b7bd5")
+    return _card(f"--a:{ca};--h:{ch}", body,
+                 extra_css=V4_CSS + TD5_CSS + ".bg{opacity:.55!important}.hl{border-left-color:var(--h)!important}")
+
+
+_nfl_prime_slot_v5 = nfl_prime_slot
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    _NFL_ST["st"] = st
+    return _nfl_prime_slot_v5(slot, st, getctx, force)
 
 
 # ===================================================================== main
@@ -4319,7 +4605,7 @@ def main():
         elapsed = time.time() - start
         if elapsed > MAX_RUNTIME or (not active and not keepalive):
             break
-        wait = POLL_SECONDS if active else idle
+        wait = min(POLL_SECONDS, int(CONFIG.get("live_poll_seconds", 15))) if active else idle
         time.sleep(max(5, min(wait, MAX_RUNTIME - elapsed + 1)))
     log("Done.")
 
