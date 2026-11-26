@@ -986,27 +986,6 @@ def nba_batches(events):
     return batches
 
 
-def run_nba(st, dates=None, force=False):
-    if not NBA_HOOK and not DRY_RUN and not SILENT and not force:
-        return
-    if dates is None:
-        today = datetime.now(ET).date()
-        dates = [(today - timedelta(days=1)).strftime("%Y%m%d"), today.strftime("%Y%m%d")]
-    for d in dates:
-        events = fetch(f"basketball/nba/scoreboard?dates={d}").get("events", [])
-        for batch in nba_batches(events):
-            if not all(e["status"]["type"]["state"] == "post" for e in batch):
-                continue
-            todo = [e for e in batch if not st["nba"].get(e["id"], {}).get("posted")]
-            if not todo:
-                continue
-            fresh = [e for e in todo if force or (now_utc() - parse_time(e["date"])).total_seconds() < STALE_HOURS * 3600]
-            if fresh and not post_nba_batch(fresh):
-                continue                 # Discord failed: retry next time
-            for e in todo:
-                st["nba"][e["id"]] = {"date": e["date"][:10], "posted": True}
-
-
 NBA_LOGO = "https://a.espncdn.com/i/teamlogos/leagues/500/nba.png"
 
 
@@ -2370,6 +2349,321 @@ def maybe_weekly_recap(st, sport, force_week=None):
         return
     if post_weekly_recap(sport, week, live, settings):
         st["recaps"] = (done + [key])[-40:]
+
+
+# ------------------------------------------------ NBA fantasy-first posts (concept)
+
+FAN_CSS = """
+.sm{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;color:#cfd5e1;font-variant-numeric:tabular-nums}
+.sm img{width:24px;height:24px;object-fit:contain}.sm .lo{color:#8b95a8}
+.hd{display:flex;justify-content:space-between;align-items:flex-end;margin-top:14px}
+.big2{font-size:26px;font-weight:900;letter-spacing:.3px}
+.hd .s2{font-size:13px;color:#9aa3b5;font-weight:600;letter-spacing:1.2px}
+.pl2{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+.pr2{display:grid;grid-template-columns:44px 1fr 74px 168px 176px;align-items:center;gap:12px;background:rgba(255,255,255,.055);
+ border-radius:10px;padding:6px 12px;height:56px}
+.pr2.lead{background:rgba(255,255,255,.12)}
+.more{font-size:13px;color:#9aa3b5;margin-top:8px}.more b{color:#e6e9ef}
+.pr2 img{width:44px;height:44px;border-radius:50%;object-fit:cover;object-position:top;background:#1d2436}
+.pr2 .nm2{font-size:16px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pr2 .nm2 span{font-size:12px;color:#9aa3b5;font-weight:600;margin-left:4px}
+.pr2 .ln{font-size:12.5px;color:#cfd5e1;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fp{font-size:20px;font-weight:900;text-align:center;border-radius:8px;padding:5px 0;background:rgba(255,255,255,.1);font-variant-numeric:tabular-nums}
+.fp.el{background:#1faa59}.fp small{display:block;font-size:9.5px;letter-spacing:1px;font-weight:700;opacity:.8}
+.ow{font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bd{display:inline-block;font-size:9.5px;letter-spacing:1px;font-weight:800;border-radius:4px;padding:2px 5px;margin-top:3px}
+.bd.st{background:rgba(47,191,113,.2);color:#7ee2a8}.bd.bn{background:rgba(255,255,255,.1);color:#aab3c5}
+.bd.fa{background:rgba(245,197,66,.2);color:#f5c542}
+.mt{font-size:12.5px;color:#cfd5e1;text-align:right;font-variant-numeric:tabular-nums;line-height:1.35}
+.mt b{font-size:15px}.mt .w{color:#7ee2a8}.mt .l{color:#ff9a9e}
+.gl{display:grid;grid-template-columns:250px 66px 1fr;align-items:center;gap:12px;background:rgba(255,255,255,.055);
+ border-radius:10px;padding:6px 12px;height:50px}
+.gl .sc2{display:grid;grid-template-columns:22px 34px 30px 10px 30px 34px 22px;align-items:center;gap:4px;font-size:13px;
+ font-weight:700;color:#aab3c5;font-variant-numeric:tabular-nums}
+.gl .sc2 img{width:22px;height:22px;object-fit:contain}.gl .sc2 b{color:#fff}.gl .sc2 .r{text-align:right}
+.gl .f1{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#cfd5e1}
+.gl .f1 b{color:#fff}.gl .f1 .chipx{background:#1faa59;color:#fff;border-radius:5px;padding:1px 6px;font-weight:800;margin:0 4px}
+.gl .f1 .m{color:#9aa3b5}
+"""
+
+
+def nba_matchup_lookup(live):
+    out = {}
+    if not live:
+        return out
+    for ra, rb in live["pairs"]:
+        A, B = live["rosters"][ra], live["rosters"][rb]
+        out[A["manager"]] = (A["points"], B["manager"], B["points"])
+        out[B["manager"]] = (B["points"], A["manager"], A["points"])
+    return out
+
+
+def nba_league_rows(summary):
+    """Every player in the game with fpts, owner (or free agent) and headshot."""
+    rows = []
+    for p in nba_players(summary):
+        o = league_owner("", p["name"], "nba")
+        rows.append({**p, "owner": o["manager"] if o else None, "starting": bool(o and o["starting"]),
+                     "hs": headshot(summary, p["name"])})
+    return rows
+
+
+def _card(css_vars, body, height, extra_css=""):
+    return (f"<!doctype html><html><head><meta charset='utf-8'>"
+            f"<link href='https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800;900&display=swap' rel='stylesheet'>"
+            f"<style>{NFL_CSS}{SLOT_CSS}{FAN_CSS}{extra_css}body,.card{{height:{height}px}}</style></head><body>"
+            f"<div class='card' style='{css_vars}'><div class='bg'></div><div class='in'>{body}</div></div></body></html>")
+
+
+def nba_game_fantasy_html(event, summary, live, max_rows=7):
+    import html as H
+    away, home = teams_of(event)
+    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+    league = CONFIG["nba"].get("league_name", "League")
+    rows = nba_league_rows(summary)
+    owned = [r for r in rows if r["owner"]][:max_rows]
+    fa = next((r for r in rows if not r["owner"]), None)
+    mu = nba_matchup_lookup(live)
+    status = "FULL-TIME" if event["status"]["type"].get("completed") else game_status(event)
+
+    def score_strip():
+        return (f"<div class='sm'><img src='{H.escape(away['team'].get('logo', ''))}'>{away['team']['abbreviation']}"
+                f" <span class='{'lo' if a_s < h_s else ''}'>{a_s}</span> – <span class='{'lo' if h_s < a_s else ''}'>{h_s}</span> "
+                f"{home['team']['abbreviation']}<img src='{H.escape(home['team'].get('logo', ''))}'></div>")
+
+    prs = []
+    for i, r in enumerate(owned):
+        raw = r["raw"]
+        line = f"{raw['pts']} pts · {raw['reb']} reb · {raw['ast']} ast" + \
+               (f" · {raw['stl']} stl" if raw["stl"] >= 2 else "") + (f" · {raw['blk']} blk" if raw["blk"] >= 2 else "") + \
+               (f" · {raw['tpm']} 3pm" if raw["tpm"] >= 3 else "")
+        m = mu.get(r["owner"])
+        mt = ""
+        if m:
+            me, opp, op = m
+            mt = (f"<div class='mt'><b class='{'w' if me >= op else 'l'}'>{me:.1f}</b> – {op:.1f}<br>"
+                  f"vs {H.escape(opp)}</div>")
+        prs.append(f"<div class='pr2{' lead' if i == 0 else ''}'><img src='{H.escape(r['hs'])}'>"
+                   f"<div><div class='nm2'>{H.escape(r['name'])}<span>{r['team']}</span></div><div class='ln'>{line}</div></div>"
+                   f"<div class='fp{' el' if r['elite'] else ''}'>{fmt_pts(r['fp'])}<small>FPTS</small></div>"
+                   f"<div><div class='ow'>{H.escape(r['owner'])}</div>"
+                   f"<span class='bd {'st' if r['starting'] else 'bn'}'>{'STARTING' if r['starting'] else 'BENCH'}</span></div>"
+                   f"{mt}</div>")
+    if fa and fa["fp"] >= 15:
+        raw = fa["raw"]
+        prs.append(f"<div class='pr2'><img src='{H.escape(fa['hs'])}'>"
+                   f"<div><div class='nm2'>{H.escape(fa['name'])}<span>{fa['team']}</span></div>"
+                   f"<div class='ln'>{raw['pts']} pts · {raw['reb']} reb · {raw['ast']} ast</div></div>"
+                   f"<div class='fp'>{fmt_pts(fa['fp'])}<small>FPTS</small></div>"
+                   f"<div><div class='ow'>Nobody</div><span class='bd fa'>FREE AGENT</span></div>"
+                   f"<div class='mt'>waiver pickup?</div></div>")
+    n = len(prs)
+    rest = [r for r in rows if r["owner"]][max_rows:]
+    more = ("<div class='more'>Also: " + " · ".join(f"<b>{H.escape(short_name(r['name']))}</b> {fmt_pts(r['fp'])} ({H.escape(r['owner'])})"
+                                                   for r in rest[:5]) + "</div>") if rest else ""
+    ca, ch = team_cols(away, home)
+    body = (f"<div class='top'><div class='lg'><img src='{NBA_LOGO}'>NBA · {H.escape(league.upper())} LEAGUE</div>"
+            f"<div class='pill'>{status}</div></div>"
+            f"<div class='hd'><div><div class='s2'>YOUR LEAGUE'S PLAYERS IN THIS GAME</div>"
+            f"<div class='big2'>{len([r for r in rows if r['owner']])} league players · "
+            f"{fmt_pts(sum(r['fp'] for r in rows if r['owner'] and r['starting']))} fpts from starters</div></div>"
+            f"{score_strip()}</div><div class='pl2'>{''.join(prs)}</div>{more}")
+    return _card(f"--a:{ca};--h:{ch}", body, 64 + 70 + n * 62 + (28 if more else 0) + 8)
+
+
+def nba_batch_html(mode, events, summaries, live, title):
+    """Several games ending / at half-time together: 1 fantasy line per game + league matchups."""
+    import html as H
+    league = CONFIG["nba"].get("league_name", "League")
+    lines = []
+    for e, summ in zip(events, summaries):
+        away, home = teams_of(e)
+        a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+        rows = nba_league_rows(summ) if summ else []
+        owned = [r for r in rows if r["owner"]]
+        f1 = "<span class='m'>No league players</span>"
+        if owned:
+            t = owned[0]
+            f1 = (f"⭐ <b>{H.escape(t['name'])}</b><span class='chipx'>{fmt_pts(t['fp'])}</span>"
+                  f"<span class='m'>{H.escape(t['owner'])}{'' if t['starting'] else ' (bench)'}</span>")
+            if len(owned) > 1:
+                s2 = owned[1]
+                f1 += f" <span class='m'>· {H.escape(short_name(s2['name']))} {fmt_pts(s2['fp'])}</span>"
+        stt = "FINAL" if e["status"]["type"].get("completed") else game_status(e)
+        lines.append(f"<div class='gl'><div class='sc2'><img src='{H.escape(away['team'].get('logo', ''))}'>"
+                     f"<span>{away['team']['abbreviation']}</span><b class='r' style='{'' if a_s > h_s else 'color:#8b95a8'}'>{a_s}</b>"
+                     f"<span>–</span><b style='{'' if h_s > a_s else 'color:#8b95a8'}'>{h_s}</b>"
+                     f"<span class='r'>{home['team']['abbreviation']}</span><img src='{H.escape(home['team'].get('logo', ''))}'></div>"
+                     f"<div class='st {'fin' if stt == 'FINAL' else 'live'}'>{H.escape(stt)}</div><div class='f1'>{f1}</div></div>")
+    lg = ""
+    if live and live["pairs"]:
+        cells = []
+        for ra, rb in live["pairs"]:
+            A, B = live["rosters"][ra], live["rosters"][rb]
+            aw = A["points"] >= B["points"]
+            cells.append(f"<div class='mu'><span class='n{' w' if aw else ''}'>{H.escape(A['manager'])}</span><span></span>"
+                         f"<span class='p{'' if aw else ' lo'}'>{A['points']:.1f}</span><i>·</i>"
+                         f"<span class='p{' lo' if aw else ''}'>{B['points']:.1f}</span><span></span>"
+                         f"<span class='n r{'' if aw else ' w'}'>{H.escape(B['manager'])}</span></div>")
+        lg = (f"<div class='lg2'><div class='ch'>{H.escape(league.upper())} · WEEK {live['week']} MATCHUPS · LIVE</div>"
+              f"<div class='mus'>{''.join(cells)}</div></div>")
+    rows_mu = ((len(live["pairs"]) + 1) // 2) if lg else 0
+    body = (f"<div class='top'><div class='lg'><img src='{NBA_LOGO}'>NBA · {H.escape(title.upper())}</div>"
+            f"<div class='pill'>{mode}</div></div><div class='rows' style='gap:6px'>{''.join(lines)}</div>{lg}")
+    return _card("--a:#c9082a;--h:#17408b", body, 64 + len(events) * 56 + (44 + rows_mu * 26 if lg else 0) + 26)
+
+
+def _nba_post(html_text, content, embed, name):
+    m = re.search(r"body,\.card\{height:(\d+)px", html_text)
+    png = render_png(html_text, 880, int(m.group(1)) if m else 600)
+    if png:
+        embed["image"] = {"url": f"attachment://{name}"}
+    return discord(NBA_HOOK, embed, f"NBA {name}", content=content, files={name: png} if png else None)
+
+
+def closest_matchup_line(live):
+    if not live or not live.get("pairs"):
+        return ""
+    best = min(live["pairs"], key=lambda p: abs(live["rosters"][p[0]]["points"] - live["rosters"][p[1]]["points"]))
+    A, B = live["rosters"][best[0]], live["rosters"][best[1]]
+    return f"🔥 Closest matchup: **{A['manager']}** {A['points']:.1f} – {B['points']:.1f} **{B['manager']}**"
+
+
+def post_nba_single(e, live):
+    """One game finished on its own: fantasy-first card."""
+    summ = fetch(f"basketball/nba/summary?event={e['id']}")
+    rows = nba_league_rows(summ)
+    away, home = teams_of(e)
+    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+    owned = [r for r in rows if r["owner"]]
+    lines = []
+    if owned:
+        t = owned[0]
+        title = f"{t['name']} drops {fmt_pts(t['fp'])} for {t['owner']}"
+    elif rows:
+        title = f"{rows[0]['name']} {fmt_pts(rows[0]['fp'])} fpts — and he's a free agent"
+    else:
+        title = "Full-time"
+    fa = next((r for r in rows if not r["owner"]), None)
+    if fa and fa["fp"] >= 15:
+        lines.append(f"🆓 {fa['name']} ({fmt_pts(fa['fp'])}) is a free agent")
+    by_mgr = {}
+    for r in owned:
+        if r["starting"]:
+            by_mgr.setdefault(r["owner"], []).append(r)
+    duo = max(((m, ps) for m, ps in by_mgr.items() if len(ps) >= 2), key=lambda kv: sum(p["fp"] for p in kv[1]),
+              default=None)
+    if duo:
+        m, ps = duo
+        lines.append(f"👥 {m} got {fmt_pts(sum(p['fp'] for p in ps))} from "
+                     + " + ".join(short_name(p["name"]) for p in ps[:3]))
+    embed = {"author": {"name": f"NBA · {CONFIG['nba'].get('league_name', 'League')} league", "icon_url": NBA_LOGO},
+             "title": title, "url": f"https://www.espn.com/nba/game/_/gameId/{e['id']}", "color": 0x17408B}
+    if lines:
+        embed["description"] = "\n".join(lines)
+    content = (f"🏁 **FULL-TIME** · {away['team'].get('name')} {a_s}–{h_s} {home['team'].get('name')}{ot_tag(e)}")
+    return _nba_post(nba_game_fantasy_html(e, summ, live), content, embed, "game.png")
+
+
+def post_nba_group(mode, events, live):
+    """Several games finishing (or at half-time) together: 1 fantasy line per game."""
+    events = sorted(events, key=lambda x: x["date"])
+    sums = []
+    for e in events:
+        try:
+            sums.append(fetch(f"basketball/nba/summary?event={e['id']}"))
+        except Exception:  # noqa: BLE001
+            sums.append(None)
+    t0 = parse_time(events[0]["date"]).astimezone(UK).strftime("%H:%M")
+    t1 = parse_time(events[-1]["date"]).astimezone(UK).strftime("%H:%M")
+    title = f"{t0}{'–' + t1 if t1 != t0 else ''} UK tip-offs · {len(events)} games"
+    best = None
+    for s in sums:
+        for r in (nba_league_rows(s) if s else []):
+            if r["owner"] and (best is None or r["fp"] > best["fp"]):
+                best = r
+    embed = {"author": {"name": f"NBA · {CONFIG['nba'].get('league_name', 'League')} league", "icon_url": NBA_LOGO},
+             "color": 0x17408B}
+    if best:
+        embed["title"] = f"Best {'so far' if mode == 'HALF-TIME' else 'of the bunch'}: {best['name']} " \
+                         f"{fmt_pts(best['fp'])} ({best['owner']})"
+    cl = closest_matchup_line(live)
+    if cl:
+        embed["description"] = cl
+    emoji = "⏸️" if mode == "HALF-TIME" else "🏁"
+    content = f"{emoji} **{mode}** · NBA · {len(events)} games"
+    return _nba_post(nba_batch_html(mode, events, sums, live, title), content, embed,
+                     "half.png" if mode == "HALF-TIME" else "batch.png")
+
+
+def clock_secs(e):
+    try:
+        return float(e["status"].get("clock", 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def run_nba(st, dates=None, force=False):
+    """Fantasy-first NBA posts, grouped by when games actually finish / reach half-time."""
+    if not NBA_HOOK and not DRY_RUN and not SILENT and not force:
+        return
+    if dates is None:
+        today = datetime.now(ET).date()
+        dates = [(today - timedelta(days=1)).strftime("%Y%m%d"), today.strftime("%Y%m%d")]
+    events, seen = [], set()
+    for d in dates:
+        for e in fetch(f"basketball/nba/scoreboard?dates={d}").get("events", []):
+            if e["id"] not in seen:
+                seen.add(e["id"])
+                events.append(e)
+    G = lambda e: st["nba"].setdefault(e["id"], {"date": e["date"][:10]})  # noqa: E731
+    now_s = time.time()
+    live_games = [e for e in events if e["status"]["type"]["state"] == "in"]
+
+    # ---------------------------------------------------------------- full time
+    finals = []
+    for e in events:
+        t = e["status"]["type"]
+        if t["state"] != "post" or G(e).get("posted"):
+            continue
+        age_h = (now_utc() - parse_time(e["date"])).total_seconds() / 3600
+        if not t.get("completed") or (age_h > STALE_HOURS and not force):
+            G(e).update(posted=True, ht=True)        # postponed / too old
+            continue
+        finals.append(e)
+    if finals:
+        first = st.setdefault("nba_ft_wait", now_s)
+        closing = [e for e in live_games if e["status"].get("period", 0) >= 4]
+        if force or not closing or now_s - first >= 25 * 60:
+            if SILENT:
+                ok = True
+            else:
+                live = league_live("nba")
+                ok = post_nba_single(finals[0], live) if len(finals) == 1 else post_nba_group("FULL-TIME", finals, live)
+            if ok:
+                for e in finals:
+                    G(e).update(posted=True, ht=True)
+                st.pop("nba_ft_wait", None)
+    else:
+        st.pop("nba_ft_wait", None)
+
+    # ---------------------------------------------------------------- half time
+    at_half, approaching = [], []
+    for e in live_games:
+        g = G(e)
+        if g.get("ht"):
+            continue
+        per, name = e["status"].get("period", 0), e["status"]["type"].get("name")
+        if name == "STATUS_HALFTIME" or (per == 3 and clock_secs(e) >= 360):
+            at_half.append(e)
+        elif per >= 3:
+            g["ht"] = True                           # missed the window: no half-time post for this one
+        elif per == 2 and clock_secs(e) <= 180:
+            approaching.append(e)
+    if len(at_half) >= 2 and not approaching:
+        if SILENT or post_nba_group("HALF-TIME", at_half, league_live("nba")):
+            for e in at_half:
+                G(e)["ht"] = True
 
 
 # ===================================================================== main
