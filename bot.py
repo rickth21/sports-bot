@@ -1492,25 +1492,60 @@ def preview_card_html(event, summary):
         tiles.append("<div class='tile'><div class='tl'>VENUE</div><div class='tv' style='font-size:15px'>"
                      f"{H.escape(venue)}</div></div>")
 
+    out_ids = {str(i["athlete"].get("id")) for tt in summary.get("injuries") or []
+               for i in tt.get("injuries") or [] if i.get("status") in ("Out", "Injured Reserve", "Doubtful")}
+    season = ((summary.get("header") or {}).get("season") or {}).get("year") or now_utc().year
+    unit = {"passingYards": "pass yds", "rushingYards": "rush yds", "receivingYards": "rec yds"}
+
     def watch(t):
-        ab = t["team"]["abbreviation"]
-        rows = []
+        """Season leaders (pass / rush / rec), skipping anyone out — next healthy player instead."""
+        ab, tid = t["team"]["abbreviation"], t["team"].get("id")
+        top = {}
         for tt in summary.get("leaders") or []:
-            if tt.get("team", {}).get("abbreviation") != ab:
-                continue
-            for cat in tt.get("leaders") or []:
-                if cat.get("name") not in ("passingYards", "rushingYards", "receivingYards") or not cat.get("leaders"):
-                    continue
-                x = cat["leaders"][0]
+            if tt.get("team", {}).get("abbreviation") == ab:
+                for cat in tt.get("leaders") or []:
+                    if cat.get("leaders"):
+                        top[cat.get("name")] = cat["leaders"][0]
+        deeper = {}
+        try:
+            core = fetch_url(f"https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/seasons/{season}"
+                             f"/types/2/teams/{tid}/leaders", tries=2)
+            for c in core.get("categories") or []:
+                deeper[c.get("name")] = c.get("leaders") or []
+        except Exception as e:  # noqa: BLE001
+            log(f"team leaders unavailable: {e}")
+        rows, used = [], set()
+        for cat in ("passingYards", "rushingYards", "receivingYards"):
+            pick = None
+            x = top.get(cat)
+            if x and str(x["athlete"].get("id")) not in out_ids and str(x["athlete"].get("id")) not in used:
                 dv = x.get("displayValue", "")
-                if cat["name"] == "passingYards":
+                if cat == "passingYards":
                     dv = ", ".join(dv.split(", ")[1:]) or dv
-                dv = dv.replace(" YDS", " yds").replace(" CAR", " car").replace(" REC", " rec")
-                hs = (x["athlete"].get("headshot") or {}).get("href", "")
-                pos = (x["athlete"].get("position") or {}).get("abbreviation", "")
-                rows.append(f"<div class='pr'>{'<img src=' + chr(39) + H.escape(hs) + chr(39) + '>' if hs else ''}"
-                            f"<div><b>{H.escape(x['athlete']['displayName'])}</b> <span>{pos}</span><br>"
-                            f"<span>{H.escape(dv)}</span></div></div>")
+                pick = (str(x["athlete"].get("id")), x["athlete"]["displayName"],
+                        (x["athlete"].get("position") or {}).get("abbreviation", ""),
+                        dv.replace(" YDS", " yds").replace(" CAR", " car").replace(" REC", " rec"))
+            else:
+                for l in deeper.get(cat, []):
+                    pid = (l.get("athlete") or {}).get("$ref", "").split("/athletes/")[-1].split("?")[0]
+                    if not pid or pid in out_ids or pid in used:
+                        continue
+                    try:
+                        ath = fetch_url(f"https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/seasons/"
+                                        f"{season}/athletes/{pid}", tries=2)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    pick = (pid, ath.get("displayName", ""), (ath.get("position") or {}).get("abbreviation", ""),
+                            f"{l.get('displayValue', '')} {unit[cat]}")
+                    break
+            if not pick:
+                continue
+            pid, name, pos, dv = pick
+            used.add(pid)
+            hs = nfl_headshot(pid)
+            rows.append(f"<div class='pr'>{'<img src=' + chr(39) + H.escape(hs) + chr(39) + '>' if hs else ''}"
+                        f"<div><b>{H.escape(name)}</b> <span>{pos}</span><br>"
+                        f"<span>{H.escape(dv)}</span></div></div>")
         return f"<div class='col'><div class='ch'>{H.escape(t['team'].get('name', ab).upper())} TO WATCH</div>{''.join(rows)}</div>"
 
     inj = []
