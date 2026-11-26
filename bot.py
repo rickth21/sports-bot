@@ -4339,10 +4339,32 @@ TD5_CSS = """
 .mu5 .sc{text-align:center;font-size:20px;font-weight:900;font-variant-numeric:tabular-nums;margin-bottom:3px}.mu5 .sc .lo{color:#8b95a8}
 .mu5 .wcx{text-align:center;font-size:10px;letter-spacing:1px;color:#9aa3b5;font-weight:700;margin-top:3px}
 .mu5 .wcx .u{color:#7ee2a8}.mu5 .wcx .dn{color:#ff9a9e}
+.pp5,.cv,.imp{background:rgba(9,12,22,.62)!important}
+.pp5 .role,.cv .tg,.imp .ih{color:#c3cad8!important}
+.pp5 .ow3,.pp5 .gn span,.cv,.pb5 span{color:#e3e7ef!important}
+.sec{color:#e3e7ef!important}
+.imp{margin-top:8px;border-radius:12px;padding:8px 14px}
+.imp .ih{font-size:10.5px;letter-spacing:1.4px;font-weight:800;margin-bottom:2px}
+.im{display:grid;grid-template-columns:18px 140px 1fr 120px 120px;align-items:center;gap:10px;font-size:14px;color:#e3e7ef;
+ padding:5px 0;border-top:1px solid rgba(255,255,255,.07)}
+.ih + .im{border-top:none}
+.im b{color:#fff}.im .who5{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.im .lo{color:#aab2c2}.im .ar{font-size:12px;text-align:center}.im .u{color:#7ee2a8}.im .dn{color:#ff9a9e}
 .mu5 .tc{font-size:11.5px;color:#9aa3b5;margin-top:3px;white-space:nowrap}.mu5 .tc b{color:#e6e9ef;font-weight:700}.mu5 .tc span{color:#6f788b}
 """
 
 _NFL_ST = {}
+
+
+def vivid(h, min_l=0.36, min_s=0.6):
+    """Team colour made bold enough to dominate a dark card (keeps the hue, lifts lightness/saturation)."""
+    import colorsys
+    r, g, b = (x / 255 for x in hex_rgb(h))
+    hh, ll, ss = colorsys.rgb_to_hls(r, g, b)
+    ll = min(0.62, max(ll, min_l))
+    ss = max(ss, min_s) if ss > 0.08 else ss
+    r, g, b = colorsys.hls_to_rgb(hh, ll, ss)
+    return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 
 
 def _sl_pid(name, espn_team):
@@ -4452,61 +4474,64 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
         panels, cls = p1, "pair one"
         owners = [o1]
 
-    def matchup(o):
+    def impact_row(o):
         rid = next((r for r, x in live["rosters"].items() if x["manager"] == o["manager"]), None)
         opp = next((b if a == rid else a for a, b in live["pairs"] if rid in (a, b)), None) if rid else None
         if not opp:
             return ""
         me, op = ol[rid], ol[opp]
-        pa, pb = _proj_total(rid, live, ol, event, proj), _proj_total(opp, live, ol, event, proj)
         pw = prev_win.get(str(rid))
         sw = ""
         if pw is not None and abs(me["win"] - pw) >= 1:
             d = me["win"] - pw
-            sw = f" · <span class='{'u' if d > 0 else 'dn'}'>{'▲' if d > 0 else '▼'}{abs(d):.0f} THIS SCORE</span>"
+            sw = f" <span class='{'u' if d > 0 else 'dn'}'>{'▲' if d > 0 else '▼'}{abs(d):.0f}</span>"
         lead = me["cur"] >= op["cur"]
-        players = sleeper_players("nfl")
-        here = {sl_team(x["team"]["abbreviation"]) for x in teams_of(event)}
+        return (f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(o['manager'])}</b>"
+                f"<span><b class='{'' if lead else 'lo'}'>{me['cur']:.1f}</b> – {op['cur']:.1f} vs {H.escape(live['rosters'][opp]['manager'])}</span>"
+                f"<span>win <b>{me['win']:.0f}%</b>{sw}</span>"
+                f"<span>playoffs <b>{me['po']:.0f}%</b></span></div>")
 
-        def to_come(r):
-            rows = []
-            for p in ol[r]["left"]:
-                pp = players.get(p) or {}
-                if (pp.get("team") or p) in here:
-                    continue                      # already playing in this game
-                nm = short_name(pp["full_name"]) if pp.get("full_name") else f"{p} D/ST"
-                rows.append((proj.get(str(p), 0.0), nm))
-            rows.sort(reverse=True)
-            if not rows:
-                return "<div class='tc'>nobody left to come</div>"
-            top = " · ".join(f"<b>{H.escape(n)}</b> {v:.0f}" for v, n in rows[:2])
-            more = f" <span>+{len(rows) - 2}</span>" if len(rows) > 2 else ""
-            return f"<div class='tc'>to come: {top}{more}</div>"
-        d_po = me["po"] - base[rid]["po"]
-        po = (f"PLAYOFFS <b>{me['po']:.0f}%</b>"
-              + (f" <span class='{'u' if d_po > 0 else 'dn'}'>{'▲' if d_po > 0 else '▼'}{abs(d_po):.0f}</span>" if abs(d_po) >= 1 else ""))
-        if me["po_w"] is not None and me["po_l"] is not None and abs(me["po_w"] - me["po_l"]) >= 2:
-            po += f" · win <span class='g'>{_pct(me['po_w'])}</span> · lose <span class='b'>{_pct(me['po_l'])}</span>"
-        return (f"<div class='mu5'><div class='row'>"
-                f"<div><div class='nm'>{H.escape(live['rosters'][rid]['manager'])}</div>"
-                f"<div class='pj'>proj <b>{pa:.1f}</b></div><div class='po'>{po}</div>{to_come(rid)}</div>"
-                f"<div><div class='sc'><span class='{'' if lead else 'lo'}'>{me['cur']:.1f}</span>"
-                f"<span style='color:#5d6679'> – </span><span class='{'lo' if lead else ''}'>{op['cur']:.1f}</span></div>"
-                f"{meter_html(me['win'], 'sm')}<div class='wcx'>WIN CHANCE{sw}</div></div>"
-                f"<div class='r'><div class='nm'>{H.escape(live['rosters'][opp]['manager'])}</div>"
-                f"<div class='pj'>proj <b>{pb:.1f}</b></div>{to_come(opp)}</div></div></div>")
+    def defence_row():
+        """The defence that just conceded loses points-allowed points."""
+        con = home if scorer_team is away else away
+        pid = sl_team(con["team"]["abbreviation"])
+        o = league_owner(f"def:{pid}", "")
+        if not o:
+            return ""
+        sc = league_scoring("nfl")
+        pat = re.search(r"\(([^()]*)\)\s*$", play.get("text") or "")
+        extra = 0
+        if pat and not re.search(r"fail|miss|block|no good", pat.group(1), re.I):
+            extra = 2 if re.search(r"two-point|2pt|2-pt", pat.group(1), re.I) else 1
+        after = a_s if scorer_team is away else h_s
+        before = after - 6 - extra
 
-    seen, mus = set(), []
+        def tier(n):
+            for lo, hi, k in ((0, 0, "pts_allow_0"), (1, 6, "pts_allow_1_6"), (7, 13, "pts_allow_7_13"),
+                              (14, 20, "pts_allow_14_20"), (21, 27, "pts_allow_21_27"), (28, 34, "pts_allow_28_34"),
+                              (35, 999, "pts_allow_35p")):
+                if lo <= n <= hi:
+                    return float(sc.get(k) or 0)
+            return 0.0
+        d = tier(after) - tier(before)
+        if abs(d) < 0.05:
+            return ""
+        nick = con["team"].get("name") or con["team"]["abbreviation"]
+        return (f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(o['manager'])}</b>"
+                f"<span>{H.escape(nick)} D/ST <b class='dn'>{d:+g}</b> · {after} pts allowed</span>"
+                f"<span>{'starting' if o['starting'] else 'bench'}</span><span></span></div>")
+
+    seen, rows = set(), []
     for o in owners:
-        if o and o["starting"] and o["manager"] not in seen:
+        if o and o["manager"] not in seen and (o["starting"] or not rows):
             seen.add(o["manager"])
-            mus.append(matchup(o))
-    if not mus:
-        for o in owners:
-            if o and o["manager"] not in seen:
-                seen.add(o["manager"])
-                mus.append(matchup(o))
-                break
+            rows.append(impact_row(o))
+    rows.append(defence_row())
+    if not owners or not owners[0]:
+        rows.insert(0, f"<div class='im'><span class='ar'>🆓</span><b class='who5'>{H.escape(td['scorer'])}</b>"
+                       f"<span>is unrostered — available on waivers</span><span></span><span></span></div>")
+    rows = [r for r in rows if r]
+    mus = [f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>"] if rows else []
     st["nfl_td_win"] = {str(r): v["win"] for r, v in ol.items()}
 
     body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>TOUCHDOWN · Q{q} "
@@ -4515,10 +4540,15 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
             f"<div class='sec' style='margin-top:10px'>{H.escape(what.upper())}</div>"
             f"<div class='{cls}'>{panels}</div>{_conversion_html(play, summary, abbr)}{''.join(mus)}")
     t = scorer_team["team"]
-    ca = bright(t.get("color") or "1faa59")
-    ch = bright(t.get("alternateColor") or t.get("color") or "5b7bd5")
-    return _card(f"--a:{ca};--h:{ch}", body,
-                 extra_css=V4_CSS + TD5_CSS + ".bg{opacity:.55!important}.hl{border-left-color:var(--h)!important}")
+    other = (home if scorer_team is away else away)["team"]
+    ca = vivid(t.get("color") or "1faa59")
+    ch = vivid(t.get("alternateColor") or t.get("color") or "5b7bd5", min_l=0.5)
+    co = vivid(other.get("color") or "5b7bd5")
+    bg = (f".bg{{opacity:1!important;background:"
+          f"linear-gradient(120deg,{ca}d9 0%,{ca}73 38%,rgba(13,18,32,0) 78%),"
+          f"linear-gradient(300deg,{co}38 0%,rgba(13,18,32,0) 22%)!important}}"
+          f".hl{{border-left-color:{ch}!important}}")
+    return _card(f"--a:{ca};--h:{ch}", body, extra_css=V4_CSS + TD5_CSS + bg)
 
 
 _nfl_prime_slot_v5 = nfl_prime_slot
