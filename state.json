@@ -363,6 +363,40 @@
   "9": 49.925
  },
  "pins": [],
+ "playoffs": {
+  "nba-2026": {
+   "status": {
+    "1": "alive",
+    "10": "alive",
+    "11": "alive",
+    "12": "alive",
+    "2": "alive",
+    "3": "alive",
+    "4": "alive",
+    "5": "alive",
+    "6": "alive",
+    "7": "alive",
+    "8": "alive",
+    "9": "alive"
+   }
+  },
+  "nfl-2026": {
+   "status": {
+    "1": "alive",
+    "10": "alive",
+    "11": "alive",
+    "12": "alive",
+    "2": "alive",
+    "3": "alive",
+    "4": "alive",
+    "5": "out",
+    "6": "alive",
+    "7": "alive",
+    "8": "alive",
+    "9": "alive"
+   }
+  }
+ },
  "trade_tries": {},
  "trades_seen": {
   "nba": [
