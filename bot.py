@@ -5451,24 +5451,27 @@ def trade_eval(sport, t):
             return sum(wk_pts[w].get(p, 0) for w in weeks)
         n_units = max(len(weeks), 1)
     else:
+        # lock-in league: a starter's week counts ONE game, so a player's week is worth his lock-in value
+        # (optimal keep-or-play-on over that week's games), not the sum of his games
         weeks = list(range(week, last + 1))
-        days = {}
-        for w in weeks:
-            for pid, d, v in nba_rows(w):
-                days.setdefault(d, {})[pid] = v
+        wk_val = {}
         games = {}
-        for d in days.values():
-            for pid in d:
-                games[pid] = games.get(pid, 0) + 1
+        for w in weeks:
+            per = {}
+            for pid, d, v in sorted(nba_rows(w), key=lambda r: r[1]):
+                if v > 0:
+                    per.setdefault(pid, []).append((v, None))
+                    games[pid] = games.get(pid, 0) + 1
+            wk_val[w] = {pid: nba_lockin_value(None, g)[0] for pid, g in per.items()}
 
         def ros(p):
-            return sum(d.get(p, 0) for d in days.values())
+            return sum(wk_val[w].get(p, 0) for w in weeks)
         n_units = max(len(weeks), 1)
 
     def lineup_total(roster):
         if sport == "nfl":
             return sum(best_lineup(slots, roster, wk_pts[w], "nfl") for w in weeks) / n_units
-        return sum(best_lineup(slots, [p for p in roster if p in d], d, "nba") for d in days.values()) / n_units
+        return sum(best_lineup(slots, [p for p in roster if p in wk_val[w]], wk_val[w], "nba") for w in weeks) / n_units
 
     fc = fantasycalc_values() if sport == "nfl" else {"players": {}}
 
@@ -5486,7 +5489,7 @@ def trade_eval(sport, t):
             p = allp.get(pid) or {}
             is_def = sport == "nfl" and p.get("position") == "DEF"
             r_ = ros(pid)
-            per = r_ / (n_units if sport == "nfl" else max(games.get(pid, 0), 1))
+            per = r_ / n_units                             # per week (NBA: lock-in value of his week)
             val = (fc["players"].get(pid) or {}).get("value", 0.0) if sport == "nfl" else r_
             assets.append({
                 "kind": "player", "pid": pid,
@@ -5723,7 +5726,7 @@ def trade_card_html(ev):
     sport = ev["sport"]
     sides = ev["sides"]
     logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
-    unit = "/wk" if sport == "nfl" else "/g"
+    unit = "/wk"
 
     def grade_cls(g):
         return {"A": "a", "B": "b", "C": "c"}.get(g[0], "d")
@@ -7577,8 +7580,33 @@ def wb_nfl_data(week, events, live=None, proj=None, people=None):
             "next_kick": kicks[0] if kicks else None}
 
 
+def nba_lockin_value(score, games, sd_of=lambda mu: 3.0 + 0.22 * mu):
+    """Sleeper NBA lock-in scoring: a starter's week score is ONE game - the game he is locked in on, or his latest
+    game if never locked. With games still to come the manager keeps the score he has or plays on, so the
+    expected final is the optimal-stopping value: V = max(score, C), where C (value of playing on) is worked out
+    backwards over his remaining games: C_last = mean_last, C_k = E[max(X_k, C_k+1)].
+    games: [(mean, sd)] in order. Returns (expected final, variance, can still change)."""
+    c = None
+    for mu, sd in reversed([(m, d if d is not None else sd_of(m)) for m, d in games]):
+        if c is None:
+            c = mu
+        else:
+            sd = max(sd, 0.1)
+            z = (c - mu) / sd
+            cdf = 0.5 * (1 + _math.erf(z / 2 ** 0.5))
+            pdf = _math.exp(-z * z / 2) / (2 * _math.pi) ** 0.5
+            c = c * cdf + mu * (1 - cdf) + sd * pdf
+    if c is None:
+        return (score or 0.0), 0.0, False
+    spread = 0.8 * sum((d if d is not None else sd_of(m)) for m, d in games) / len(games)
+    if score is None:
+        return c, spread ** 2, True
+    return max(score, c), (spread * (0.5 if score >= c else 1.0)) ** 2, True
+
+
 def wb_nba_data(week, events_today=None, live=None, rows=None, people=None, day0=None):
-    """Everything the NBA board shows. Today: the starters already set; later days: each roster's best lineup."""
+    """Everything the NBA board shows, with the league's LOCK-IN scoring: "now" is Sleeper's own matchup score
+    (each starter counts one game); the projection is each starter's lock-in value (see nba_lockin_value)."""
     if live is None:
         live = league_live("nba", week)
     if not live or not live.get("pairs"):
@@ -7598,42 +7626,43 @@ def wb_nba_data(week, events_today=None, live=None, rows=None, people=None, day0
     by_day = {}
     for pid, d, v in rows:
         by_day.setdefault(d, {})[pid] = v
-    lg = league_settings("nba") or {}
-    slots = [s for s in (lg.get("roster_positions") or []) if s not in ("BN", "IR", "TAXI")] or \
-        ["PG", "SG", "G", "SF", "PF", "F", "C", "UTIL", "UTIL"]
     players = sleeper_players("nba")
-    sides, today_left = {}, False
+    sides, days = {}, set()
     for rid, x in live["rosters"].items():
-        items, left, on = [], 0, 0
-        today = by_day.get(d0, {})
+        proj = var = 0.0
+        left = on = 0
         for p in x["starters"] or []:
-            if p not in today:
-                continue
-            e = tmap.get((players.get(p) or {}).get("team"))
-            f = 0.0
-            if e is not None:
-                f = game_frac(e, "nba")
-                if f is None:                               # already played today
-                    continue
-                on += e["status"]["type"]["state"] == "in"
-            left += 1
-            today_left = True
-            items.append((max(0.0, today[p]), 1 - f))
-        pe = (people or {}).get(rid) or {}
-        pool = [p for p in (pe.get("players") or x.get("players") or []) if p not in (pe.get("inactive") or set())]
-        for d in sorted(by_day):
-            if d <= d0:
-                continue
-            pts = {p: by_day[d][p] for p in pool if p in by_day[d] and by_day[d][p] > 0}
-            picks = []
-            best_lineup(slots, list(pts), pts, "nba", picks)
-            items += [(pts[p], 1.0) for p in picks]
-            left += len(picks)
-        sides[rid] = _wb_side("nba", float(x["points"]), items, left, on)
+            pts = float(x["pp"].get(p) or 0)
+            played = pts != 0 or any(p in by_day[d] for d in by_day if d < d0)
+            score = pts if played else None
+            games = []
+            if p in by_day.get(d0, {}):
+                e = tmap.get((players.get(p) or {}).get("team"))
+                f = game_frac(e, "nba") if e is not None else 0.0
+                if f is not None:                           # today's game still to finish
+                    mu = by_day[d0][p]
+                    if f > 0:
+                        on += 1
+                        games.append((pts + mu * (1 - f), (3.0 + 0.22 * mu) * (1 - f) ** 0.5))
+                        score = None                         # this game's score replaces any earlier one
+                    else:
+                        games.append((mu, None))
+                    days.add(d0)
+                else:
+                    score = pts                             # played today: that's his current score
+            for d in sorted(by_day):
+                if d > d0 and p in by_day[d] and by_day[d][p] > 0:
+                    games.append((by_day[d][p], None))
+                    days.add(d)
+            v, vv, more = nba_lockin_value(score, games)
+            proj += v
+            var += vv
+            left += more
+        sides[rid] = {"points": float(x["points"]), "proj": max(proj, float(x["points"])), "var": var,
+                      "left": left, "on": on}
     st_ = [e["status"]["type"]["state"] for e in events_today]
-    days_left = len([d for d in by_day if d > d0]) + (1 if today_left else 0)
     return {"sport": "nba", "week": week, "pairs": live["pairs"], "sides": sides, "rosters": live["rosters"],
-            "people": people, "live": st_.count("in"), "days_left": days_left,
+            "people": people, "live": st_.count("in"), "days_left": len(days),
             "games": sum(s["left"] for s in sides.values())}
 
 
@@ -7654,7 +7683,7 @@ def wb_html(data, stamp=None):
     sport = data["sport"]
     state = _wb_state(data)
     people = data.get("people") or {}
-    unit = "left" if sport == "nfl" else "games left"
+    unit = "left" if sport == "nfl" else "with games left"
     if sport == "nfl" and state == "pre":
         unit = "to play"
     tiles, closest = [], None
@@ -7725,7 +7754,7 @@ def wb_html(data, stamp=None):
             h1 = f"Week {data['week']} is in the books"
         else:
             h1 = (f"Week {data['week']} · " if state == "pre" else "") + \
-                 f"{data['games']} games still to play · {dl} day{'s' if dl != 1 else ''} left"
+                 f"{data['games']} starters with games left · {dl} day{'s' if dl != 1 else ''} left"
     if state == "final":
         h2 = "Final scores · winners in gold"
     elif closest:
