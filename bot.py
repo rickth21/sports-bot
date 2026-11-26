@@ -7534,12 +7534,12 @@ WB_CSS = """
 .wbh .h2{font-size:17px;font-weight:700;color:#cfd5e1;text-align:right;line-height:1.3;white-space:nowrap}
 .wbh .h2 b{color:#fff;font-weight:900}
 .wbg{display:grid;grid-template-columns:1fr 1fr;gap:14px 16px;margin-top:6px}
-.wch{display:grid;grid-template-columns:minmax(0,1fr) 140px 108px;gap:12px;padding:0 14px 0 70px;
+.wch{display:grid;grid-template-columns:minmax(0,1fr) 128px 100px;gap:10px;padding:0 14px 0 70px;
  font-size:13.5px;font-weight:900;letter-spacing:2px;color:#9aa3b5}
 .wch span{text-align:right}.wch span.w{text-align:center}.wch span.p{color:#ffd166}
 .wm{position:relative;background:rgba(255,255,255,.065);border-radius:14px;padding:3px 14px}
 .wm.close{box-shadow:inset 0 0 0 2px rgba(255,209,102,.6)}
-.wr{display:grid;grid-template-columns:46px minmax(0,1fr) 140px 108px;gap:12px;align-items:center;height:80px}
+.wr{display:grid;grid-template-columns:46px minmax(0,1fr) 128px 100px;gap:10px;align-items:center;height:80px}
 .wr+.wr{border-top:1px solid rgba(255,255,255,.08)}
 .wr .wav,.wr img{width:46px;height:46px;border-radius:50%;object-fit:cover;background:#2a3246;display:flex;align-items:center;
  justify-content:center;font-size:21px;font-weight:900;color:#cfd5e1}
@@ -7569,8 +7569,9 @@ WB_CSS = """
 .nbar{font-size:22px!important;padding:8px 32px!important}
 .wbh .h2{font-size:22px!important}
 .wch{font-size:19px!important;padding-left:72px!important}
-.wr{height:80px!important}.wr .ws{font-size:23px!important}.wr .wno{font-size:23px!important}
-.wtag{font-size:17px!important;top:-13px!important}
+.wr{height:80px!important}.wr .ws{font-size:22px!important}.wr .wno{font-size:22px!important}
+.wbh{flex-wrap:wrap;row-gap:4px}.wbh .h1{font-size:30px}.wr .wpj{font-size:35px}
+.wtag{font-size:16px!important;top:-17px!important;padding:1px 9px!important;line-height:1.3!important}
 """
 
 _WB_PENDING = {}
@@ -7751,7 +7752,7 @@ def wb_html(data, stamp=None):
     sport = data["sport"]
     state = _wb_state(data)
     people = data.get("people") or {}
-    unit = "left" if sport == "nfl" else "with games left"
+    unit = "left"
     if sport == "nfl" and state == "pre":
         unit = "to play"
     tiles, closest = [], None
@@ -7781,9 +7782,9 @@ def wb_html(data, stamp=None):
             elif not s["left"]:
                 sub = "<span class='dn'>all played ✓</span>"
             else:
-                sub = f"<b>{s['left']}</b> {unit if state != 'pre' else unit.replace('left', 'to play')}"
+                sub = f"<b>{s['left']}</b> {unit}"
                 if s["on"]:
-                    sub += f" · <span class='lv'>● {s['on']} {'playing' if sport == 'nfl' else 'on court'}</span>"
+                    sub += f" · <span class='lv'>● {s['on']} live</span>"
             pj = f"{s['proj']:.1f}" if sport == "nfl" or done else f"{s['proj']:.0f}"
             now_txt = "" if state == "pre" else f"<div class='wno'><i>now</i> {s['points']:.1f}</div>"
             if done:
@@ -7815,21 +7816,21 @@ def wb_html(data, stamp=None):
             k = data.get("next_kick")
             h1 = f"Week {data['week']} · " + (f"kicks off {k.astimezone(UK):%A %H:%M}" if k else "projections")
         else:
-            h1 = f"{data['done']} of {data['games']} games done · {left_all} starters still to play"
+            h1 = f"{data['done']} of {data['games']} games done · {left_all} to play"
     else:
         dl = data.get("days_left", 0)
         if state == "final":
             h1 = f"Week {data['week']} is in the books"
         else:
             h1 = (f"Week {data['week']} · " if state == "pre" else "") + \
-                 f"{data['games']} starters with games left · {dl} day{'s' if dl != 1 else ''} left"
+                 f"{data['games']} starters to play · {dl} day{'s' if dl != 1 else ''} left"
     if state == "final":
         h2 = "Final scores · winners in gold"
     elif closest:
         wa, ra, rb = closest
         na = (people.get(ra) or {}).get("manager") or data["rosters"][ra]["manager"]
         nb = (people.get(rb) or {}).get("manager") or data["rosters"][rb]["manager"]
-        h2 = f"Closest: <b>{H.escape(na)}</b> v <b>{H.escape(nb)}</b> · {max(wa, 100 - wa):.0f}–{min(wa, 100 - wa):.0f}"
+        h2 = f"Closest: <b>{H.escape(na)}</b> v <b>{H.escape(nb)}</b> {max(wa, 100 - wa):.0f}–{min(wa, 100 - wa):.0f}"
     else:
         h2 = ""
     if state == "live":

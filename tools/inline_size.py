@@ -30,13 +30,14 @@ while((n=walk.nextNode())){const t=n.textContent.trim();if(!t)continue;const el=
 if(cs.visibility=='hidden'||cs.display=='none'||parseFloat(cs.opacity)==0)continue;const b=el.getBoundingClientRect();if(!b.width)continue;
 out.push([t.slice(0,40),Math.round(parseFloat(cs.fontSize)*s*10)/10,t.length]);
 if(!el.__r&&el.getClientRects().length<2){el.__r=1;els.push(el);}}
+const tr=[];c.querySelectorAll('*').forEach(e=>{const cs=getComputedStyle(e);if(cs.display=='none')return;if(e.textContent.trim()&&e.scrollWidth>e.clientWidth+1&&(cs.overflow=='hidden'||cs.textOverflow=='ellipsis'||cs.overflowX=='hidden'))tr.push(e.textContent.trim().slice(0,40));});
 const ov=[];const cr=c.getBoundingClientRect();
 for(let i=0;i<els.length;i++){const a=els[i].getBoundingClientRect();
  if(a.right>cr.right+1||a.left<cr.left-1)ov.push(['outside card',els[i].textContent.trim().slice(0,30)]);
  for(let j=i+1;j<els.length;j++){if(els[i].contains(els[j])||els[j].contains(els[i]))continue;const b=els[j].getBoundingClientRect();
   const w=Math.min(a.right,b.right)-Math.max(a.left,b.left),h=Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top);
   if(w>3&&h>3)ov.push([els[i].textContent.trim().slice(0,30),els[j].textContent.trim().slice(0,30)]);}}
-const p=document.createElement('pre');p.id='probe';p.textContent=JSON.stringify({W:W,H:H,s:s,t:out,ov:ov});document.body.appendChild(p);});</script>"""
+const p=document.createElement('pre');p.id='probe';p.textContent=JSON.stringify({W:W,H:H,s:s,t:out,ov:ov,tr:tr});document.body.appendChild(p);});</script>"""
 
 
 def measure(html_text):
@@ -70,7 +71,8 @@ def report(name, r):
     print(f"{name:34s} {r['W']:.0f}x{r['H']:.0f}  scale {r['s']:.2f}  smallest {mn:4.1f}px  "
           f"under {MIN_PX:.0f}px: {100 * sc / chars:3.0f}% of text"
           + (f"  e.g. {', '.join(repr(t[0]) + '=' + str(t[1]) for t in small[:4])}" if small else "")
-          + (f"\n    OVERLAPPING TEXT ({len(r['ov'])}): {r['ov'][:4]}" if r.get("ov") else "  no overlapping text"))
+          + (f"\n    OVERLAPPING TEXT ({len(r['ov'])}): {r['ov'][:4]}" if r.get("ov") else "  no overlapping text")
+          + (f"\n    CUT OFF ({len(r['tr'])}): {r['tr'][:6]}" if r.get("tr") else "  nothing cut off"))
 
 
 def main():
