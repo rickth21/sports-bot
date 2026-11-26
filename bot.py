@@ -4368,7 +4368,7 @@ TD5_CSS = """
 .pb5.win .bar div{height:10px;background:linear-gradient(90deg,#ff9f1c,#ffd166 40%,#fff3b0 55%,#ffd166 70%,#ff9f1c)!important}
 .pb5 .beat{background:linear-gradient(90deg,#ffd166,#ff9f1c);color:#1b1305!important;padding:3px 10px;border-radius:8px;
  font-weight:900;font-size:12.5px!important;letter-spacing:.6px;box-shadow:0 0 12px rgba(255,190,60,.6)}
-.pjn{font-size:11px;color:#c3cad8;font-weight:700;margin-top:2px}
+.pjn{font-size:12px;color:#c3cad8;font-weight:700;margin-top:3px}.pjn b{font-size:13.5px}.pjn .up{color:#ffd166}.pjn .dn{color:#ff9a9e}
 .pp5,.cv,.imp{background:rgba(9,12,22,.62)!important}
 .pp5 .role,.cv .tg,.imp .ih{color:#c3cad8!important}
 .pp5 .ow3,.pp5 .gn span,.cv,.pb5 span{color:#e3e7ef!important}
@@ -4478,7 +4478,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
         pj = proj.get(str(_sl_pid(name, abbr) or ""), 0.0)
         bar = ""
         if pj and now is not None:
-            bar = proj_bar(now, pj)
+            bar = proj_bar(now, pj, 1 - game_elapsed(event))
         own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
                else "<b>Unrostered</b> — free agent")
         tot = f"<span>now <em>{fmt_pts(now)}</em> pts</span>" if now is not None else ""
@@ -4672,7 +4672,7 @@ def nfl_fg_html(event, play, summary, live, ol, base):
     now = k["pts"] if k else None
     bar = ""
     if pj and now is not None:
-        bar = proj_bar(now, pj)
+        bar = proj_bar(now, pj, 1 - game_elapsed(event))
     own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
            else "<b>Unrostered</b> — free agent")
     hot = " hot" if pj and now is not None and now >= pj else ""
@@ -5329,16 +5329,20 @@ def _td_headline(td, nick):
     return f"{td['scorer']} {yd}return TD — {nick}!"
 
 
-def proj_bar(now, pj):
-    """Points vs projection. Beating it is celebrated: gold glowing bar + badge (💥 at 150%+)."""
+def proj_bar(now, pj, rem=0.0):
+    """Points vs projection + the updated projection (points so far + projection for the rest of the game).
+    Beating the original is celebrated: gold glowing bar + badge (💥 at 150%+)."""
+    newp = now + pj * max(0.0, min(1.0, rem))
+    upd = (f"<div class='pjn'>projected {pj:.1f} → <b class='{'up' if newp >= pj else 'dn'}'>now {newp:.1f}</b></div>"
+           if rem > 0.005 else f"<div class='pjn'>projected {pj:.1f} · final {now:.1f}</div>")
     if now < pj:
         pct = max(now / pj * 100, 3)
         return (f"<div class='pb5'><div class='bar'><div style='width:{pct:.0f}%'></div></div>"
-                f"<span>proj <b>{pj:.1f}</b></span></div>")
+                f"<span>proj <b>{pj:.1f}</b></span></div>{upd}")
     over = now - pj
     badge = (f"💥 SMASHED PROJ · +{over:.1f}" if now >= 1.5 * pj else f"🔥 BEAT PROJ · +{over:.1f}")
     return (f"<div class='pb5 win'><div class='bar'><div style='width:100%'></div></div>"
-            f"<span class='beat'>{badge}</span></div><div class='pjn'>projected {pj:.1f}</div>")
+            f"<span class='beat'>{badge}</span></div>{upd}")
 
 
 # ===================================================================== main
