@@ -4122,9 +4122,20 @@ def nfl_fantasy(summary):
     return out
 
 
+def _no_panel(fn, *a, **k):
+    """Build a game card without the playoff-odds panel (half-time / overtime: the players matter more)."""
+    global playoff_panel_html
+    keep = playoff_panel_html
+    playoff_panel_html = lambda *x, **y: ""  # noqa: E731
+    try:
+        return fn(*a, **k)
+    finally:
+        playoff_panel_html = keep
+
+
 def nfl_half_html(event, summary, live, ol, base):
-    """Half-time: the full-time card's layout, with everyone's points at the half."""
-    h = nfl_game_fantasy_html(event, summary, live, ol, base)
+    """Half-time: every league player in the game with points so far (no playoff panel)."""
+    h = _no_panel(nfl_game_fantasy_html, event, summary, live, ol, base)
     return (h.replace("<div class='pill'>FULL-TIME</div>", "<div class='pill'>HALF-TIME</div>", 1)
              .replace("YOUR LEAGUE'S PLAYERS IN THIS GAME", "YOUR LEAGUE'S PLAYERS · POINTS AT THE HALF", 1))
 
@@ -4734,7 +4745,7 @@ def post_overtime(event, summary, ctx):
     """The game is heading to overtime: everyone's points after regulation + projected matchups."""
     away, home = teams_of(event)
     a, h = int(num(away.get("score"))), int(num(home.get("score")))
-    html_text = nfl_game_fantasy_html(event, summary, ctx["live"], ctx["ol"], ctx["base"])
+    html_text = _no_panel(nfl_game_fantasy_html, event, summary, ctx["live"], ctx["ol"], ctx["base"])
     html_text = (html_text.replace("<div class='pill'>FULL-TIME</div>", "<div class='pill'>OVERTIME</div>", 1)
                  .replace("YOUR LEAGUE'S PLAYERS IN THIS GAME", "YOUR LEAGUE'S PLAYERS · POINTS AFTER REGULATION", 1))
     owned = [(p, o) for p in nfl_fantasy(summary) for o in [league_owner(p.get("id"), p["name"])] if o]
@@ -4762,7 +4773,7 @@ def nfl_prime_slot(slot, st, getctx, force=False):
             if CONFIG["nfl"].get("overtime_posts") and not g.get("ot"):
                 tied = int(num(teams_of(e)[0].get("score"))) == int(num(teams_of(e)[1].get("score")))
                 end_reg = q == 4 and tied and e["status"]["type"].get("name") == "STATUS_END_PERIOD"
-                if (q >= 5 or end_reg) and e["status"]["type"]["state"] == "in":
+                if (q >= 5 or end_reg) and e["status"]["type"]["state"] == "in" and event_ready(g, "ot_seen", summary):
                     ctx = getctx()
                     if ctx and post_overtime(e, summary, ctx):
                         g["ot"] = True
@@ -4774,17 +4785,229 @@ def nfl_prime_slot(slot, st, getctx, force=False):
                     _, d = play_detail(summary, p.get("id"))
                     wc = (d or {}).get("wallclock")
                     recent = (time.time() - _wallclock_ts(wc) < 900) if wc else (p.get("period") or {}).get("number", 0) > 4
-                    if recent:
+                    if recent and td_ready(summary, p, g.setdefault("seen", {}).setdefault(p["id"], time.time())):
                         ctx = getctx()
                         if ctx and post_td_fantasy(e, p, summary, ctx):
                             g["tds"].append(p["id"])
             for p in summary.get("scoringPlays", []):
                 if p["id"] in g["tds"] or not clutch_fg(p, e):
                     continue
+                if not td_ready(summary, p, g.setdefault("seen", {}).setdefault(p["id"], time.time())):
+                    continue
                 ctx = getctx()
                 if ctx and post_fg_clutch(e, p, summary, ctx):
                     g["tds"].append(p["id"])
     return _nfl_prime_slot_fg(slot, st, getctx, force)
+
+
+# ------------------------------------------------ game-changers: turnovers that swing the win probability
+
+GC_CSS = """
+.sw5{margin-top:8px;background:rgba(9,12,22,.62);border-radius:14px;padding:12px 18px}
+.sw5 .ih{font-size:10.5px;letter-spacing:1.4px;font-weight:800;color:#c3cad8;margin-bottom:6px}
+.sw5 .row{display:grid;grid-template-columns:90px 1fr 90px;align-items:center;gap:14px;margin-top:6px}
+.sw5 .lb{font-size:12px;letter-spacing:1.2px;font-weight:800;color:#c3cad8}
+.sw5 .lb.r{text-align:right}
+.sw5 .bar{position:relative;height:14px;border-radius:999px;overflow:hidden;background:rgba(255,255,255,.08);display:flex}
+.sw5 .bar div{height:14px}
+.sw5 .big{display:flex;align-items:baseline;justify-content:center;gap:14px;font-size:30px;font-weight:900;margin-top:8px;
+ font-variant-numeric:tabular-nums}
+.sw5 .big .from{color:#8b95a8}.sw5 .big .arr{font-size:22px;color:#c3cad8}
+.sw5 .big .d{font-size:18px;font-weight:900}.sw5 .big .d.u{color:#7ee2a8}.sw5 .big .d.dn{color:#ff9a9e}
+"""
+
+TURNOVER_TYPES = ("Interception", "Fumble Recovery (Opponent)", "Fumble Return", "Blocked Punt", "Blocked Field Goal",
+                  "Blocked FG")
+
+
+def _all_plays(summary):
+    drives = summary.get("drives") or {}
+    pool = list(drives.get("previous") or []) + ([drives["current"]] if drives.get("current") else [])
+    return [p for d in pool for p in d.get("plays") or []]
+
+
+def game_changers(summary, threshold):
+    """[(play, home win% before, home win% after)] for turnovers that moved ESPN's win chance by `threshold`+ points."""
+    wp = {str(w.get("playId")): float(w.get("homeWinPercentage") or 0) * 100 for w in summary.get("winprobability") or []}
+    out, prev = [], None
+    for p in _all_plays(summary):
+        w = wp.get(str(p.get("id")))
+        t = (p.get("type") or {}).get("text", "")
+        if w is not None and prev is not None and any(k in t for k in TURNOVER_TYPES) and "Touchdown" not in t:
+            if abs(w - prev) >= threshold:
+                out.append((p, prev, w))
+        if w is not None:
+            prev = w
+    return out
+
+
+def nfl_gc_html(event, play, summary, live, ol, before, after):
+    """before/after: home team's ESPN win chance (0-100) either side of the play."""
+    import html as H
+    away, home = teams_of(event)
+    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+    q = (play.get("period") or {}).get("number", 0)
+    clock = (play.get("clock") or {}).get("displayValue", "")
+    text = play.get("text") or ""
+    t = (play.get("type") or {}).get("text", "")
+    kind = ("INTERCEPTION" if "Interception" in t else "FUMBLE" if "Fumble" in t else "BLOCKED KICK")
+    # the team that gained: the side whose win chance went up
+    gain_home = after > before
+    gt, lt = (home, away) if gain_home else (away, home)
+    g_before, g_after = (before, after) if gain_home else (100 - before, 100 - after)
+    swing = g_after - g_before
+    m = re.search(r"INTERCEPTED by ([A-Z]\.\s?[A-Za-z'\-]+)", text) or re.search(r"RECOVERED by \w+-([A-Z]\.\s?[A-Za-z'\-]+)", text)
+    hero = m.group(1).replace(". ", ".") if m else (gt["team"].get("name") or "")
+    m2 = re.search(r"([A-Z]\.\s?[A-Za-z'\-]+) pass", text) or re.search(r"([A-Z]\.\s?[A-Za-z'\-]+) FUMBLES", text)
+    victim = m2.group(1) if m2 else ""
+
+    def side(t_, sc, lo, right):
+        img = f"<img src='{H.escape(t_['team'].get('logo', ''))}'>"
+        name = f"<span>{t_['team']['abbreviation']}</span>"
+        score = f"<span class='sc{' lo' if lo else ''}'>{sc}</span>"
+        return f"<div class='tm{' r' if right else ''}'>{(score + name + img) if right else (img + name + score)}</div>"
+    sb = (f"<div class='sb5'>{side(away, a_s, a_s < h_s, False)}"
+          f"<div class='mid'><div class='clk'>{'OT' if q > 4 else 'Q' + str(q)} · {clock} LEFT</div></div>"
+          f"{side(home, h_s, h_s < a_s, True)}</div>")
+
+    ca = vivid(gt["team"].get("color") or "1faa59")
+    co = vivid(lt["team"].get("color") or "5b7bd5")
+
+    def bar(p):
+        return (f"<div class='bar'><div style='width:{p:.1f}%;background:{ca}'></div>"
+                f"<div style='width:{100 - p:.1f}%;background:{co}88'></div></div>")
+    sw = (f"<div class='sw5'><div class='ih'>WIN CHANCE · ESPN</div>"
+          f"<div class='big'><span>{gt['team']['abbreviation']}</span><span class='from'>{g_before:.0f}%</span>"
+          f"<span class='arr'>→</span><span>{g_after:.0f}%</span><span class='d u'>▲{abs(swing):.0f}</span></div>"
+          f"<div class='row'><span class='lb'>BEFORE</span>{bar(g_before)}<span class='lb r'>{lt['team']['abbreviation']} {100 - g_before:.0f}%</span></div>"
+          f"<div class='row'><span class='lb'>AFTER</span>{bar(g_after)}<span class='lb r'>{lt['team']['abbreviation']} {100 - g_after:.0f}%</span></div></div>")
+
+    # fantasy: defence that forced it gains, the player who gave it up loses
+    sc = league_scoring("nfl")
+    rows = []
+    pid = sl_team(gt["team"]["abbreviation"])
+    od = league_owner(f"def:{pid}", "")
+    dpts = float(sc.get("int") or 0) if kind == "INTERCEPTION" else float(sc.get("fum_rec") or 0) + float(sc.get("ff") or 0)
+    if kind == "BLOCKED KICK":
+        dpts = float(sc.get("blk_kick") or 0)
+    nick = gt["team"].get("name") or gt["team"]["abbreviation"]
+    if od:
+        rows.append(f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(od['manager'])}</b>"
+                    f"<span>{H.escape(nick)} D/ST <b class='u'>+{dpts:g}</b> for the {kind.lower()}</span>"
+                    f"<span>{'starting' if od['starting'] else 'bench'}</span><span></span></div>")
+    else:
+        rows.append(f"<div class='im'><span class='ar'>🆓</span><b class='who5'>{H.escape(nick)} D/ST</b>"
+                    f"<span><b class='u'>+{dpts:g}</b> for the {kind.lower()} — unrostered, on waivers</span>"
+                    f"<span></span><span></span></div>")
+    if victim:
+        full = next((p["name"] for p in nfl_fantasy(summary)
+                     if p["team"] == lt["team"]["abbreviation"] and name_key(p["name"]).endswith(name_key(victim.split(".")[-1])[2:])),
+                    victim)
+        vo = league_owner(boxscore_id(summary, full), full)
+        loss = float(sc.get("pass_int") or 0) if kind == "INTERCEPTION" else float(sc.get("fum_lost") or 0)
+        if vo:
+            rows.append(f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(vo['manager'])}</b>"
+                        f"<span>{H.escape(full)} <b class='dn'>{loss:g}</b> for the {kind.lower()}</span>"
+                        f"<span>{'starting' if vo['starting'] else 'bench'}</span><span></span></div>")
+    imp = f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>"
+
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>GAME-CHANGER · {'OT' if q > 4 else 'Q' + str(q)} {clock} · "
+            f"{away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div>"
+            f"<div class='pill'>{kind}</div></div>{sb}{sw}{imp}")
+    ch = vivid(gt["team"].get("alternateColor") or gt["team"].get("color") or "5b7bd5", min_l=0.5)
+    bg = (f".bg{{opacity:1!important;background:"
+          f"linear-gradient(120deg,{ca}d9 0%,{ca}73 38%,rgba(13,18,32,0) 78%),"
+          f"linear-gradient(300deg,{co}38 0%,rgba(13,18,32,0) 22%)!important}}"
+          f".hl{{border-left-color:{ch}!important}}")
+    return (_card(f"--a:{ca};--h:{ch}", body, extra_css=V4_CSS + TD5_CSS + FG_CSS + GC_CSS + bg),
+            kind, hero, victim, gt, lt, g_before, g_after)
+
+
+def post_game_changer(event, play, summary, ctx, before, after):
+    html_text, kind, hero, victim, gt, lt, gb, ga = nfl_gc_html(event, play, summary, ctx["live"], ctx["ol"], before, after)
+    nick = gt["team"].get("name") or gt["team"]["abbreviation"]
+    what = {"INTERCEPTION": f"{hero} picks off {victim}!" if victim else f"{hero} with the interception!",
+            "FUMBLE": f"{hero} recovers — {victim} coughs it up!" if victim else f"{nick} take it away!",
+            "BLOCKED KICK": f"Blocked! {nick} get the stop!"}[kind]
+    m = re.search(r"(?:INTERCEPTED|RECOVERED) by .+? at ([A-Z]{2,3} \d+)", play.get("text") or "")
+    where = ""
+    if m:
+        lnick = lt["team"].get("name") or lt["team"]["abbreviation"]
+        own_half = m.group(1).startswith(gt["team"]["abbreviation"])
+        where = f"{lnick} were at the {m.group(1)} · " if own_half else f"Takeaway at the {m.group(1)} · "
+    embed = {"author": AU_NFL(), "color": color(gt["team"].get("color")), "title": f"Game-changer: {what}",
+             "description": f"{where}{nick} win chance {gb:.0f}% → {ga:.0f}% (ESPN)"}
+    return _post_card(NFL_HOOK, html_text, f"🔄 GAME-CHANGER · {nick.upper()}", embed, "gc.png")
+
+
+_nfl_prime_slot_gc = nfl_prime_slot
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    """+ game-changing turnovers (ESPN win chance swings by nfl.game_changer_swing points or more)."""
+    thr = CONFIG["nfl"].get("game_changer_swing")
+    if thr:
+        for e in slot:
+            if e["status"]["type"]["state"] != "in":
+                continue
+            g = st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})
+            summary = fetch(f"football/nfl/summary?event={e['id']}")
+            for p, b, a in game_changers(summary, float(thr)):
+                if p["id"] in g.setdefault("gc", []):
+                    continue
+                if p.get("wallclock") and time.time() - _wallclock_ts(p["wallclock"]) > 600:
+                    g["gc"].append(p["id"])          # older than 10 minutes (bot restarted): don't post late
+                    continue
+                if not td_ready(summary, p, g.setdefault("seen", {}).setdefault(p["id"], time.time())):
+                    continue
+                ctx = getctx()
+                if ctx and post_game_changer(e, p, summary, ctx, b, a):
+                    g["gc"].append(p["id"])
+    return _nfl_prime_slot_gc(slot, st, getctx, force)
+
+
+# ------------------------------------------------ half-time / overtime / full-time: big scoreboard first
+
+_nfl_game_fantasy_html_sb = nfl_game_fantasy_html
+
+
+def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=30):
+    import html as H
+    html_text = _nfl_game_fantasy_html_sb(event, summary, live, ol, base, max_rows)
+    away, home = teams_of(event)
+    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+    t = event["status"]["type"]
+    q = event["status"].get("period", 0)
+    if t.get("state") == "post":
+        status = "FINAL · OT" if q > 4 else "FINAL"
+    elif t.get("name") == "STATUS_HALFTIME":
+        status = "HALF-TIME"
+    elif q >= 5:
+        status = "OVERTIME"
+    elif t.get("name") == "STATUS_END_PERIOD" and q == 4:
+        status = "END OF REGULATION"
+    else:
+        status = f"Q{q}"
+
+    def side(tm, sc, lo, right):
+        img = f"<img src='{H.escape(tm['team'].get('logo', ''))}'>"
+        name = f"<span>{H.escape(tm['team'].get('name') or tm['team']['abbreviation'])}</span>"
+        score = f"<span class='sc{' lo' if lo else ''}'>{sc}</span>"
+        return f"<div class='tm{' r' if right else ''}'>{(score + name + img) if right else (img + name + score)}</div>"
+    sb = (f"<div class='sb5 big'>{side(away, a_s, a_s < h_s, False)}<div class='mid'><div class='clk'>{status}</div></div>"
+          f"{side(home, h_s, h_s < a_s, True)}</div>")
+    i = html_text.find("<div class='top'>")
+    j = html_text.find("</div></div>", i) + len("</div></div>")
+    html_text = html_text[:j] + sb + html_text[j:]
+    html_text = re.sub(r"<div class='sm'>.*?</div>(?=</div>)", "", html_text, count=1, flags=re.S)
+    css = FG_CSS + ".sb5.big{margin-top:12px;padding:16px 22px}.sb5.big .sc{font-size:64px}.sb5.big .tm{font-size:22px}"
+    css += ".sb5.big .tm img{width:64px;height:64px}.sb5.big .clk{font-size:15px}"
+    if a_s != h_s:                                   # leading team's colours; neutral when level
+        lead, trail = (away, home) if a_s > h_s else (home, away)
+        ca, co = vivid(lead["team"].get("color") or "1faa59"), vivid(trail["team"].get("color") or "5b7bd5")
+        css += (f".bg{{opacity:1!important;background:linear-gradient(120deg,{ca}c0 0%,{ca}5c 36%,rgba(13,18,32,0) 74%),"
+                f"linear-gradient(300deg,{co}30 0%,rgba(13,18,32,0) 22%)!important}}")
+    return html_text.replace("</style>", css + "</style>", 1)
 
 
 # ===================================================================== main
