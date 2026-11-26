@@ -169,7 +169,7 @@ def discord(hook, embed, label="", content=None, files=None):
                  f"Content-Type: application/json\r\n\r\n".encode() + json.dumps(payload).encode() + b"\r\n"]
         for i, (name, data) in enumerate(files.items()):
             parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[{i}]\"; filename=\"{name}\"\r\n"
-                         f"Content-Type: image/png\r\n\r\n".encode() + data + b"\r\n")
+                         f"Content-Type: {'image/gif' if name.endswith('.gif') else 'image/png'}\r\n\r\n".encode() + data + b"\r\n")
         body = b"".join(parts) + f"--{boundary}--\r\n".encode()
         ctype = f"multipart/form-data; boundary={boundary}"
     else:
@@ -3527,7 +3527,7 @@ def spoiler_delay():
 
 # Exact timing: every in-game post should land spoiler_delay() seconds after the real moment (ESPN's
 # timestamp of the play). The card is built PREP seconds early, then discord() waits for the exact second.
-PREP_SECONDS = 14
+PREP_SECONDS = 30                    # animated cards take ~15-25s to build
 _SEND_AT = {"t": None, "t0": None, "label": ""}      # target send time for the post being built right now
 _NEXT_WAKE = {"t": None}                              # earliest upcoming "start building" time (main loop wakes for it)
 _TIMING = []                                          # (label, moment, sent) for the last posts, saved to state
@@ -5727,10 +5727,13 @@ def post_trade(sport, t):
     hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
     role = str(((CONFIG.get(sport) or {}).get("trades") or {}).get("mention_role_id") or "").strip()
     content = f"<@&{role}>" if role.isdigit() else None       # e.g. @NFLfantasy: pinged on every trade
-    png = render_card(html_text)
+    gif = render_anim(html_text) if wants_animation(html_text) else None
+    png = None if gif else render_card(html_text)
     if sport == "nba":
         _POSTER["name"] = (CONFIG.get("nba") or {}).get("bot_name") or "Donald 🏀"
     try:
+        if gif:
+            return discord(hook, [], "trade", content=content, files={"trade.gif": gif})
         if png:
             return discord(hook, [], "trade", content=content, files={"trade.png": png})
         names = " ⇄ ".join(x["pe"]["manager"] for x in ev["sides"])
@@ -6556,6 +6559,137 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
     except Exception as e:  # noqa: BLE001
         _log_plain(f"season highs skipped: {e}")
     return h
+
+
+
+# ------------------------------------------------ animated cards for the big moments (looping GIFs)
+# Touchdowns, late field goals, game-changers, overtime, season highs and trades get a 2-second looping animation.
+# All frames are captured in ONE Chrome pass (a grid of frames, each paused at a different moment), then stitched
+# into a GIF with Pillow. Anything goes wrong -> the normal still image is posted instead.
+
+ANIM_FRAMES = 40                        # 20 frames a second: smooth motion
+ANIM_SECONDS = 2.0
+ANIM_WIDTH = 1200                       # GIF width (Discord shows ~550px wide, so this stays sharp)
+
+ANIM_CSS = """
+@keyframes a_pop{0%{transform:scale(1)}8%{transform:scale(1.16)}22%{transform:scale(.98)}32%{transform:scale(1)}100%{transform:scale(1)}}
+@keyframes a_glow{0%,100%{filter:drop-shadow(0 0 0 transparent)}8%{filter:drop-shadow(0 0 34px var(--hc,#fff))}50%{filter:drop-shadow(0 0 14px var(--hc,#fff))}}
+@keyframes a_bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+@keyframes a_flash{0%,100%{text-shadow:0 0 0 rgba(255,255,255,0)}50%{text-shadow:0 0 26px rgba(255,255,255,.95)}}
+@keyframes a_pulse{0%,100%{box-shadow:0 0 0 2px #ffb000,0 0 18px rgba(255,140,0,.55)}50%{box-shadow:0 0 0 3px #ffd600,0 0 46px rgba(255,140,0,1)}}
+@keyframes a_fall{from{background-position:0 0,11px 7px,23px 13px,5px 19px,17px 3px}
+ to{background-position:0 29px,11px 48px,23px 36px,5px 66px,17px 34px}}
+@keyframes a_fall2{from{background-position:0 0,31px 17px,13px 29px,47px 7px}to{background-position:0 106px,31px 139px,13px 123px,47px 141px}}
+@keyframes a_shine{from{background-position:0 0}to{background-position:240px 0}}
+@keyframes a_tape{from{background-position:0 0}to{background-position:62.2px 0}}
+@keyframes a_ot{0%,100%{transform:skew(-8deg) scale(1)}50%{transform:skew(-8deg) scale(1.07)}}
+@keyframes a_siren{0%,49%{background:#ff2d3a;color:#fff;box-shadow:0 0 30px rgba(255,45,58,.9)}50%,100%{background:#fff;color:#ff2d3a;box-shadow:0 0 30px rgba(255,255,255,.9)}}
+@keyframes a_win{0%,100%{box-shadow:0 0 18px rgba(255,190,70,.25)}50%{box-shadow:0 0 44px rgba(255,190,70,.7)}}
+.sbx .sc.hot{display:inline-block;transform-origin:50% 60%;animation:a_pop 2s ease-out infinite,a_glow 2s ease-out infinite}
+.sbx .plus{animation:a_bounce 1s ease-in-out infinite}
+.sbx .yd{animation:a_flash 1s ease-in-out infinite}
+.pr2.sh,.tpr.sh,.pp5.sh{animation:a_pulse 1s ease-in-out infinite}
+.pr2.sh::before,.tpr.sh::before{animation:a_fall 1s linear infinite}
+.card.shc::after{animation:a_fall2 2s linear infinite}
+.shr{background:repeating-linear-gradient(90deg,#ff3d00 0,#ff9100 60px,#ffd600 120px,#ff9100 180px,#ff3d00 240px)!important;
+ background-size:240px 100%!important;animation:a_shine 1s linear infinite}
+.tape{animation:a_tape 1s linear infinite}
+.otw{animation:a_ot 1s ease-in-out infinite}
+.vd.fleece{animation:a_siren .5s linear infinite}
+.ts.win{animation:a_win 1s ease-in-out infinite}
+"""
+ANIM_FREEZE = ("*,*::before,*::after{animation-play-state:paused!important;"
+               "animation-delay:calc(var(--t,0) * -1s)!important}")
+
+
+def wants_animation(html_text):
+    """Only the big moments move: scoring scoreboards, overtime, season highs and trades."""
+    if not (CONFIG.get("animations") or {}).get("enabled", True):
+        return False
+    return any(k in html_text for k in ("class='sc hot'", "class='otw'", " sh'", "class='shr'", "class='tw", "class='vd "))
+
+
+def render_anim(html_text, width=None):
+    """Looping GIF of a card (bytes), or None if anything fails."""
+    import subprocess
+    import tempfile
+    try:
+        from PIL import Image
+    except Exception:  # noqa: BLE001
+        _log_plain("animations off: Pillow is not installed")
+        return None
+    chrome = find_chrome()
+    if not chrome:
+        return None
+    try:
+        html_text = inline_images(html_text)
+    except Exception:  # noqa: BLE001
+        pass
+    if width is None:
+        m = re.search(r"body,\.card\{width:(\d+)px", html_text)
+        width = int(m.group(1)) if m else 880
+    seek = ("<script>(function(){var t=new URLSearchParams(location.search).get('t');"
+            "if(t)document.documentElement.style.setProperty('--t',t);})();</script>")
+    card = html_text.replace("</style>", ANIM_CSS + ANIM_FREEZE + "</style>", 1).replace("</head>", seek + "</head>", 1)
+    with tempfile.TemporaryDirectory() as d:
+        src, grid, out = Path(d) / "card.html", Path(d) / "grid.html", Path(d) / "grid.png"
+        src.write_text(card)
+        base = [chrome, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--virtual-time-budget=15000"]
+        try:
+            dom = subprocess.run(base + [f"--window-size={width},3000", "--dump-dom", src.as_uri()],
+                                 check=True, timeout=60, capture_output=True, text=True).stdout
+            m = re.search(r'data-h="(\d+)"', dom)
+            height = int(m.group(1)) if m else 900
+            cols = 8
+            rows = (ANIM_FRAMES + cols - 1) // cols
+            cells = "".join(
+                f"<iframe src='card.html?t={i * ANIM_SECONDS / ANIM_FRAMES:.3f}' width='{width}' height='{height}' "
+                f"style='border:0;display:block;float:left' scrolling='no'></iframe>" for i in range(ANIM_FRAMES))
+            grid.write_text(f"<!doctype html><html><head><style>html,body{{margin:0;background:#0d1220}}</style></head>"
+                            f"<body style='width:{width * cols}px'>{cells}</body></html>")
+            subprocess.run(base + ["--force-device-scale-factor=1", f"--window-size={width * cols},{height * rows}",
+                                   f"--screenshot={out}", grid.as_uri()], check=True, timeout=120, capture_output=True)
+            sheet = Image.open(out).convert("RGB")
+            frames = []
+            scale = ANIM_WIDTH / width if width > ANIM_WIDTH else 1.0
+            for i in range(ANIM_FRAMES):
+                x, y = (i % cols) * width, (i // cols) * height
+                f = sheet.crop((x, y, x + width, y + height))
+                if scale != 1.0:
+                    f = f.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
+                frames.append(f)
+            # one shared palette keeps colours steady from frame to frame (no flicker) and the file small
+            pal = frames[0].quantize(colors=255, method=Image.Quantize.MEDIANCUT)
+            q = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
+            buf = __import__("io").BytesIO()
+            q[0].save(buf, format="GIF", save_all=True, append_images=q[1:], loop=0,
+                      duration=int(ANIM_SECONDS * 1000 / ANIM_FRAMES), optimize=True, disposal=1)
+            data = buf.getvalue()
+            if len(data) > 9_000_000:
+                _log_plain(f"animation too big ({len(data) // 1024} KB): posting the still image")
+                return None
+            return data
+        except Exception as e:  # noqa: BLE001
+            _log_plain(f"animation failed, posting the still image: {e}")
+            return None
+
+
+_post_card_still = _post_card
+
+
+def _post_card(hook, html_text, content, embed, name):
+    """Big moments are posted as a looping animation; everything else (and any failure) as the still card."""
+    if (CONFIG.get("bot") or {}).get("image_only", True) and wants_animation(html_text):
+        for nm in list(_SH_HEAD):                             # same SEASON HIGH headline as the still path
+            for k in ("img_title", "title"):
+                t = embed.get(k)
+                if t and nm in t and "SEASON HIGH" not in t:
+                    embed[k] = f"🔥 SEASON HIGH! {t}"
+        _SH_HEAD.clear()
+        gif = render_anim(_inject_headline(html_text, embed))
+        if gif:
+            return discord(hook, [], name, files={name.rsplit(".", 1)[0] + ".gif": gif})
+    return _post_card_still(hook, html_text, content, embed, name)
 
 
 # ===================================================================== main
