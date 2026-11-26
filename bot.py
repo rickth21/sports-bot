@@ -8199,6 +8199,255 @@ def check_overturns(st):
                         _log_plain(f"touchdown {pid} re-credited to {now_scorer}")
 
 
+# ---- 5) the try after a touchdown (extra point / 2-pt): accurate score on the card, edited in when it happens
+#   ESPN adds the try to the touchdown's own scoring play (text "(Jake Bates Kick)", score +1) once it's kicked.
+#   Spoiler rule: the try only appears on a card once its own moment is spoiler_delay() old. Its moment is not in
+#   the feed, so we use a time that is never earlier than it: when we first saw it, or the next play's wallclock.
+#   A touchdown posted before that shows the score after the touchdown only ("+6 · conversion to come"); the
+#   same Discord message is then edited (image only, no text) to the full score with the result of the try.
+import copy as _copy
+
+TRY_CSS = """
+.sbx .tryt{display:inline-block;margin:6px 0 0 6px;border-radius:8px;padding:3px 9px;font-size:13px;font-weight:900;
+ letter-spacing:1px;vertical-align:top;white-space:nowrap}
+.sbx .tryt.ok{background:#1faa59;color:#fff}.sbx .tryt.no{background:#5b6273;color:#fff}
+.sbx .tryt.wait{background:rgba(255,255,255,.12);color:#e3e7ef}
+"""
+TRY_GIVE_UP = 600                                          # no try after 10 minutes: stop waiting
+_TRY_TAG = {"tag": None}
+
+
+def _td_prev_score(play, summary):
+    """(away, home) just before this scoring play, from ESPN's list of scoring plays."""
+    sps = summary.get("scoringPlays") or []
+    ids = [str(p.get("id")) for p in sps]
+    i = ids.index(str(play.get("id"))) if str(play.get("id")) in ids else len(sps)
+    if i == 0:
+        return 0, 0
+    p = sps[i - 1]
+    return int(num(p.get("awayScore"))), int(num(p.get("homeScore")))
+
+
+def _td_drive_play(summary, pid):
+    """(the touchdown's play in the drive chart, wallclock of the first play after it or None)."""
+    drives = summary.get("drives") or {}
+    pool = [p for d in list(drives.get("previous") or []) + ([drives["current"]] if drives.get("current") else [])
+            for p in d.get("plays") or []]
+    for i, p in enumerate(pool):
+        if str(p.get("id")) == str(pid):
+            nxt = next((q.get("wallclock") for q in pool[i + 1:] if q.get("wallclock")), None)
+            return p, nxt
+    return None, None
+
+
+def td_try(play, summary):
+    """Result of the try after this touchdown, or None while it isn't in yet (or never comes).
+    dict(label, cls ok/no). The score is the judge: a "good" try only counts once ESPN's score shows it."""
+    m = re.search(r"\(([^()]*)\)\s*$", play.get("text") or "")
+    pat = (m.group(1) if m else "").lower()
+    dp, _ = _td_drive_play(summary, play.get("id"))
+    pa = (dp or {}).get("pointAfterAttempt") or {}
+    pa_id = pa.get("id") if pa.get("id") not in (0, None) else None
+    a0, h0 = _td_prev_score(play, summary)
+    away = teams_of_play_side(play, summary)
+    a1, h1 = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    mine = (a1 - a0 if away else h1 - h0) - 6
+    theirs = (h1 - h0) if away else (a1 - a0)
+    if theirs >= 2:
+        return {"label": "✗ DEFENSIVE 2-PT RETURN", "cls": "no"}
+    if not pat and pa_id is None and mine <= 0:
+        return None                                        # nothing yet
+    two = bool(re.search(r"two-point|2pt|2-pt", pat)) or pa_id in (15, 16) or mine == 2
+    failed = bool(re.search(r"fail|miss|block|no good", pat)) or pa_id in (62, 43) \
+        or (pa_id in (15, 16) and not pa.get("value"))
+    need = 2 if two else 1
+    if not failed and mine < need:
+        return None                                        # feed says good but the score isn't there yet
+    if two:
+        return {"label": "✓ 2-PT GOOD", "cls": "ok"} if not failed else {"label": "✗ 2-PT FAILED", "cls": "no"}
+    if not failed:
+        return {"label": "✓ EXTRA POINT GOOD", "cls": "ok"}
+    return {"label": "✗ EXTRA POINT BLOCKED" if ("block" in pat or pa_id == 43) else "✗ EXTRA POINT MISSED",
+            "cls": "no"}
+
+
+def teams_of_play_side(play, summary):
+    """True when the scoring team is the away team."""
+    comps = ((summary.get("header") or {}).get("competitions") or [{}])[0].get("competitors") or []
+    abbr = (play.get("team") or {}).get("abbreviation")
+    for c in comps:
+        if (c.get("team") or {}).get("abbreviation") == abbr:
+            return c.get("homeAway") == "away"
+    return False
+
+
+def td_only_play(play, summary):
+    """The scoring play as it stood the moment the touchdown was scored: no try, score +6 only."""
+    p = _copy.deepcopy(play)
+    p["text"] = re.sub(r"\s*\([^()]*\)\s*$", "", p.get("text") or "")
+    a0, h0 = _td_prev_score(play, summary)
+    if teams_of_play_side(play, summary):
+        p["awayScore"], p["homeScore"] = a0 + 6, h0
+    else:
+        p["awayScore"], p["homeScore"] = a0, h0 + 6
+    return p
+
+
+def _try_moment(st, play, summary):
+    """A time never earlier than the try: first time we saw it, or the wallclock of the next play if earlier."""
+    seen = st.setdefault("td_try_seen", {})
+    pid = str(play.get("id"))
+    seen.setdefault(pid, time.time())
+    for k in list(seen):
+        if time.time() - seen[k] > 86400:
+            seen.pop(k, None)
+    t0 = seen[pid]
+    _, nxt = _td_drive_play(summary, pid)
+    if nxt:
+        try:
+            t0 = min(t0, _wallclock_ts(nxt))
+        except Exception:  # noqa: BLE001
+            pass
+    return t0
+
+
+_nfl_td_html_try = nfl_td_fantasy_html
+
+
+def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
+    """Adds the try result (or "conversion to come") next to the +N chip on the scoreboard."""
+    h = _nfl_td_html_try(event, play, summary, live, ol, base, *a, **k)
+    tag = _TRY_TAG.get("tag")
+    if tag and "<div class='plus'>" in h:
+        i = h.find("</div>", h.find("<div class='plus'>")) + len("</div>")
+        h = h[:i] + f"<div class='tryt {tag['cls']}'>{tag['label']}</div>" + h[i:]
+        h = h.replace("</style>", TRY_CSS + "</style>", 1)
+        _last_td_html["h"] = h
+    return h
+
+
+_post_td_try = post_td_fantasy
+
+
+def post_td_fantasy(event, play, summary, ctx):
+    """Post the touchdown with the try only if it's old enough to show; otherwise remember to edit it in."""
+    st = _NFL_ST.get("st")
+    res = None
+    try:
+        res = td_try(play, summary)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"try check skipped: {ex}")
+    send_at = _SEND_AT.get("t") or time.time()
+    show = res is not None and st is not None and _try_moment(st, play, summary) + spoiler_delay() <= send_at + 1
+    if res is not None and st is None:
+        show = True
+    live_game = event["status"]["type"].get("state") == "in"
+    if show:
+        _TRY_TAG["tag"] = res
+        p = play
+    else:
+        p = td_only_play(play, summary)
+        _TRY_TAG["tag"] = {"label": "⏳ CONVERSION TO COME", "cls": "wait"} if live_game else None
+    try:
+        ok = _post_td_try(event, p, summary, ctx)
+    finally:
+        _TRY_TAG["tag"] = None
+    if ok and st is not None:
+        r = (st.get("td_posts") or {}).get(str(play["id"]))
+        if r is not None:
+            r["try"] = "shown" if show else "pending"
+    return ok
+
+
+def _rebuild_td_image(event, play, summary, ctx, tag):
+    """Build the touchdown card again exactly as a post would (still or animated), without posting.
+    Returns (bytes, filename, html) or (None, None, None)."""
+    global CAPTURE
+    keep_cap, keep_send = CAPTURE, dict(_SEND_AT)
+    CAPTURE = []
+    _TRY_TAG["tag"] = tag
+    _last_td_html["h"] = None
+    try:
+        _post_td_track(event, play, summary, ctx)
+        got = CAPTURE[-1] if CAPTURE else None
+    finally:
+        CAPTURE = keep_cap
+        _TRY_TAG["tag"] = None
+        _SEND_AT.update(keep_send)
+    if not isinstance(got, dict) or not got.get("attachments"):
+        return None, None, None
+    path = Path(got["attachments"][0].replace("file://", ""))
+    return path.read_bytes(), path.name, _last_td_html["h"]
+
+
+def td_try_tick(st, slot, getctx):
+    """Edit posted touchdowns once their try is in (and old enough to show). True while one is still waiting."""
+    posts = st.get("td_posts") or {}
+    waiting = False
+    for e in slot:
+        pend = [(pid, r) for pid, r in posts.items()
+                if r.get("game") == e["id"] and r.get("try") == "pending" and not r.get("done")]
+        if not pend:
+            continue
+        summary = fetch(f"football/nfl/summary?event={e['id']}")
+        plays = {str(p.get("id")): p for p in summary.get("scoringPlays") or []}
+        over = e["status"]["type"]["state"] == "post"
+        for pid, r in pend:
+            p = plays.get(pid)
+            age = time.time() - r.get("t", time.time())
+            res = td_try(p, summary) if p else None
+            if res is None:
+                if age > TRY_GIVE_UP or (over and age > 300) or (p is None and age > 300):
+                    r["try"] = "gave_up"                   # no try (walk-off, kneel, feed never had it)
+                    _log_plain(f"touchdown {pid}: no try after {age / 60:.0f} min, leaving the post as it is")
+                else:
+                    waiting = True
+                continue
+            target = _try_moment(st, p, summary) + spoiler_delay()
+            if time.time() < target - PREP_SECONDS:
+                waiting = True
+                w = target - PREP_SECONDS
+                if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
+                    _NEXT_WAKE["t"] = w
+                continue
+            ctx = getctx()
+            if not ctx:
+                waiting = True
+                continue
+            img, name, html_text = _rebuild_td_image(e, p, summary, ctx, res)
+            if not img:
+                r["try_fail"] = r.get("try_fail", 0) + 1
+                if r["try_fail"] >= 3:
+                    r["try"] = "gave_up"
+                continue
+            if r.get("done"):                              # overturned while we were building
+                continue
+            _SEND_AT.update(t=target, t0=target - spoiler_delay(), label=f"try {res['label']}")
+            _wait_for_send_slot()
+            ok = discord_edit(NFL_HOOK, r["msg"], img, name)
+            _record_send(ok is True)
+            if ok is not False:
+                r["try"] = "done" if ok else "gone"
+                r["try_result"] = res["label"]
+                if html_text:
+                    _TD_HTML[pid] = html_text
+                _log_plain(f"touchdown {pid}: post updated with the try ({res['label']})")
+    return waiting
+
+
+_nfl_prime_slot_try = nfl_prime_slot
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    active = _nfl_prime_slot_try(slot, st, getctx, force)
+    try:
+        if td_try_tick(st, slot, getctx):
+            active = True
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"try edit skipped: {ex}")
+    return active
+
+
 # ---- 6) daily report in #rick-only (08:00 UK)
 def daily_report_text(st):
     now = time.time()
