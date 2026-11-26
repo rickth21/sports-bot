@@ -3232,7 +3232,7 @@ def scoring_line_html(p):
 
 RACE_CSS = """
 .rt{margin-top:10px;background:rgba(255,255,255,.05);border-radius:12px;padding:8px 14px}
-.rr2{display:grid;grid-template-columns:30px 1fr 64px 64px 260px 200px;align-items:center;gap:12px;height:40px;
+.rr2{display:grid;grid-template-columns:30px minmax(0,1fr) 172px 56px 60px 240px 180px;align-items:center;gap:12px;height:40px;
  font-size:16px;font-variant-numeric:tabular-nums}
 .rr2.h{height:26px;font-size:11px;letter-spacing:1.4px;color:#9aa3b5;font-weight:700}
 .rr2.cut{border-bottom:2px dashed rgba(245,197,66,.55)}
@@ -3243,6 +3243,15 @@ RACE_CSS = """
 .rb div{height:8px;border-radius:999px}
 .mv{font-size:13px;font-weight:800}.mv.u{color:#7ee2a8}.mv.dn{color:#ff9a9e}.mv.z{color:#5d6679}
 .race-note{font-size:13px;color:#9aa3b5;margin-top:8px}
+.rr2 .chip{font-size:11.5px;font-weight:900;letter-spacing:1px;border-radius:6px;padding:4px 8px;text-align:center;white-space:nowrap;justify-self:start}
+.rr2 .chip.bye{background:linear-gradient(90deg,#ffd166,#ffb347);color:#1b1305;box-shadow:0 0 12px rgba(255,190,70,.5)}
+.rr2 .chip.in{background:#1faa59;color:#fff;box-shadow:0 0 12px rgba(31,170,89,.5)}
+.rr2 .chip.out{background:#3a1218;color:#ff9a9e;border:1px solid rgba(255,154,158,.6)}
+.rr2 .chip.alive{background:rgba(255,255,255,.08);color:#cfd5e1}
+.rr2 .chip.mir{background:linear-gradient(90deg,#6d28d9,#a855f7);color:#fff}
+.rr2.clin{background:linear-gradient(90deg,rgba(31,170,89,.14),rgba(31,170,89,0) 60%)}
+.rr2.elim{opacity:.55}
+.rr2{border-radius:8px;padding:0 6px}
 """
 
 
@@ -3253,17 +3262,43 @@ def playoff_race_html(ctx, prev, title_date):
     settings = league_settings("nfl").get("settings", {})
     po_start, n_po = int(settings.get("playoff_week_start") or 15), int(settings.get("playoff_teams") or 6)
     _, rec = _history("nfl", week - 1)
-    order = sorted(ol, key=lambda r: -ol[r]["po"])
-    rows = ["<div class='rr2 h'><span>#</span><span>MANAGER</span><span>W-L</span><span>PF</span>"
-            "<span>PLAYOFF CHANCE · SINCE YESTERDAY</span><span>TITLE CHANCE</span></div>"]
+    try:                                   # mathematically clinched / eliminated, from the finished weeks only
+        status = playoff_status(league_settings("nfl"), rec, week - 1) if rec else {}
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"race status skipped: {e}")
+        status = {}
+    def _standing(r):                     # real league standings: record, then points for (Sleeper's tiebreak)
+        x = rec.get(r) or {"w": 0, "l": 0, "t": 0, "pf": 0}
+        return (-(x["w"] + 0.5 * x["t"]), -x["pf"])
+    order = sorted(ol, key=_standing)
+    rows = ["<div class='rr2 h'><span>#</span><span>MANAGER</span><span>STATUS</span><span>W-L</span><span>PF</span>"
+            "<span>PLAYOFFS · SINCE YESTERDAY</span><span>TITLE CHANCE</span></div>"]
+
+    def chip(r, po):
+        s_ = (status.get(r) or {})
+        k = s_.get("status")
+        if k == "bye":
+            return "<span class='chip bye'>🔒 BYE CLINCHED</span>"
+        if k == "in":
+            return "<span class='chip in'>🔒 CLINCHED</span>"
+        if k == "out":
+            return "<span class='chip out'>❌ ELIMINATED</span>"
+        if k == "alive" and po < 0.5:
+            return "<span class='chip mir'>NEEDS A MIRACLE</span>"
+        if k == "alive" and s_.get("magic"):
+            m = s_["magic"]
+            return f"<span class='chip alive'>{m} WIN{'S' if m != 1 else ''} TO CLINCH</span>"
+        return "<span class='chip alive'>IN THE HUNT</span>" if k else "<span></span>"
     for i, r in enumerate(order, 1):
         x = rec.get(r, {"w": 0, "l": 0, "t": 0, "pf": 0})
         po, ti = ol[r]["po"], ol[r]["title"]
         d = po - prev.get(str(r), po)
         mv = (f"<span class='mv u'>▲{d:.0f}</span>" if d >= 1 else f"<span class='mv dn'>▼{abs(d):.0f}</span>" if d <= -1
               else "<span class='mv z'>–</span>")
-        rows.append(f"<div class='rr2{' cut' if i == n_po else ''}'><span class='k'>{i}</span>"
-                    f"<span class='m'>{H.escape(live['rosters'][r]['manager'])}</span>"
+        kk = (status.get(r) or {}).get("status")
+        rc = " clin" if kk in ("in", "bye") else (" elim" if kk == "out" else "")
+        rows.append(f"<div class='rr2{' cut' if i == n_po else ''}{rc}'><span class='k'>{i}</span>"
+                    f"<span class='m'>{H.escape(live['rosters'][r]['manager'])}</span>{chip(r, po)}"
                     f"<span>{x['w']}-{x['l']}{'-' + str(x['t']) if x['t'] else ''}</span><span>{x['pf']:.0f}</span>"
                     f"<span class='o'><span>{po:.0f}%</span><div class='rb'><div style='width:{max(po, 1.5):.1f}%;"
                     f"background:linear-gradient(90deg,#d97757,#f2a77f)'></div></div>{mv}</span>"
@@ -3273,7 +3308,7 @@ def playoff_race_html(ctx, prev, title_date):
     body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>{H.escape(league.upper())} · PLAYOFF RACE · "
             f"{H.escape(title_date.upper())}</div><div class='pill'>WEEK {week} IN PROGRESS</div></div>"
             f"<div class='rt'>{''.join(rows)}</div>"
-            f"<div class='race-note'>Top {n_po} make the playoffs (dashed line) · playoffs start week {po_start} · "
+            f"<div class='race-note'>Current standings (record, then points for) · top {n_po} make the playoffs (dashed line) · playoffs start week {po_start} · "
             f"{left} regular-season week{'s' if left != 1 else ''} to go, including this one · "
             f"odds simulate the rest of this week and every week after, 4,000 times</div>"
             f"<div class='sec'>THIS WEEK'S MATCHUPS · WIN CHANCE RIGHT NOW</div>{compact_matchups_html(live, ol, live['pairs'])}")
@@ -7344,10 +7379,10 @@ def maybe_catchup(st):
 
 # ---- 3) live scoreboard: one message per game night, edited in place every 5 minutes
 LIVE_CSS = """
-.lms{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
-.lm{display:grid;grid-template-columns:1fr 76px 100px 76px 1fr;grid-template-rows:auto auto;align-items:center;gap:2px 10px;background:rgba(255,255,255,.06);border-radius:12px;padding:10px 14px}
-.lm b{font-size:18px;font-weight:900;color:#cfd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lm b.w{color:#fff}.lm b.r{text-align:right}
-.lm .p{font-size:24px;font-weight:900;text-align:center;font-variant-numeric:tabular-nums}
+.lms{display:grid;grid-template-columns:1fr;gap:8px;margin-top:12px}
+.lm{display:grid;grid-template-columns:1fr 92px 170px 92px 1fr;grid-template-rows:auto auto;align-items:center;gap:2px 10px;background:rgba(255,255,255,.06);border-radius:12px;padding:10px 14px}
+.lm b{font-size:21px;font-weight:900;color:#cfd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lm b.w{color:#fff}.lm b.r{text-align:right}
+.lm .p{font-size:28px;font-weight:900;text-align:center;font-variant-numeric:tabular-nums}
 .wb{height:10px;border-radius:5px;background:#3b4152;overflow:hidden}.wb i{display:block;height:10px;background:linear-gradient(90deg,#ffd166,#ee6730)}
 .lm small{grid-row:2;font-size:12.5px;font-weight:800;color:#aab3c5}.lm small:nth-of-type(1){grid-column:1}.lm small.r{grid-column:5;text-align:right}
 .lv{display:inline-block;background:#ff3d3d;color:#fff;font-weight:900;font-size:12px;letter-spacing:1.5px;padding:2px 8px;border-radius:5px;margin-right:8px}
@@ -7373,7 +7408,7 @@ def live_board_html(sport, live, ol, final):
     body = (f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape(CONFIG[sport].get('league_name', 'League').upper())}"
             f" · WEEK {live['week']} MATCHUPS</div><div class='pill'>{pill}</div></div><div class='lms'>{''.join(rows)}</div>")
     html_text = _card("--a:#ee6730;--h:#ffb347" if sport == "nba" else "--a:#1faa59;--h:#5b7bd5", body, None,
-                      LIVE_CSS + "body,.card{width:1300px!important}", width=1300)
+                      LIVE_CSS + "body,.card{width:980px!important}", width=980)
     return _nba_theme(html_text, None, "LIVE SCOREBOARD") if sport == "nba" else html_text
 
 
@@ -7865,9 +7900,9 @@ TC_CSS = """
 .tcs{background:rgba(255,255,255,.06);border-radius:16px;padding:12px 14px;display:flex;flex-direction:column;gap:8px;border:2px solid transparent}
 .tcs.win{border-color:rgba(255,209,102,.75);box-shadow:0 0 24px rgba(255,190,70,.25)}
 .tch{display:flex;justify-content:space-between;align-items:baseline}.tch b{font-size:24px;font-weight:900}.tch span{font-size:30px;font-weight:900;color:#ffd166}
-.tca{display:grid;grid-template-columns:48px 1fr 90px 110px;gap:10px;align-items:center;background:rgba(0,0,0,.22);border-radius:10px;padding:6px 10px}
+.tca{display:grid;grid-template-columns:48px minmax(0,1fr) 72px 100px;gap:10px;align-items:center;background:rgba(0,0,0,.22);border-radius:10px;padding:6px 10px}
 .tca img{width:48px;height:48px;border-radius:50%;object-fit:cover;object-position:top;background:#1d2436}
-.tca b{display:block;font-size:17px;font-weight:900}.tca small{font-size:12.5px;color:#aab3c5;font-weight:700}
+.tca b{display:block;font-size:17px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tca small{font-size:12.5px;color:#aab3c5;font-weight:700}
 .tca .p{font-size:20px;font-weight:900;text-align:right}.tca .v{font-size:12px;font-weight:900;text-align:right;color:#cfd5e1}
 """
 
@@ -7911,7 +7946,7 @@ def trade_checkup_html(sport, t, done_week):
             f"trade (weeks {weeks[0]}–{weeks[-1]}){', plus today' + chr(39) + 's dynasty value' if sport == 'nfl' else ''}</div></div>"
             f"<div class='tcw'>{html_cols}</div>")
     html_text = _card("--a:#d97757;--h:#5b7bd5" if sport == "nfl" else "--a:#ee6730;--h:#ffb347", body, None,
-                      HL_CSS + TC_CSS + "body,.card{width:1240px!important}", width=1240)
+                      HL_CSS + TC_CSS + "body,.card{width:1100px!important}", width=1100)
     return (_nba_theme(html_text, None, "TRADE CHECK-UP") if sport == "nba" else html_text), head
 
 
@@ -7957,8 +7992,8 @@ def post_trade(sport, t):
 
 # ---- weekly NFL waiver wire (Wednesday morning)
 WW_CSS = """
-.ww{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
-.wr{display:grid;grid-template-columns:56px 1fr 170px 92px;align-items:center;gap:12px;background:rgba(255,255,255,.06);border-radius:12px;padding:8px 12px}
+.ww{display:grid;grid-template-columns:1fr;gap:8px;margin-top:12px}
+.wr{display:grid;grid-template-columns:56px 1fr 190px 110px;align-items:center;gap:12px;background:rgba(255,255,255,.06);border-radius:12px;padding:8px 12px}
 .wr img{width:56px;height:56px;border-radius:50%;object-fit:cover;object-position:top;background:#1d2436}
 .wr b{display:block;font-size:19px;font-weight:900}.wr small{font-size:13.5px;color:#aab3c5;font-weight:700}
 .sp{display:flex;align-items:flex-end;gap:5px;height:44px}.sp i{width:30px;border-radius:4px 4px 0 0;background:linear-gradient(180deg,#7ee2a8,#1faa59);
@@ -8004,7 +8039,7 @@ def waiver_html(done_week, next_week):
             f"<div class='hl'><div class='h1'>Best free agents right now: {H.escape(allp[top[0][0]].get('full_name', ''))} leads the way</div>"
             f"<div class='h2'>Unowned in the league · weeks {wks[0]}–{wks[-1]} in your scoring (bars) + week {next_week} projection</div></div>"
             f"<div class='ww'>{''.join(cells)}</div>")
-    return _card("--a:#1faa59;--h:#5b7bd5", body, None, HL_CSS + WW_CSS + "body,.card{width:1300px!important}", width=1300)
+    return _card("--a:#1faa59;--h:#5b7bd5", body, None, HL_CSS + WW_CSS + "body,.card{width:1000px!important}", width=1000)
 
 
 def maybe_waivers(st):
@@ -8039,6 +8074,151 @@ def maybe_daily_race(st):
         except Exception as ex:  # noqa: BLE001
             _log_plain(f"{fn.__name__} skipped: {ex}")
     return _maybe_daily_race_extras(st)
+
+
+# ------------------------------------------------ landscape moment cards: TD / FG / game-changer go wide (scoreline on top,
+# players on the left, fantasy impact on the right) so they read in Discord without opening
+
+MOMENT_W = 1000
+LSX_CSS = (f"body,.card{{width:{MOMENT_W}px!important}}"
+           ".lsx{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px;align-items:start}"
+           ".lsx>div>*:first-child{margin-top:0!important}"
+           ".lsx .pair{grid-template-columns:1fr!important}"
+           ".lsx .rcol .cv{margin-top:0!important;margin-bottom:10px}"
+           ".lsx .rcol .imp{margin-top:0!important}"
+           ".lsx .lcol>*+*{margin-top:10px}"
+           ".lsx .im{grid-template-columns:18px minmax(0,1fr) auto auto!important;row-gap:3px!important;column-gap:16px!important}"
+           ".lsx .im>*{grid-row:1}.lsx .im>:nth-child(1){grid-column:1}.lsx .im>:nth-child(2){grid-column:2}"
+           ".lsx .im>:nth-child(3){grid-column:2/-1;grid-row:2;font-size:13.5px;color:#cfd5e1}"
+           ".lsx .im>:nth-child(4){grid-column:3}.lsx .im>:nth-child(5){grid-column:4}"
+           ".lsx .im .who5{font-size:16px!important}")
+
+
+def _div_end(h, start):
+    """Index just after the </div> that closes the <div ...> opening at start."""
+    depth, i = 0, start
+    while True:
+        o, c = h.find("<div", i), h.find("</div>", i)
+        if c < 0:
+            return -1
+        if 0 <= o < c:
+            depth, i = depth + 1, o + 4
+        else:
+            depth, i = depth - 1, c + 6
+            if depth == 0:
+                return i
+
+
+def _moment_landscape(html_text):
+    try:
+        if "class='lsx'" in html_text or re.search(r"body,\.card\{width:\d+px", html_text):
+            return html_text
+        s = html_text.find("<div class='sbx'>")
+        tail = html_text.rfind("</div></div><script>")
+        if s < 0 or tail < 0:
+            return html_text
+        e = _div_end(html_text, s)
+        if e < 0 or e > tail:
+            return html_text
+        rest = html_text[e:tail]
+        cut = min([k for k in (rest.find("<div class='cv'>"), rest.find("<div class='imp'>")) if k >= 0], default=-1)
+        if cut <= 0 or not rest[:cut].strip():
+            return html_text
+        block = f"<div class='lsx'><div class='lcol'>{rest[:cut]}</div><div class='rcol'>{rest[cut:]}</div></div>"
+        html_text = html_text[:e] + block + html_text[tail:]
+        return html_text.replace("</style>", LSX_CSS + "</style>", 1)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"landscape layout skipped: {ex}")
+        return html_text
+
+
+OT_WIDE_CSS = ("body,.card{width:1440px!important}"
+               ".otg{display:grid;grid-template-columns:1.08fr 1fr;gap:26px;align-items:center;margin-bottom:14px}"
+               ".otg .otw{font-size:122px!important;margin-top:6px!important}"
+               ".otg .otl{margin-top:0!important}.otg .otv{margin-top:12px!important}")
+RACE_WIDE_CSS = ("body,.card{width:1260px!important}"
+                 ".cmp{grid-template-columns:1fr 1fr 1fr!important;gap:6px 14px!important}"
+                 ".cm{grid-template-columns:minmax(0,1fr) 160px minmax(0,1fr)!important;gap:8px!important}")
+
+
+def _shape_more(html_text):
+    """Overtime alarm card: hero on the left, what's on the line on the right. Playoff race: 3-across matchups."""
+    try:
+        if "<div class='otw'" in html_text and "<div class='otl'>" in html_text and "class='otg'" not in html_text:
+            a = html_text.find("<div class='otw'")
+            b = html_text.find("<div class='otl'>")
+            e = _div_end(html_text, b)
+            if 0 <= a < b < e:
+                html_text = (html_text[:a] + "<div class='otg'><div>" + html_text[a:b] + "</div>" + html_text[b:e] + "</div>"
+                             + html_text[e:])
+                return html_text.replace("</style>", OT_WIDE_CSS + "</style>", 1)
+        if "<div class='rt'>" in html_text and "<div class='cmp'>" in html_text and "body,.card{width:1100px" in html_text:
+            return html_text.replace("</style>", RACE_WIDE_CSS + "</style>", 1).replace(
+                "body,.card{width:1100px", "body,.card{width:1260px")
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"wide layout skipped: {ex}")
+    return html_text
+
+
+_render_card_tall = render_card
+_render_anim_tall = render_anim
+
+
+def render_card(html_text, width=None):
+    return _render_card_tall(_shape_more(_moment_landscape(html_text)), width)
+
+
+def render_anim(html_text, width=None):
+    return _render_anim_tall(_shape_more(_moment_landscape(html_text)), width)
+
+
+
+# ------------------------------------------------ daily race: remember the message, and re-do a posted one in place
+
+_maybe_daily_race_keepid = maybe_daily_race
+
+
+def _race_embed(ctx, prev):
+    ol, live = ctx["ol"], ctx["live"]
+    mover = max(ol, key=lambda r: abs(ol[r]["po"] - prev.get(str(r), ol[r]["po"])))
+    d = ol[mover]["po"] - prev.get(str(mover), ol[mover]["po"])
+    fav = max(ol, key=lambda r: ol[r]["title"])
+    return {"author": AU_NFL(), "color": 0xD97757,
+            "title": (f"Biggest mover: {live['rosters'][mover]['manager']} {'▲' if d >= 0 else '▼'}{abs(d):.0f} "
+                      f"to {ol[mover]['po']:.0f}%") if abs(d) >= 1 else "Playoff race update",
+            "description": f"🏆 Title favourite: **{live['rosters'][fav]['manager']}** {ol[fav]['title']:.0f}%"}
+
+
+def redo_race_post(st, message_id):
+    """Rebuild today's playoff race card and swap it into an already-posted message (no new post)."""
+    events = fetch("football/nfl/scoreboard").get("events", [])
+    ctx = nfl_ctx(st, events)
+    if not ctx:
+        return False
+    prev = st.get("race_prev_snap") or st.get("race_snap") or {}
+    html_text = playoff_race_html(ctx, prev, datetime.now(UK).strftime("%a %-d %b"))
+    png = render_card(_inject_headline(html_text, _race_embed(ctx, prev)))
+    if not png:
+        return False
+    return discord_edit(NFL_HOOK, message_id, png, "race.png")
+
+
+def maybe_daily_race(st):
+    before = st.get("race_day")
+    snap_before = st.get("race_snap")
+    _maybe_daily_race_keepid(st)
+    if st.get("race_day") != before and _LAST_MSG.get("id"):          # a new race post just went out
+        st["race_msg"] = {"id": _LAST_MSG["id"], "day": st["race_day"]}
+        st["race_prev_snap"] = snap_before or {}
+    want = str(((CONFIG["nfl"].get("daily_race") or {}).get("redo_message_id")) or "")
+    if want and st.get("race_redo_done") != want and NFL_HOOK:
+        tries = st.setdefault("race_redo_tries", {})
+        if tries.get(want, 0) < 3:
+            tries[want] = tries.get(want, 0) + 1
+            ok = redo_race_post(st, want)
+            if ok or ok is None:                                         # None = message gone: nothing to fix
+                st["race_redo_done"] = want
+                log(f"daily race message {want} re-done in place" if ok else f"race message {want} not found")
 
 
 # ===================================================================== main

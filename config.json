@@ -44,7 +44,8 @@
     "daily_race": {
       "enabled": true,
       "hour_uk": 14,
-      "skip_weekday": "Tuesday"
+      "skip_weekday": "Tuesday",
+      "redo_message_id": "1575512639180771409"
     },
     "spoiler_delay_seconds": 60,
     "td_card_v5": true,
