@@ -1138,6 +1138,14 @@ def nfl_headshot(pid):
     return f"https://a.espncdn.com/i/headshots/nfl/players/full/{pid}.png" if pid and str(pid).isdigit() else ""
 
 
+def pid_attr(pid):
+    """data-pid='<sleeper id>' for a player photo, so the rank badge never has to guess who it is."""
+    try:
+        return f" data-pid='{pid}'" if pid and re.fullmatch(r"\w+", str(pid)) else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def team_cols(away, home):
     ca, ch = bright(away["team"].get("color")), bright(home["team"].get("color"))
     if sum(abs(x - y) for x, y in zip(hex_rgb(ca), hex_rgb(ch))) < 120:
@@ -2284,14 +2292,14 @@ def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=7):
         m = mu.get(r["owner"])
         mt = (f"<div class='mt'>proj <b class='{'w' if m[0] >= m[2] else 'l'}'>{m[0]:.1f}</b> – {m[2]:.1f}<br>vs {H.escape(m[1])}</div>"
               if m else "")
-        prs.append(f"<div class='pr2{' lead' if i == 0 else ''}'><img src='{H.escape(nfl_headshot(r.get('id')))}'>"
+        prs.append(f"<div class='pr2{' lead' if i == 0 else ''}'><img src='{H.escape(nfl_headshot(r.get('id')))}'{pid_attr(_sl_pid(r['name'], r.get('team', '')))}>"
                    f"<div><div class='nm2'>{H.escape(r['name'])}<span>{r['team']} · {r.get('pos', '')}</span></div>"
                    f"<div class='ln'>{H.escape(r['line'])}</div></div>"
                    f"{pj_box(r['pts'], pregame_proj('nfl', r, live), r['elite'], game_frac(event, 'nfl'))}"
                    f"<div><div class='ow'>{H.escape(r['owner'])}</div>"
                    f"<span class='bd {'st' if r['starting'] else 'bn'}'>{'STARTING' if r['starting'] else 'BENCH'}</span></div>{mt}</div>")
     if fa and fa["pts"] >= 12:
-        prs.append(f"<div class='pr2'><img src='{H.escape(nfl_headshot(fa.get('id')))}'>"
+        prs.append(f"<div class='pr2'><img src='{H.escape(nfl_headshot(fa.get('id')))}'{pid_attr(_sl_pid(fa['name'], fa.get('team', '')))}>"
                    f"<div><div class='nm2'>{H.escape(fa['name'])}<span>{fa['team']} · {fa.get('pos', '')}</span></div>"
                    f"<div class='ln'>{H.escape(fa['line'])}</div></div>{pj_box(fa['pts'], pregame_proj('nfl', fa, live), False, game_frac(event, 'nfl'))}"
                    f"<div><div class='ow'>Nobody</div><span class='bd fa'>FREE AGENT</span></div><div class='mt'>waiver pickup?</div></div>")
@@ -3852,7 +3860,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
                else "<b>Unrostered</b> — free agent")
         tot = f"<span>now <em>{fmt_pts(now)}</em> pts</span>" if now is not None else ""
         hot = " hot" if pj and now is not None and now >= pj else ""
-        return o, (f"<div class='pp5{hot}'><img src='{H.escape(hs)}'><div><div class='role'>{role}</div>"
+        return o, (f"<div class='pp5{hot}'><img src='{H.escape(hs)}'{pid_attr(_sl_pid(name, abbr))}><div><div class='role'>{role}</div>"
                    f"<div class='nm'>{H.escape(name)}</div><div class='gn'><b>+{gain_:.1f}</b>{tot}</div>{bar}"
                    f"<div class='ow3'>{own}</div></div></div>")
 
@@ -4027,7 +4035,7 @@ def nfl_fg_html(event, play, summary, live, ol, base):
     own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
            else "<b>Unrostered</b> — free agent")
     hot = " hot" if pj and now is not None and now >= pj else ""
-    panel = (f"<div class='pair one'><div class='pp5{hot}'><img src='{H.escape(nfl_headshot(kid) or kt['team'].get('logo', ''))}'><div>"
+    panel = (f"<div class='pair one'><div class='pp5{hot}'><img src='{H.escape(nfl_headshot(kid) or kt['team'].get('logo', ''))}'{pid_attr(_sl_pid(kicker, abbr))}><div>"
              f"<div class='role'>KICKER · {abbr}</div><div class='nm'>{H.escape(kicker)}</div>"
              f"<div class='gn'><b>+{gain:g}</b>{f'<span>now <em>{fmt_pts(now)}</em> pts</span>' if now is not None else ''}</div>"
              f"{bar}<div class='ow3'>{own}</div></div></div></div>")
@@ -9751,14 +9759,14 @@ def ribbon_merge(html_text):
 _RANKS = {}
 
 RANK_CSS = """
-.pp5,.pr2,.as{position:relative}
+.pp5,.pr2,.as,.pp2,.pog{position:relative}
 .phw{position:relative;display:block;width:fit-content;line-height:0}
 .pr2>.phw{grid-column:1;grid-row:1/3}.pr2>.phw>img{width:58px!important;height:58px!important}
 .prk{position:absolute;left:50%;bottom:-12px;transform:translateX(-50%);z-index:6;font-style:normal;font-weight:900;font-size:16px;
  line-height:22px;height:24px;width:68px;text-align:center;letter-spacing:.3px;border-radius:999px;box-sizing:border-box;
  background:#1f2937;color:#f3f4f6;border:1.5px solid #6b7280;white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums;
  text-shadow:none}
-.as .prk{width:58px;font-size:14px;height:22px;line-height:20px;bottom:-10px}
+.as .prk,.pog .prk{width:58px;font-size:14px;height:22px;line-height:20px;bottom:-10px}
 .prk.r12{background:linear-gradient(180deg,#f8fafc,#cbd5e1);color:#0f172a;border-color:#f8fafc}
 .prk.r5{background:linear-gradient(135deg,#6d28d9,#a855f7 60%,#e879f9);color:#fff;border-color:#f0abfc;
  box-shadow:0 0 12px rgba(192,132,252,.85)}
@@ -9815,9 +9823,52 @@ def _rank_badge(pos, rk):
     return f"<em class='prk {tier}'>{mark}{pos}{rk}</em>"
 
 
+def _badge_pid(sport, blk, img, name_re, ranks, by_espn, by_name):
+    """Sleeper id of the player in one card block: data-pid, then the photo URL, then the name (+ team if shown)."""
+    m = re.search(r"data-pid='(\w+)'", blk)
+    if m:
+        return m.group(1)
+    if img:
+        src = img.group(1)
+        m = re.search(r"/players/thumb/(\w+)\.", src)
+        if m:
+            return m.group(1)
+        m = re.search(r"/headshots/(?:nfl|nba)/players/full/(\d+)\.", src)
+        if m and by_espn.get(m.group(1)):
+            return by_espn[m.group(1)]
+    nm = re.search(name_re, blk)
+    if not nm:
+        return None
+    t = H_unescape(nm.group(1)).strip()
+    if t.endswith(" D/ST") and sport == "nfl":
+        tm = sl_team(t.split()[0])
+        return tm if tm in ranks else None
+    hits = by_name.get(name_key(t)) or []
+    if len(hits) == 1:
+        return hits[0]
+    if hits:                                                # two players with one name: use the team on the card
+        teams = set(re.findall(r"\b([A-Z]{2,4})\b", re.sub(r"<[^>]+>", " ", blk)))
+        teams |= {sl_team(x) for x in teams}
+        players = sleeper_players(sport)
+        on = [pid for pid in hits if (players.get(pid) or {}).get("team") in teams]
+        return on[0] if len(on) == 1 else None
+    return None
+
+
+def H_unescape(t):
+    import html as H
+    return H.unescape(t)
+
+
+_BADGE_BLOCKS = (("pp5", r"class='nm(?: [^']*)?'>([^<]+)"), ("pr2", r"class='nm2(?: [^']*)?'>([^<]+)"),
+                 ("pp2", r"class='nm(?: [^']*)?'>([^<]+)"), ("pog", r"<b>([^<]+)</b>"), ("as", r"<b>([^<]+)</b>"))
+
+
 def rank_badges(html_text):
     try:
-        sport = "nba" if "class='nbar'" in html_text else "nfl"
+        sport = "nba" if ("class='nbar'" in html_text or "/nba/" in html_text) else "nfl"
+        if "data-pid=" not in html_text and not any(f"<div class='{c}" in html_text for c, _ in _BADGE_BLOCKS):
+            return html_text
         ranks = position_ranks(sport)
         if not ranks:
             return html_text
@@ -9827,35 +9878,26 @@ def rank_badges(html_text):
             for pid, p in players.items():
                 if p.get("espn_id"):
                     by_espn[str(p["espn_id"])] = pid
-        by_name = {}
-        for pid in ranks:
-            p = players.get(pid) or {}
-            if p.get("full_name"):
-                by_name.setdefault(name_key(p["full_name"]), pid)
+        by_name = _RANKS.get(f"{sport}-names")
+        if not by_name or by_name[0] != id(ranks):
+            names = {}
+            for pid in ranks:
+                p = players.get(pid) or {}
+                if p.get("full_name"):
+                    names.setdefault(name_key(p["full_name"]), []).append(pid)
+            _RANKS[f"{sport}-names"] = by_name = (id(ranks), names)
+        by_name = by_name[1]
         found = False
-        for cls, name_re in (("pp5", r"class='nm'>([^<]+)"), ("pr2", r"class='nm2'>([^<]+)"), ("as", r"<b>([^<]+)</b>")):
-            out, i = [], 0
+        for cls, name_re in _BADGE_BLOCKS:
+            out = []
             for m in re.finditer(r"<div class='%s[ '][^>]*>" % cls, html_text):
                 e = _div_end(html_text, m.start())
                 blk = html_text[m.start():e]
-                pid = None
                 img = re.search(r"<img[^>]*src='([^']+)'[^>]*>", blk)
-                if img:
-                    mm = re.search(r"/players/thumb/(\w+)\.", img.group(1)) or None
-                    if mm:
-                        pid = mm.group(1)
-                    else:
-                        mm = re.search(r"/headshots/(?:nfl|nba)/players/full/(\d+)\.", img.group(1))
-                        pid = by_espn.get(mm.group(1)) if mm else None
-                nm = re.search(name_re, blk)
-                if not pid and nm:
-                    t = nm.group(1).strip()
-                    if t.endswith(" D/ST") and sport == "nfl":
-                        tm = sl_team(t.split()[0])
-                        pid = tm if tm in ranks else None
-                    else:
-                        pid = by_name.get(name_key(t))
-                if pid in ranks and "class='prk" not in blk and img:
+                if not img or "class='prk" in blk:
+                    continue
+                pid = _badge_pid(sport, blk, img, name_re, ranks, by_espn, by_name)
+                if pid in ranks:
                     pos, rk = ranks[pid]
                     out.append((m.start() + img.start(), m.start() + img.end(), _rank_badge(pos, rk)))
             for a0, a1, badge in sorted(out, reverse=True):          # badge centred on the photo's bottom edge
@@ -9893,7 +9935,7 @@ body,.card{width:1100px!important}
 .awt .x{font-size:19px;color:#dbe0ea;margin-top:3px;line-height:1.25}
 .awt .x b{color:#fff}
 .awt.pow{background:linear-gradient(120deg,rgba(255,179,71,.22),rgba(255,255,255,.05))}
-.awt .prk{position:static!important;display:inline-block;vertical-align:middle;margin-left:10px}
+.awt .prk{position:static!important;transform:none!important;display:inline-block;vertical-align:middle;margin-left:10px}
 .vb{display:flex;flex-direction:column;gap:6px;margin-top:12px;background:rgba(9,12,22,.55);border-radius:12px;padding:10px 16px}
 .vb div{font-size:20px;color:#dbe0ea;line-height:1.3}.vb b{color:#fff}.vb .c{color:#ff9a9e;font-weight:900}
 .st3{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:16px;margin-top:12px}
@@ -9950,7 +9992,8 @@ body,.card{width:1100px!important}
 
 
 def _rd_card(sport, body, css_vars, label):
-    body = re.sub(r"<span class='m'>([^<]{13,})</span>", r"<span class='m' style='font-size:18px'>\1</span>", body)
+    body = re.sub(r"<span class='m'>([^<]{15,})</span>", r"<span class='m' style='font-size:16px;letter-spacing:-.2px'>\1</span>", body)
+    body = re.sub(r"<span class='m'>([^<]{12,})</span>", r"<span class='m' style='font-size:18px'>\1</span>", body)
     body = re.sub(r"<div style='min-width:0'><b>([^<]{11,})</b>", r"<div style='min-width:0'><b style='font-size:18px'>\1</b>", body)
     html_text = _card(css_vars, body, None, HL_CSS + RD_CSS + RANK_CSS, width=1100)
     return _nba_theme(html_text, None, label) if sport == "nba" else html_text
@@ -10180,6 +10223,44 @@ def bracket_v2_html(sport, settings, br, rec, odds, stage):
     if br["champ"]:
         html_text = html_text.replace("<div class='card'", "<div class='card shc'", 1).replace("</style>", SH_CSS + "</style>", 1)
     return html_text
+
+
+# ---- live: the recap / playoff posts use the redesigned cards; the old ones are only a fallback if a new one fails
+#      (config "recap_layout": "classic" goes back to the old cards)
+_recap_wide_classic = recap_wide_html
+_playoff_picture_classic = playoff_picture_html
+_bracket_classic = bracket_html
+
+
+def _v2_layout():
+    return CONFIG.get("recap_layout", "v2") == "v2"
+
+
+def recap_wide_html(sport, week, live, settings):
+    if _v2_layout():
+        try:
+            return recap_v2_html(sport, week, live, settings)
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"new recap layout failed, using the classic one: {ex}")
+    return _recap_wide_classic(sport, week, live, settings)
+
+
+def playoff_picture_html(sport, settings, rec, status, changes, odds, week):
+    if _v2_layout():
+        try:
+            return playoff_picture_v2_html(sport, settings, rec, status, changes, odds, week)
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"new playoff picture layout failed, using the classic one: {ex}")
+    return _playoff_picture_classic(sport, settings, rec, status, changes, odds, week)
+
+
+def bracket_html(sport, settings, br, rec, odds, stage):
+    if _v2_layout():
+        try:
+            return bracket_v2_html(sport, settings, br, rec, odds, stage)
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"new bracket layout failed, using the classic one: {ex}")
+    return _bracket_classic(sport, settings, br, rec, odds, stage)
 
 
 _render_card_small = render_card
