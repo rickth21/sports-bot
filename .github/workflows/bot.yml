@@ -32,6 +32,9 @@ jobs:
       - name: Emoji font for the image cards
         run: (sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-color-emoji) > /dev/null 2>&1 || true
 
+      - name: Image library for the animated cards
+        run: python3 -m pip install --quiet --user pillow || true
+
       - name: Test message
         if: ${{ inputs.test }}
         run: python3 bot.py --test
