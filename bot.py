@@ -7200,7 +7200,8 @@ def maybe_selftest(st):
         ok = False
         lines.append(f"⚠️ Animated cards take {build['secs']:.0f}s here: posts could land a few seconds late. "
                      f"Raise PREP_SECONDS or lower ANIM_FRAMES.")
-    head = "✅ **Self-test passed** on GitHub's server" if ok else "⚠️ **Self-test found a problem**"
+    where = "GitHub's server" if os.environ.get("GITHUB_ACTIONS") == "true" else "the Oracle server"
+    head = f"✅ **Self-test passed** on {where}" if ok else "⚠️ **Self-test found a problem**"
     msg = f"{head} (code {ver})\n" + "\n".join(lines)
     _POSTER["name"] = "Donald 🩺"
     _IN_ALERT["on"] = True
