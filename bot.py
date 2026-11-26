@@ -2277,7 +2277,7 @@ def recap_card_html(sport, week, live, settings):
         x = rec[r]
         wl = f"{x['w']}-{x['l']}" + (f"-{x['t']}" if x["t"] else "")
         po, ti = odds[r]
-        trs.append(f"<div class='tr{' cut' if i == n_po else ''}'><span class='rk'>{i}</span>"
+        trs.append(f"<div class='tr{' cut' if i == n_po else ''}'><span class='rk5'>{i}</span>"
                    f"<span class='m'>{H.escape(names.get(r, '?'))}</span><span>{wl}</span><span>{x['pf']:.0f}</span>"
                    f"<span class='o'><span>{po:.0f}%</span>{bar(po, 'linear-gradient(90deg,#d97757,#f2a77f)')}</span>"
                    f"<span class='o'><span>{ti:.0f}%</span>{bar(ti * 2.5, 'linear-gradient(90deg,#e8b13c,#ffe08a)')}</span></div>")
@@ -2401,6 +2401,20 @@ FAN_CSS = """
 .gl .f1{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#cfd5e1}
 .gl .f1 b{color:#fff}.gl .f1 .chipx{background:#1faa59;color:#fff;border-radius:5px;padding:1px 6px;font-weight:800;margin:0 4px}
 .gl .f1 .m{color:#9aa3b5}
+.gl{height:auto!important;row-gap:8px!important;padding:8px 12px!important}
+.gl .tp{grid-column:1/-1;display:flex;flex-direction:column;gap:4px;margin-top:2px}
+.tpr{display:grid;grid-template-columns:24px 196px 56px 232px 1fr;align-items:center;gap:10px;font-size:14px;
+ background:rgba(255,255,255,.045);border-radius:8px;padding:5px 10px}
+.tpr.one{background:rgba(255,179,71,.12)}
+.tpr .rk5{text-align:center;font-weight:900;color:#c3cad8}
+.tpr .nm5{font-weight:900;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tpr .nm5 small{font-size:11px;color:#a89a8a;font-weight:800;margin-left:5px}
+.tpr .fp5{text-align:center;font-weight:900;color:#0d1220;background:#7ee2a8;border-radius:6px;padding:1px 0}
+.tpr.one .fp5{background:linear-gradient(90deg,#ffd166,#ffb347)}
+.tpr .ow5{font-weight:800;color:#e8e2da;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tpr .ow5 em{font-style:normal;font-size:10px;letter-spacing:1px;margin-left:6px;padding:1px 5px;border-radius:4px}
+.tpr .ow5 em.s{background:rgba(31,170,89,.25);color:#7ee2a8}.tpr .ow5 em.b{background:rgba(255,255,255,.1);color:#a89a8a}
+.tpr .ln5{font-size:12.5px;color:#c9bfb3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 """
 
 
@@ -2498,22 +2512,38 @@ def nba_batch_html(mode, events, summaries, live, title):
         a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
         rows = nba_league_rows(summ) if summ else []
         owned = [r for r in rows if r["owner"]]
-        f1 = "<span class='m'>No league players</span>"
-        if owned:
-            t = owned[0]
-            f1 = (f"⭐ <b>{H.escape(t['name'])}</b><span class='chipx'>{fmt_pts(t['fp'])}</span>"
-                  f"<span class='m'>{H.escape(t['owner'])}{'' if t['starting'] else ' (bench)'}</span>")
-            if len(owned) > 1:
-                s2 = owned[1]
-                f1 += f" <span class='m'>· {H.escape(short_name(s2['name']))} {fmt_pts(s2['fp'])}</span>"
+        starters_fp = sum(r["fp"] for r in owned if r["starting"])
+        f1 = (f"<span class='m'><b>{len(owned)}</b> league players · <b>{fmt_pts(starters_fp)}</b> fpts from starters</span>"
+              if owned else "<span class='m'>No league players</span>")
+        tops = []
+        for i, r in enumerate(owned[:3]):
+            raw = r.get("raw") or {}
+            bits = [f"{raw.get('pts', 0)} pts", f"{raw.get('reb', 0)} reb", f"{raw.get('ast', 0)} ast"]
+            for k, lab in (("stl", "stl"), ("blk", "blk")):
+                if raw.get(k):
+                    bits.append(f"{raw[k]} {lab}")
+            if raw.get("tpm", 0) >= 3:
+                bits.append(f"{raw['tpm']} 3pm")
+            tops.append(f"<div class='tpr{' one' if i == 0 else ''}'><span class='rk5'>{'⭐' if i == 0 else i + 1}</span>"
+                        f"<span class='nm5'>{H.escape(r['name'])}<small>{H.escape(r.get('team', ''))}</small></span>"
+                        f"<span class='fp5'>{fmt_pts(r['fp'])}</span>"
+                        f"<span class='ow5'>{H.escape(r['owner'])}<em class='{'s' if r['starting'] else 'b'}'>"
+                        f"{'STARTING' if r['starting'] else 'BENCH'}</em></span>"
+                        f"<span class='ln5'>{' · '.join(bits)}</span></div>")
+        tp = f"<div class='tp'>{''.join(tops)}</div>" if tops else ""
         stt = "FINAL" if e["status"]["type"].get("completed") else game_status(e)
         lines.append(f"<div class='gl'><div class='sc2'><img src='{H.escape(away['team'].get('logo', ''))}'>"
                      f"<span>{away['team']['abbreviation']}</span><b class='r' style='{'' if a_s > h_s else 'color:#8b95a8'}'>{a_s}</b>"
                      f"<span>–</span><b style='{'' if h_s > a_s else 'color:#8b95a8'}'>{h_s}</b>"
                      f"<span class='r'>{home['team']['abbreviation']}</span><img src='{H.escape(home['team'].get('logo', ''))}'></div>"
-                     f"<div class='st {'fin' if stt == 'FINAL' else 'live'}'>{H.escape(stt)}</div><div class='f1'>{f1}</div></div>")
+                     f"<div class='st {'fin' if stt == 'FINAL' else 'live'}'>{H.escape(stt)}</div><div class='f1'>{f1}</div>{tp}</div>")
     lg = ""
-    if live and live["pairs"]:
+    if live and live["pairs"] and CONFIG["nba"].get("race_panel", False):
+        try:
+            lg = nba_race_html(events, summaries, live)
+        except Exception as ex:  # noqa: BLE001
+            log(f"NBA race panel unavailable: {ex}")
+    if not lg and live and live["pairs"] and CONFIG["nba"].get("matchup_panel", False):
         cells = []
         for ra, rb in live["pairs"]:
             A, B = live["rosters"][ra], live["rosters"][rb]
@@ -5343,6 +5373,133 @@ def proj_bar(now, pj, rem=0.0):
     badge = (f"💥 SMASHED PROJ · +{over:.1f}" if now >= 1.5 * pj else f"🔥 BEAT PROJ · +{over:.1f}")
     return (f"<div class='pb5 win'><div class='bar'><div style='width:100%'></div></div>"
             f"<span class='beat'>{badge}</span></div>{upd}")
+
+
+# ------------------------------------------------ NBA race panel: tonight's swing, games left, projected finals
+
+NBA_ESPN_TO_SLEEPER = {"GS": "GSW", "NY": "NYK", "NO": "NOP", "SA": "SAS", "UTAH": "UTA", "WSH": "WAS"}
+_NBA_PROJ = {}
+
+RACE5_CSS = """
+.rc{margin-top:10px;background:rgba(16,11,7,.82);border-radius:14px;padding:10px 16px}
+.rc .ih{font-size:11px;letter-spacing:1.6px;font-weight:900;color:#ffb347;margin-bottom:4px}
+.rc .hdr,.rc .rr{display:grid;grid-template-columns:1fr 128px 1fr 96px 150px 108px;align-items:center;gap:10px}
+.rc .hdr{font-size:10px;letter-spacing:1.3px;font-weight:800;color:#a89a8a;padding:2px 0 6px}
+.rc .rr{padding:7px 0;border-top:1px solid rgba(255,255,255,.07);font-size:14px;color:#e8e2da}
+.rc .nm{font-weight:900;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rc .nm.r{text-align:right}.rc .nm small{display:block;font-size:11.5px;font-weight:800;color:#7ee2a8}
+.rc .nm small.z{color:#8b7f72}
+.rc .sc{text-align:center;font-weight:900;font-size:16px;font-variant-numeric:tabular-nums}.rc .sc .lo{color:#8b7f72}
+.rc .gl{text-align:center;font-weight:900;font-variant-numeric:tabular-nums}.rc .gl .more{color:#7ee2a8}.rc .gl .less{color:#ff9a9e}
+.rc .pj{text-align:center;font-variant-numeric:tabular-nums;font-weight:800}.rc .pj b{color:#fff}
+.rc .wn{display:flex;align-items:center;gap:6px;justify-content:flex-end;font-weight:900}
+.rc .wn .bar{width:54px;height:7px;border-radius:999px;background:rgba(255,255,255,.12);overflow:hidden}
+.rc .wn .bar div{height:7px;background:linear-gradient(90deg,#ee6730,#ffb347)}
+.rc .flip{background:#ffd166;color:#1b1305;border-radius:5px;padding:0 5px;font-size:10px;letter-spacing:.8px}
+.rc .note{font-size:11px;color:#a89a8a;margin-top:6px}
+"""
+
+
+def nba_projections(week):
+    """Sleeper per-game projections scored with the league's settings: {pid: fpts per game}."""
+    if week in _NBA_PROJ:
+        return _NBA_PROJ[week]
+    out = {}
+    try:
+        season = fetch_url(f"{SLEEPER}/state/nba").get("season")
+        sc = league_scoring("nba")
+        for r in fetch_url(f"https://api.sleeper.app/projections/nba/{season}/{week}?season_type=regular") or []:
+            s = r.get("stats") or {}
+            gp = float(s.get("gp") or 1) or 1
+            out[str(r.get("player_id"))] = sum(float(v or 0) * float(sc[k]) for k, v in s.items()
+                                               if k in sc and isinstance(v, (int, float))) / gp
+    except Exception as e:  # noqa: BLE001
+        log(f"NBA projections unavailable: {e}")
+    _NBA_PROJ[week] = out
+    return out
+
+
+def nba_games_left():
+    """Games still to play this Sleeper week (Mon-Sun, US Eastern) per Sleeper team code; live games count by time left."""
+    today = datetime.now(ET).date()
+    end = today + timedelta(days=(6 - today.weekday()))
+    left = {}
+    d = today
+    while d <= end:
+        for e in fetch(f"basketball/nba/scoreboard?dates={d:%Y%m%d}").get("events", []):
+            st = e["status"]["type"]["state"]
+            if st == "post":
+                continue
+            share = 1.0
+            if st == "in":
+                per = e["status"].get("period", 1)
+                share = max(0.0, 1 - ((per - 1) * 720 + (720 - clock_secs(e))) / 2880)
+            for tm in teams_of(e):
+                ab = NBA_ESPN_TO_SLEEPER.get(tm["team"]["abbreviation"], tm["team"]["abbreviation"])
+                left[ab] = left.get(ab, 0.0) + share
+        d += timedelta(days=1)
+    return left
+
+
+def nba_race_html(events, summaries, live):
+    import html as H
+    from math import erf, sqrt
+    players = sleeper_players("nba")
+    proj = nba_projections(live["week"])
+    left = nba_games_left()
+    tonight = {}
+    for s in summaries:
+        for r in (nba_league_rows(s) if s else []):
+            if r["owner"] and r["starting"]:
+                tonight[r["owner"]] = tonight.get(r["owner"], 0.0) + r["fp"]
+
+    def outlook(rid):
+        x = live["rosters"][rid]
+        games = pts = 0.0
+        for p in x["starters"]:
+            pp = players.get(p) or {}
+            if pp.get("injury_status") in ("Out", "IR"):
+                continue
+            g = left.get(pp.get("team"), 0.0)
+            games += g
+            pts += g * proj.get(str(p), 0.0)
+        return games, x["points"] + pts
+
+    rows = []
+    for ra, rb in live["pairs"]:
+        A, B = live["rosters"][ra], live["rosters"][rb]
+        ga, pa = outlook(ra)
+        gb, pb = outlook(rb)
+        sd = 10.0 * sqrt(max(ga + gb, 0.5))
+        wa = 100 * 0.5 * (1 + erf((pa - pb) / (sd * sqrt(2))))
+        rows.append((abs(wa - 50), A, B, ga, gb, pa, pb, wa))
+    rows.sort(key=lambda z: z[0])
+    out = []
+    for _, A, B, ga, gb, pa, pb, wa in rows:
+        fav_a = wa >= 50
+        w = wa if fav_a else 100 - wa
+        fav = A if fav_a else B
+        ta, tb = tonight.get(A["manager"], 0.0), tonight.get(B["manager"], 0.0)
+        lead_a = A["points"] >= B["points"]
+        flip = " <span class='flip'>COIN FLIP</span>" if w < 60 else ""
+        out.append(
+            f"<div class='rr'><div class='nm'>{H.escape(A['manager'])}<small class='{'' if ta else 'z'}'>"
+            f"{'+' + fmt_pts(ta) + ' tonight' if ta else 'nobody tonight'}</small></div>"
+            f"<div class='sc'><span class='{'' if lead_a else 'lo'}'>{A['points']:.1f}</span> – "
+            f"<span class='{'lo' if lead_a else ''}'>{B['points']:.1f}</span></div>"
+            f"<div class='nm r'>{H.escape(B['manager'])}<small class='{'' if tb else 'z'}'>"
+            f"{'+' + fmt_pts(tb) + ' tonight' if tb else 'nobody tonight'}</small></div>"
+            f"<div class='gl'><span class='{'more' if ga > gb + 0.5 else 'less' if ga < gb - 0.5 else ''}'>{ga:.0f}</span>"
+            f" · <span class='{'more' if gb > ga + 0.5 else 'less' if gb < ga - 0.5 else ''}'>{gb:.0f}</span></div>"
+            f"<div class='pj'><b>{pa:.0f}</b> – <b>{pb:.0f}</b></div>"
+            f"<div class='wn'>{H.escape(fav['manager'][:9])} {w:.0f}%{flip}</div></div>")
+    hdr = ("<div class='hdr'><span>MANAGER · TONIGHT</span><span style='text-align:center'>SCORE</span>"
+           "<span style='text-align:right'>MANAGER · TONIGHT</span><span style='text-align:center'>GAMES LEFT</span>"
+           "<span style='text-align:center'>PROJECTED FINAL</span><span style='text-align:right'>FAVOURITE</span></div>")
+    league = CONFIG["nba"].get("league_name", "League")
+    return (f"<div class='rc'><div class='ih'>🏀 {H.escape(league.upper())} · WEEK {live['week']} RACE · CLOSEST FIRST</div>"
+            f"{hdr}{''.join(out)}<div class='note'>Games left = starters' games still to play this week (injured players left out) · "
+            f"projected final = points so far + Sleeper per-game projections</div></div><style>{RACE5_CSS}</style>")
 
 
 # ===================================================================== main
