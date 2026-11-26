@@ -5539,6 +5539,11 @@ def log(*a):
 def watchdog(st):
     """Flag posts that should have gone out by now (prime-time TDs/full-times, NBA full-times)."""
     now = time.time()
+    if ALERT_HOOK and not st.get("alert_hello"):
+        st["alert_hello"] = True
+        _ALERTED.pop("hello", None)
+        alert("✅ Alerts connected. I'll only post here if something goes wrong: an error, a failed Discord post, "
+              "a touchdown or full-time that didn't go out, or the Tuesday accuracy check.", key="hello", every_h=0)
     try:
         for e in fetch("football/nfl/scoreboard").get("events", []):
             g = st.get("nfl", {}).get(e["id"])
