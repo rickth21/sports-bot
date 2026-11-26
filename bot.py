@@ -667,11 +667,15 @@ def post_touchdown(event, play, summary=None):
              f"{h_ab:<4}{h_s:>3}{'  ◀' if team is home else ''}")
     fields.append({"name": "📊 Score", "value": f"```\n{board}\n```", "inline": False})
 
-    fan = []
+    fan, fan_card = [], []
+    import html as _H
     for who in ([td["qb"]] if td.get("qb") else []) + [td["scorer"]]:
         p = player_tonight(summary, who)
         if p:
             fan.append(f"**{p['name']}** — {p['line']} · **{fmt_pts(p['pts'])} fpts**\n↳ {owner_text(p['id'], p['name'])}")
+            o = league_owner(p["id"], p["name"])
+            own = (f"{o['manager']}{' ⭐' if o['starting'] else ' (bench)'}") if o else "unrostered"
+            fan_card.append(f"<b>{_H.escape(p['name'])}</b> {fmt_pts(p['pts'])} fpts · {_H.escape(own)}")
     if fan:
         fields.append({"name": f"🧢 {CONFIG['nfl'].get('league_name', 'League')} — tonight so far",
                        "value": "\n".join(fan)[:1024], "inline": False})
@@ -687,6 +691,26 @@ def post_touchdown(event, play, summary=None):
         "footer": {"text": f"{qtxt} · {clock}  |  {away['team'].get('name') or a_ab} @ {home['team'].get('name') or h_ab}",
                    "icon_url": NFL_LOGO},
     }
+    wp_txt = ""
+    if wp:
+        now, before = wp
+        wp_txt = f"{abbr} {round(now * 100)}%" + ("" if before is None else f" {'▲' if now >= before else '▼'}{abs(round((now - before) * 100))}")
+    drv = drive.get("description") if drive and (drive.get("team") or {}).get("abbreviation", abbr) == abbr else ""
+    png = render_png(td_card_html(event, play, summary, td, tag, qtxt, clock, drv, wp_txt, down_text, fan_card),
+                     880, 362 if fan_card else 292)
+    if png:
+        who = f"{td['qb']} ➜ {td['scorer']}" if td["kind"] == "pass" else td["scorer"]
+        yd = f"{yds}-yd " if yds is not None else ""
+        kind = {"pass": "TD pass", "rush": "TD run", "int": "pick-six"}.get(td["kind"], "TD")
+        embed = {"author": {"name": t.get("displayName", abbr), "icon_url": t.get("logo", "")},
+                 "title": f"{who} · {yd}{kind}",
+                 "description": call or None,
+                 "color": color(t.get("color")),
+                 "image": {"url": "attachment://td.png"}}
+        if not embed["description"]:
+            del embed["description"]
+        content = f"🏈 **TOUCHDOWN {nick.upper()}** · {a_ab} {a_s}–{h_s} {h_ab} · {qtxt} {clock}"
+        return discord(NFL_HOOK, embed, "NFL TD", content=content, files={"td.png": png})
     return discord(NFL_HOOK, embed, "NFL TD")
 
 
@@ -735,98 +759,6 @@ def injury_lines(summary, abbr, limit=4):
             rows.append((0 if pos in skill else 1, rank[st], f"{i['athlete']['displayName']} {pos} ({short[st]})"))
     rows.sort()
     return [r[2] for r in rows[:limit]]
-
-
-def post_nfl_preview(event, summary):
-    away, home = teams_of(event)
-    a, h = away["team"], home["team"]
-    kick = parse_time(event["date"]).astimezone(UK)
-    comp = event["competitions"][0]
-    tv = ", ".join(n for b in comp.get("broadcasts") or [] for n in b.get("names", []))
-    gi = summary.get("gameInfo") or {}
-    venue = (gi.get("venue") or {}).get("fullName") or (comp.get("venue") or {}).get("fullName", "")
-    city = ((gi.get("venue") or {}).get("address") or {}).get("city", "")
-
-    lines = [f"**{kick.strftime('%a %-d %b')} · kick-off {kick.strftime('%H:%M')} UK** — 1 hour to go",
-             f"🏟️ {venue}{', ' + city if city else ''}",
-             f"📺 {tv + ' (US) · ' if tv else ''}DAZN (UK)"]
-    head = (summary.get("article") or {}).get("headline")
-    if head:
-        lines.append(f"\n📰 *{head}*")
-
-    fields = []
-    for t in (away, home):
-        ab = t["team"]["abbreviation"]
-        rec = record_of(t)
-        val = f"**{rec}**" if rec else ""
-        form = form_line(summary, ab)
-        if form:
-            val += f"\nLast 5: {form}"
-        fields.append({"name": f"{t['team'].get('displayName', ab)}", "value": val or "—", "inline": True})
-    fields.append({"name": "​", "value": "​", "inline": True})
-
-    pc = (summary.get("pickcenter") or [{}])[0]
-    if pc.get("details"):
-        fields.append({"name": "🎲 Line", "value": f"{pc['details']}\nO/U {pc.get('overUnder', '—')}", "inline": True})
-    pr = summary.get("predictor") or {}
-    try:
-        hp = float(pr["homeTeam"]["gameProjection"])
-        fav, pct = (h["abbreviation"], hp) if hp >= 50 else (a["abbreviation"], 100 - hp)
-        fields.append({"name": "🔮 ESPN predictor", "value": f"{fav} {round(pct)}% to win", "inline": True})
-    except (KeyError, TypeError, ValueError):
-        pass
-    w = gi.get("weather") or {}
-    if w.get("temperature") is not None:
-        f_ = w["temperature"]
-        fields.append({"name": "🌡️ Conditions", "value": f"{f_}°F / {round((f_ - 32) * 5 / 9)}°C", "inline": True})
-
-    for t in (away, home):
-        ab = t["team"]["abbreviation"]
-        ldr = season_leaders(summary, ab)
-        if ldr:
-            fields.append({"name": f"⭐ {t['team'].get('name', ab)} to watch", "value": "\n".join(ldr)[:1024],
-                           "inline": True})
-    inj = []
-    for t in (away, home):
-        ab = t["team"]["abbreviation"]
-        rows = injury_lines(summary, ab)
-        if rows:
-            inj.append(f"**{ab}:** " + " · ".join(rows))
-    if inj:
-        fields.append({"name": "🚑 Injury report", "value": "\n".join(inj)[:1024], "inline": False})
-
-    # league stakes: who in the Sleeper league has players in this game
-    hurt = {name_key(i["athlete"]["displayName"]) for t in summary.get("injuries") or []
-            for i in t.get("injuries") or [] if i.get("status") in ("Out", "Injured Reserve", "Doubtful")}
-    teams = {SLEEPER_TEAM.get(x, x) for x in (a["abbreviation"], h["abbreviation"])}
-    by_mgr = {}
-    seen = set()
-    for o in league_index("nfl").values():
-        if id(o) in seen:
-            continue
-        seen.add(id(o))
-        if o["team"] in teams and o["pos"] in ("QB", "RB", "WR", "TE", "K"):
-            by_mgr.setdefault(o["manager"], []).append(o)
-    if by_mgr:
-        rows = []
-        for mgr, ps in sorted(by_mgr.items(), key=lambda kv: (-sum(p["starting"] for p in kv[1]), kv[0].lower())):
-            ps.sort(key=lambda p: (not p["starting"], p["name"]))
-            rows.append(f"**{mgr}** — " + ", ".join(
-                p["name"] + (" ⭐" if p["starting"] else "") + (" 🚑" if name_key(p["name"]) in hurt else "")
-                for p in ps))
-        fields.append({"name": f"🧢 {CONFIG['nfl'].get('league_name', 'League')} stakes  (⭐ in lineup · 🚑 out)",
-                       "value": "\n".join(rows)[:1024], "inline": False})
-
-    embed = {
-        "author": {"name": "PRIME TIME · KICK-OFF IN 1 HOUR", "icon_url": NFL_LOGO},
-        "title": f"{a.get('displayName')} @ {h.get('displayName')}",
-        "description": "\n".join(lines),
-        "color": color(h.get("color")),
-        "thumbnail": {"url": h.get("logo", "")},
-        "fields": fields,
-        "footer": {"text": "Touchdowns will be posted live in this channel", "icon_url": a.get("logo", "")},
-    }
-    return discord(NFL_HOOK, embed, "NFL preview")
 
 
 def record_of(comp):
@@ -894,6 +826,26 @@ def post_nfl_final(event, summary, prime):
         "fields": fields,
         "footer": {"text": f"fpts = {CONFIG['nfl'].get('league_name', 'league')} scoring", "icon_url": NFL_LOGO},
     }
+    head, tag = nfl_headline(event)
+    png = render_png(ft_card_html(event, summary, ff, tag), 880, 530 if summary.get("boxscore", {}).get("teams") else 420)
+    if png:
+        lines = []
+        if ff:
+            top = ff[0]
+            lines.append(f"⭐ **{top['name']}** — {top['line']} · {fmt_pts(top['pts'])} fpts")
+            for p in [x for x in ff[1:] if x["elite"]][:3]:
+                lines.append(f"🔥 {p['name']} — {fmt_pts(p['pts'])} fpts")
+        rec = record_of(winner) if a != h else ""
+        small = {"author": {"name": "NFL", "icon_url": NFL_LOGO},
+                 "title": f"{head} · {max(a, h)}-{min(a, h)}{ot_tag(event)}",
+                 "url": f"https://www.espn.com/nfl/game/_/gameId/{event['id']}",
+                 "description": "\n".join(([f"{winner['team'].get('displayName')} move to {rec}"] if rec else []) + lines)[:4000],
+                 "color": color(winner["team"].get("color")),
+                 "image": {"url": "attachment://ft.png"},
+                 "footer": {"text": f"fpts = {CONFIG['nfl'].get('league_name', 'league')} scoring", "icon_url": NFL_LOGO}}
+        content = (f"🏁 **FULL-TIME** · {away['team'].get('displayName')} {a}–{h} "
+                   f"{home['team'].get('displayName')}{ot_tag(event)}")
+        return discord(NFL_HOOK, small, "NFL FT", content=content, files={"ft.png": png})
     return discord(NFL_HOOK, embed, "NFL FT")
 
 
@@ -1436,6 +1388,336 @@ def post_nba_game(e):
     if png:
         embed["image"] = {"url": "attachment://card.png"}
     return discord(NBA_HOOK, embed, "NBA FT", content=content, files={"card.png": png} if png else None)
+
+
+# ------------------------------------------------------------ NFL image cards
+# Compact graphic cards in the same style as the football bot: short text in the
+# message, all the detail in one image.
+
+NFL_CSS = CARD_CSS + """
+.formd{display:flex;gap:4px;margin-top:6px}.formd span{width:9px;height:9px;border-radius:50%}
+.tm.r .formd{justify-content:flex-end}
+.ko{min-width:150px;height:84px;border-radius:12px;background:rgba(255,255,255,.1);display:flex;flex-direction:column;align-items:center;justify-content:center}
+.ko b{font-size:40px;font-weight:800;letter-spacing:1px}.ko small{font-size:10.5px;letter-spacing:2px;color:#aab3c5;font-weight:600}
+.sub{text-align:center;font-size:12px;color:#aab3c5;margin-top:8px;font-weight:500}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.col{background:rgba(255,255,255,.055);border-radius:10px;padding:9px 12px}
+.ch{font-size:10.5px;letter-spacing:1.6px;color:#9aa3b5;font-weight:600;margin-bottom:5px}
+.pr{display:flex;align-items:center;gap:9px;margin-top:5px;font-size:13px}
+.pr img{width:30px;height:30px;border-radius:50%;object-fit:cover;object-position:top;background:#1d2436}
+.pr b{font-weight:700}.pr span{color:#aab3c5;font-size:12px}
+.strip{display:flex;gap:10px;margin-top:10px}
+.strip .col{flex:1;font-size:12px;line-height:1.55;color:#cfd5e1}
+.strip b{color:#fff}
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.chip2{background:rgba(255,255,255,.09);border-radius:6px;padding:2px 7px;font-size:11.5px;color:#e6e9ef}
+.chip2 b{color:#fff}
+.tdhead{display:flex;align-items:center;gap:18px;margin-top:14px}
+.tdhead .hs{width:118px;height:118px;border-radius:14px;object-fit:cover;object-position:top;background:rgba(255,255,255,.08)}
+.big{font-size:44px;font-weight:900;letter-spacing:1px;line-height:1}
+.who{font-size:24px;font-weight:800;margin-top:8px}.how{font-size:14px;color:#cfd5e1;margin-top:4px}
+.mini{margin-left:auto;display:flex;flex-direction:column;gap:6px}
+.mrow{display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.07);border-radius:9px;padding:5px 12px;min-width:150px}
+.mrow img{width:30px;height:30px;object-fit:contain}.mrow b{margin-left:auto;font-size:26px;font-weight:800}
+.mrow.on{background:rgba(255,255,255,.18)}
+.tiles4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px}
+.tv2{font-size:17px;font-weight:800;text-align:center;margin-top:4px}
+"""
+
+
+def _page(body, css_vars, height):
+    return (f"<!doctype html><html><head><meta charset='utf-8'>"
+            f"<link href='https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800;900&display=swap' rel='stylesheet'>"
+            f"<style>{NFL_CSS}body,.card{{height:{height}px}}</style></head><body>"
+            f"<div class='card' style='{css_vars}'><div class='bg'></div><div class='split'></div>"
+            f"<div class='in'>{body}</div></div></body></html>")
+
+
+def nfl_headshot(pid):
+    return f"https://a.espncdn.com/i/headshots/nfl/players/full/{pid}.png" if pid and str(pid).isdigit() else ""
+
+
+def team_cols(away, home):
+    ca, ch = bright(away["team"].get("color")), bright(home["team"].get("color"))
+    if sum(abs(x - y) for x, y in zip(hex_rgb(ca), hex_rgb(ch))) < 120:
+        ch = bright(home["team"].get("alternateColor")) if home["team"].get("alternateColor") else "#cfd5e1"
+        if sum(abs(x - y) for x, y in zip(hex_rgb(ca), hex_rgb(ch))) < 120:
+            ch = "#cfd5e1"
+    return ca, ch
+
+
+def form_dots(summary, abbr):
+    for t in summary.get("lastFiveGames") or []:
+        if t.get("team", {}).get("abbreviation") == abbr:
+            evs = sorted(t.get("events") or [], key=lambda e: e.get("gameDate", ""))
+            c = {"W": "#2fbf71", "L": "#e5484d", "T": "#8b95a8"}
+            return "<div class='formd'>" + "".join(
+                f"<span style='background:{c.get(e.get('gameResult'), '#8b95a8')}'></span>" for e in evs) + "</div>"
+    return ""
+
+
+def nfl_side(t, right, extra=""):
+    import html as H
+    txt = (f"<div><div class='nm'>{H.escape(t['team'].get('name', ''))}</div>"
+           f"<div class='rk'>{H.escape(record_of(t) or '')}</div>{extra}</div>")
+    img = f"<img src='{H.escape(t['team'].get('logo', ''))}'>"
+    return (f"<div class='tm{' r' if right else ''}' style='{'text-align:right' if right else ''}'>"
+            + (txt + img if right else img + txt) + "</div>")
+
+
+def preview_card_html(event, summary):
+    import html as H
+    away, home = teams_of(event)
+    a_ab, h_ab = away["team"]["abbreviation"], home["team"]["abbreviation"]
+    ca, ch = team_cols(away, home)
+    kick = parse_time(event["date"]).astimezone(UK)
+    gi = summary.get("gameInfo") or {}
+    venue = (gi.get("venue") or {}).get("fullName", "")
+    week = (summary.get("header") or {}).get("week")
+
+    pc = (summary.get("pickcenter") or [{}])[0]
+    try:
+        hp = float((summary.get("predictor") or {})["homeTeam"]["gameProjection"])
+    except (KeyError, TypeError, ValueError):
+        hp = None
+    tiles = [f"<div class='tile'><div class='tl'>SPREAD</div><div class='tv'>{H.escape(pc.get('details') or '—')}</div></div>",
+             f"<div class='tile'><div class='tl'>OVER / UNDER</div><div class='tv'>{pc.get('overUnder', '—')}</div></div>"]
+    if hp is not None:
+        tiles.append(f"<div class='tile'><div class='tl'>ESPN WIN CHANCE</div><div class='tv'>"
+                     f"<span class='{'' if hp < 50 else 'lo'}'>{100 - hp:.0f}%</span><i>·</i>"
+                     f"<span class='{'' if hp >= 50 else 'lo'}'>{hp:.0f}%</span></div>"
+                     f"<div class='bars'><div style='flex:{(100 - hp) / 100:.3f};background:{ca}'></div>"
+                     f"<div style='flex:{hp / 100:.3f};background:{ch}'></div></div></div>")
+    else:
+        tiles.append("<div class='tile'><div class='tl'>VENUE</div><div class='tv' style='font-size:15px'>"
+                     f"{H.escape(venue)}</div></div>")
+
+    def watch(t):
+        ab = t["team"]["abbreviation"]
+        rows = []
+        for tt in summary.get("leaders") or []:
+            if tt.get("team", {}).get("abbreviation") != ab:
+                continue
+            for cat in tt.get("leaders") or []:
+                if cat.get("name") not in ("passingYards", "rushingYards", "receivingYards") or not cat.get("leaders"):
+                    continue
+                x = cat["leaders"][0]
+                dv = x.get("displayValue", "")
+                if cat["name"] == "passingYards":
+                    dv = ", ".join(dv.split(", ")[1:]) or dv
+                dv = dv.replace(" YDS", " yds").replace(" CAR", " car").replace(" REC", " rec")
+                hs = (x["athlete"].get("headshot") or {}).get("href", "")
+                pos = (x["athlete"].get("position") or {}).get("abbreviation", "")
+                rows.append(f"<div class='pr'>{'<img src=' + chr(39) + H.escape(hs) + chr(39) + '>' if hs else ''}"
+                            f"<div><b>{H.escape(x['athlete']['displayName'])}</b> <span>{pos}</span><br>"
+                            f"<span>{H.escape(dv)}</span></div></div>")
+        return f"<div class='col'><div class='ch'>{H.escape(t['team'].get('name', ab).upper())} TO WATCH</div>{''.join(rows)}</div>"
+
+    inj = []
+    for t in (away, home):
+        rows = [r for r in injury_lines(summary, t["team"]["abbreviation"], 6) if "(Q)" not in r][:3]
+        if rows:
+            inj.append(f"<b>{t['team']['abbreviation']}</b> " + " · ".join(H.escape(r) for r in rows))
+    hurt = {name_key(i["athlete"]["displayName"]) for t in summary.get("injuries") or []
+            for i in t.get("injuries") or [] if i.get("status") in ("Out", "Injured Reserve", "Doubtful")}
+    teams = {SLEEPER_TEAM.get(x, x) for x in (a_ab, h_ab)}
+    by_mgr, seen = {}, set()
+    for o in league_index("nfl").values():
+        if id(o) in seen:
+            continue
+        seen.add(id(o))
+        if o["team"] in teams and o["starting"] and name_key(o["name"]) not in hurt:
+            by_mgr.setdefault(o["manager"], []).append(o["name"].split(" ")[-1] if " " in o["name"] else o["name"])
+    chips = "".join(f"<span class='chip2'><b>{H.escape(m)}</b> {H.escape(', '.join(ps))}</span>"
+                    for m, ps in sorted(by_mgr.items(), key=lambda kv: -len(kv[1])))
+    league = CONFIG["nfl"].get("league_name", "League")
+
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL{' · WEEK ' + str(week) if week else ''}</div>"
+            f"<div class='pill'>PRIME TIME</div></div>"
+            f"<div class='score'>{nfl_side(away, False, form_dots(summary, a_ab))}"
+            f"<div><div class='ko'><small>KICK-OFF UK</small><b>{kick.strftime('%H:%M')}</b></div>"
+            f"<div class='sub'>{kick.strftime('%a %-d %b')} · {H.escape(venue)}</div></div>"
+            f"{nfl_side(home, True, form_dots(summary, h_ab))}</div>"
+            f"<div class='tiles'>{''.join(tiles)}</div>"
+            f"<div class='two'>{watch(away)}{watch(home)}</div>"
+            f"<div class='strip'>"
+            + (f"<div class='col'><div class='ch'>INJURIES</div>{'<br>'.join(inj)}</div>" if inj else "")
+            + (f"<div class='col'><div class='ch'>{H.escape(league.upper())} · STARTERS IN THIS GAME</div>"
+               f"<div class='chips'>{chips}</div></div>" if chips else "")
+            + "</div>")
+    return _page(body, f"--a:{ca};--h:{ch}", 548)
+
+
+def post_nfl_preview(event, summary):
+    away, home = teams_of(event)
+    a, h = away["team"], home["team"]
+    kick = parse_time(event["date"]).astimezone(UK)
+    comp = event["competitions"][0]
+    tv = ", ".join(n for b in comp.get("broadcasts") or [] for n in b.get("names", []))
+    head = (summary.get("article") or {}).get("headline") or f"{a.get('name')} visit the {h.get('name')}"
+    week = (summary.get("header") or {}).get("week")
+    pc = (summary.get("pickcenter") or [{}])[0]
+    lines = [f"📺 {tv + ' (US) · ' if tv else ''}DAZN (UK)"]
+    if pc.get("details"):
+        lines.append(f"🎲 {pc['details']} · O/U {pc.get('overUnder', '—')}")
+    embed = {
+        "author": {"name": f"NFL{' · Week ' + str(week) if week else ''}", "icon_url": NFL_LOGO},
+        "title": head,
+        "url": f"https://www.espn.com/nfl/game/_/gameId/{event['id']}",
+        "description": "\n".join(lines),
+        "color": color(h.get("color")),
+    }
+    content = f"🏈 **PRIME TIME** · {a.get('displayName')} @ {h.get('displayName')} · kick-off {kick.strftime('%H:%M')} UK"
+    png = render_png(preview_card_html(event, summary), 880, 548)
+    if png:
+        embed["image"] = {"url": "attachment://preview.png"}
+    return discord(NFL_HOOK, embed, "NFL preview", content=content, files={"preview.png": png} if png else None)
+
+
+def boxscore_id(summary, name):
+    for team in summary.get("boxscore", {}).get("players", []):
+        for cat in team.get("statistics", []):
+            for a in cat.get("athletes", []):
+                if a["athlete"].get("displayName") == name:
+                    return str(a["athlete"].get("id", ""))
+    o = league_owner("", name)
+    return ""
+
+
+def td_card_html(event, play, summary, td, tag, qtxt, clock, drive, wp_txt, down_text, fan):
+    import html as H
+    away, home = teams_of(event)
+    abbr = play.get("team", {}).get("abbreviation", "")
+    team = away if away["team"]["abbreviation"] == abbr else home
+    ca, ch = team_cols(away, home)
+    tc = ca if team is away else ch
+    pid = boxscore_id(summary, td["scorer"])
+    hs = nfl_headshot(pid) or team["team"].get("logo", "")
+    yds = td["yds"]
+    if td["kind"] == "pass":
+        who = f"{H.escape(td['qb'])} ➜ {H.escape(td['scorer'])}"
+        how = f"{yds}-yard touchdown pass"
+    elif td["kind"] in TD_KINDS:
+        who, how = H.escape(td["scorer"]), f"{yds}-yard {TD_KINDS[td['kind']][0]}"
+    else:
+        who, how = H.escape(td["scorer"]), "Touchdown"
+    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+
+    def mrow(t, s):
+        return (f"<div class='mrow{' on' if t is team else ''}'><img src='{H.escape(t['team'].get('logo', ''))}'>"
+                f"<span>{t['team']['abbreviation']}</span><b>{s}</b></div>")
+
+    pat = td["pat"]
+    pat_txt = ((pat["mark"].replace("✅ ", "✓ ").replace("❌ ", "✗ ")) + (f" · {pat['who']}" if pat["who"] else "")) if pat else "—"
+    tiles = [("SITUATION", down_text.split(" at ")[0] if down_text else "—"),
+             ("DRIVE", (drive or "—").replace(" plays", " pl").replace(" yards", " yds").replace(", ", " · ")),
+             ("WIN PROBABILITY", wp_txt or "—"),
+             ("2-PT TRY" if pat and "2-pt" in pat["label"] else "EXTRA POINT", pat_txt)]
+    tiles_html = "".join(f"<div class='tile'><div class='tl'>{l}</div><div class='tv2'>{H.escape(v)}</div></div>"
+                         for l, v in tiles)
+    fan_html = "".join(f"<span class='chip2'>{x}</span>" for x in fan)
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL · {qtxt} {clock}</div>"
+            f"<div class='pill' style='border-color:{tc};color:{tc}'>{H.escape(tag)}</div></div>"
+            f"<div class='tdhead'><img class='hs' src='{H.escape(hs)}'>"
+            f"<div><div class='big' style='color:{tc}'>TOUCHDOWN</div><div class='who'>{who}</div>"
+            f"<div class='how'>{H.escape(how)}</div></div>"
+            f"<div class='mini'>{mrow(away, a_s)}{mrow(home, h_s)}</div></div>"
+            f"<div class='tiles4'>{tiles_html}</div>"
+            + (f"<div class='strip'><div class='col'><div class='ch'>{H.escape(CONFIG['nfl'].get('league_name', 'League').upper())}"
+               f" · TONIGHT SO FAR</div><div class='chips'>{fan_html}</div></div></div>" if fan else ""))
+    return _page(body, f"--a:{ca};--h:{ch}", 362 if fan else 292)
+
+
+def ft_card_html(event, summary, ff, tag):
+    import html as H
+    away, home = teams_of(event)
+    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+    ca, ch = team_cols(away, home)
+    ta, th = team_stats(summary, away["team"]["abbreviation"]), team_stats(summary, home["team"]["abbreviation"])
+    ot = ot_tag(event).strip(" ()")
+    la = [str(int(num(x.get("value", x.get("displayValue", 0))))) for x in away.get("linescores", [])]
+    lh = [str(int(num(x.get("value", x.get("displayValue", 0))))) for x in home.get("linescores", [])]
+    n = max(len(la), len(lh))
+    hdr = "".join(f"<th>{q}</th>" for q in (["Q1", "Q2", "Q3", "Q4"] + ["OT"] * 3)[:n])
+    rows = "".join(f"<tr><td class='n'>{t['team']['abbreviation']}</td>" + "".join(f"<td>{v}</td>" for v in ls)
+                   + f"<td class='t'>{sc}</td></tr>" for t, ls, sc in ((away, la, a_s), (home, lh, h_s)))
+    qtable = f"<table><tr><th></th>{hdr}<th>T</th></tr>{rows}</table>" if n else ""
+
+    def tile(label, av, hv, lower_better=False, show=None):
+        a, h = num(str(av).split("-")[0]), num(str(hv).split("-")[0])
+        tot = (a + h) or 1
+        better_a = (a < h) if lower_better else (a > h)
+        sa, sh = show or (str(av), str(hv))
+        return (f"<div class='tile'><div class='tl'>{label}</div><div class='tv'>"
+                f"<span class='{'' if better_a or a == h else 'lo'}'>{H.escape(sa)}</span><i>·</i>"
+                f"<span class='{'' if (not better_a) or a == h else 'lo'}'>{H.escape(sh)}</span></div>"
+                f"<div class='bars'><div style='flex:{a / tot:.3f};background:{ca}'></div>"
+                f"<div style='flex:{h / tot:.3f};background:{ch}'></div></div></div>")
+
+    def mins(v):
+        try:
+            m, s = str(v).split(":")
+            return int(m) * 60 + int(s)
+        except ValueError:
+            return 0
+    tiles = ""
+    if ta and th:
+        tiles = "".join([
+            tile("TOTAL YARDS", ta.get("totalYards", 0), th.get("totalYards", 0)),
+            tile("PASSING", ta.get("netPassingYards", 0), th.get("netPassingYards", 0)),
+            tile("RUSHING", ta.get("rushingYards", 0), th.get("rushingYards", 0)),
+            tile("TURNOVERS", ta.get("turnovers", 0), th.get("turnovers", 0), lower_better=True),
+            tile("3RD DOWN", ta.get("thirdDownEff", "0-0"), th.get("thirdDownEff", "0-0")),
+            tile("POSSESSION", mins(ta.get("possessionTime")), mins(th.get("possessionTime")),
+                 show=(ta.get("possessionTime", "—"), th.get("possessionTime", "—"))),
+        ])
+        tiles = f"<div class='tiles'>{tiles}</div>"
+
+    pog_html = own_html = ""
+    if ff:
+        p = ff[0]
+        pog_html = (f"<div class='pog'><img src='{H.escape(nfl_headshot(p.get('id')))}'><div>"
+                    f"<div class='pl'>PLAYER OF THE GAME</div><div class='pn'>{H.escape(p['name'])}"
+                    f"<span class='chip'>{fmt_pts(p['pts'])}</span></div>"
+                    f"<div class='ps'>{H.escape(p['line'])}</div></div></div>")
+        by_mgr = {}
+        for x in ff:
+            o = league_owner(x.get("id"), x["name"])
+            if o and o["starting"]:
+                by_mgr.setdefault(o["manager"], 0.0)
+                by_mgr[o["manager"]] += x["pts"]
+        if by_mgr:
+            top = sorted(by_mgr.items(), key=lambda kv: -kv[1])[:3]
+            own_html = (f"<div class='own'>{H.escape(CONFIG['nfl'].get('league_name', 'League'))} starters<br>"
+                        + "<br>".join(f"<b>{H.escape(m)}</b> {fmt_pts(v)}" for m, v in top) + "</div>")
+
+    w_col = ca if a_s > h_s else ch
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL</div>"
+            f"<div class='pill'>{'FINAL · ' + ot if ot else 'FULL-TIME'}</div></div>"
+            f"<div class='score'>{nfl_side(away, False)}<div><div class='nums'>"
+            f"<div class='box{' w' if a_s > h_s else ''}'>{a_s}</div><div class='dot'></div>"
+            f"<div class='box{' w' if h_s > a_s else ''}'>{h_s}</div></div>"
+            f"<div class='tag' style='color:{w_col}'>{H.escape(tag)}</div></div>{nfl_side(home, True)}</div>"
+            f"<div class='qs'>{qtable}</div>{tiles}<div class='bot'>{pog_html}{own_html}</div>")
+    return _page(body, f"--a:{ca};--h:{ch}", 530 if tiles else 420)
+
+
+def nfl_headline(event):
+    away, home = teams_of(event)
+    a_s, h_s = int(num(away.get("score"))), int(num(home.get("score")))
+    if a_s == h_s:
+        return f"{away['team'].get('name')} and {home['team'].get('name')} tie {a_s}-{h_s}", "TIE GAME"
+    w, l = (away, home) if a_s > h_s else (home, away)
+    wn, ln, m = w["team"].get("name"), l["team"].get("name"), abs(a_s - h_s)
+    if ot_tag(event):
+        return f"{wn} beat the {ln} in overtime", "OVERTIME WIN"
+    if m >= 21:
+        return f"{wn} rout the {ln}", "ROUT"
+    if m >= 10:
+        return f"{wn} take care of the {ln}", "COMFORTABLE WIN"
+    if m >= 4:
+        return f"{wn} hold off the {ln}", f"{wn.upper()} HOLD ON"
+    return f"{wn} edge the {ln} in a thriller", f"{m}-POINT THRILLER"
 
 
 # ===================================================================== main

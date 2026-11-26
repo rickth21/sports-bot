@@ -6,12 +6,16 @@ Free. Runs on GitHub Actions (your computer can be off). Data from ESPN's public
 
 **NFL channel**
 - **Prime-time games** (anything *not* kicking off Sunday 18:00–23:59 UK, so TNF, SNF, MNF, London, Christmas, Thanksgiving, Saturday games):
-  a post for every **touchdown**: who scored, how (catch + QB / run / pick-six / return), extra point or 2-pt, and the score.
-- **Every game** when it ends: FT score, top performer of the game, any other elite fantasy lines. Prime-time FT posts also get a quarter-by-quarter box score.
+  - **1 hour before kick-off:** preview with records, form, line, ESPN predictor, players to watch, injuries and which league managers have players in the game.
+  - **Every touchdown:** who scored, how (QB ➜ receiver / run / pick-six / return), kicker on the extra point, a commentary line, drive, win probability, the score, and the scorer's fantasy line + league owner.
+- **Every game** when it ends: FT score, top performer, elite fantasy lines. Prime-time FT posts add a box score and a league round-up.
 
 **NBA channel**
-- Games are grouped by tip-off time (e.g. the 00:00–01:30 UK batch, the 03:00 UK West Coast batch).
-  Once every game in a batch is finished: one post with all the FT scores, each game's standout stat line, plus any other elite fantasy games.
+- One full-time post per game as soon as it ends: headline, short recap, insight bullets, and a graphic card
+  (score, quarter scores, shooting/rebounds/assists/turnovers/paint bars, player of the game with fpts, league owner).
+
+Note: a run that starts within ~70 minutes of a prime-time kick-off stays on until the game ends (up to ~6 hours),
+so one run covers the preview and every touchdown even if GitHub's 10-minute schedule is slow.
 
 ## Setup (about 10 minutes)
 
