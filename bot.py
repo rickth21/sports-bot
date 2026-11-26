@@ -4565,6 +4565,8 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
     body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>TOUCHDOWN · {'OT' if q > 4 else 'Q' + str(q)} "
             f"{play.get('clock', {}).get('displayValue', '')} · {away['team']['abbreviation']} {a_s}–{h_s} "
             f"{home['team']['abbreviation']}</div><div class='pill'>{H.escape(tag)}</div></div>"
+            + score_hero(event, a_s, h_s, f"{'OT' if q > 4 else 'Q' + str(q)} · {play.get('clock', {}).get('displayValue', '')}",
+                         H.escape(tag), hot=abbr, plus=(a_s + h_s) - _pre_total(play, a_s, h_s, abbr, away)) +
             f"<div class='sec' style='margin-top:10px'>{H.escape(what.upper())}</div>"
             f"<div class='{cls}'>{panels}</div>{_conversion_html(play, summary, abbr)}{''.join(mus)}")
     t = scorer_team["team"]
@@ -4576,7 +4578,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
           f"linear-gradient(120deg,{ca}d9 0%,{ca}73 38%,rgba(13,18,32,0) 78%),"
           f"linear-gradient(300deg,{co}38 0%,rgba(13,18,32,0) 22%)!important}}"
           f".hl{{border-left-color:{ch}!important}}")
-    return _card(f"--a:{ca};--h:{ch}", body, extra_css=V4_CSS + TD5_CSS + bg)
+    return _card(f"--a:{ca};--h:{ch}", body, extra_css=V4_CSS + TD5_CSS + SB_CSS + bg)
 
 
 _nfl_prime_slot_v5 = nfl_prime_slot
@@ -4713,7 +4715,9 @@ def nfl_fg_html(event, play, summary, live, ol, base):
 
     body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>FIELD GOAL · {'OT' if q > 4 else 'Q' + str(q)} {clock} · "
             f"{away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div>"
-            f"<div class='pill'>{tag}</div></div>{sb}"
+            f"<div class='pill'>{tag}</div></div>"
+            + score_hero(event, a_s, h_s, ("FINAL" if final else ("OT" if q > 4 else "Q4") + " · " + clock + " LEFT"),
+                         tag, hot=abbr, plus=3) +
             f"<div class='sec' style='margin-top:10px'>{yds}-YARD FIELD GOAL · GOOD</div>{panel}{imp}")
     t = kt["team"]
     ca = vivid(t.get("color") or "1faa59")
@@ -4723,7 +4727,7 @@ def nfl_fg_html(event, play, summary, live, ol, base):
           f"linear-gradient(120deg,{ca}d9 0%,{ca}73 38%,rgba(13,18,32,0) 78%),"
           f"linear-gradient(300deg,{co}38 0%,rgba(13,18,32,0) 22%)!important}}"
           f".hl{{border-left-color:{ch}!important}}")
-    return _card(f"--a:{ca};--h:{ch}", body, extra_css=V4_CSS + TD5_CSS + FG_CSS + bg), tag, kicker, yds, kt, mine, theirs
+    return _card(f"--a:{ca};--h:{ch}", body, extra_css=V4_CSS + TD5_CSS + FG_CSS + SB_CSS + bg), tag, kicker, yds, kt, mine, theirs
 
 
 def post_fg_clutch(event, play, summary, ctx):
@@ -4913,13 +4917,15 @@ def nfl_gc_html(event, play, summary, live, ol, before, after):
 
     body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>GAME-CHANGER · {'OT' if q > 4 else 'Q' + str(q)} {clock} · "
             f"{away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div>"
-            f"<div class='pill'>{kind}</div></div>{sb}{sw}{imp}")
+            f"<div class='pill'>{kind}</div></div>"
+            + score_hero(event, a_s, h_s, f"{'OT' if q > 4 else 'Q' + str(q)} · {clock} LEFT", f"{kind} · {gt['team']['abbreviation']} BALL")
+            + f"{sw}{imp}")
     ch = vivid(gt["team"].get("alternateColor") or gt["team"].get("color") or "5b7bd5", min_l=0.5)
     bg = (f".bg{{opacity:1!important;background:"
           f"linear-gradient(120deg,{ca}d9 0%,{ca}73 38%,rgba(13,18,32,0) 78%),"
           f"linear-gradient(300deg,{co}38 0%,rgba(13,18,32,0) 22%)!important}}"
           f".hl{{border-left-color:{ch}!important}}")
-    return (_card(f"--a:{ca};--h:{ch}", body, extra_css=V4_CSS + TD5_CSS + FG_CSS + GC_CSS + bg),
+    return (_card(f"--a:{ca};--h:{ch}", body, extra_css=V4_CSS + TD5_CSS + FG_CSS + GC_CSS + SB_CSS + bg),
             kind, hero, victim, gt, lt, g_before, g_after)
 
 
@@ -5178,6 +5184,54 @@ def post_overtime(event, summary, ctx):
     embed = {"author": AU_NFL(), "color": 0xC81D25, "img_title": "", "img_desc": "",
              "title": f"🚨 OVERTIME! {away['team'].get('name')} {a}–{a} {home['team'].get('name')}"}
     return _post_card(NFL_HOOK, nfl_ot_html(event, summary, ctx["live"], ctx["ol"]), "🚨 **OVERTIME**", embed, "ot.png")
+
+
+# ------------------------------------------------ scoreline first: shared big scoreboard for every in-game post
+
+SB_CSS = """
+.sbx{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:16px;margin-top:12px;
+ background:rgba(9,12,22,.66);border-radius:16px;padding:16px 22px}
+.sbx .tm{display:flex;align-items:center;gap:14px}.sbx .tm.r{justify-content:flex-end}
+.sbx .disc{width:70px;height:70px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;flex:none}
+.sbx .disc img{width:54px;height:54px;object-fit:contain}
+.sbx .nm{font-size:19px;font-weight:900;letter-spacing:1px;text-transform:uppercase;color:#e3e7ef}
+.sbx .sc{font-size:76px;font-weight:900;line-height:.9;font-variant-numeric:tabular-nums;color:#8b95a8}
+.sbx .sc.hot{color:#fff;text-shadow:0 0 26px var(--hc),0 4px 0 rgba(0,0,0,.4)}
+.sbx .sc.lead{color:#fff}
+.sbx .plus{display:inline-block;margin-top:6px;background:#7ee2a8;color:#0d1220;border-radius:8px;padding:2px 9px;
+ font-size:17px;font-weight:900}
+.sbx .mid{text-align:center}
+.sbx .clk{font-size:14px;font-weight:900;letter-spacing:2px;color:#ffd166}
+.sbx .st{font-size:12px;font-weight:800;letter-spacing:1.5px;color:#c3cad8;margin-top:4px}
+"""
+
+
+def score_hero(event, a_s, h_s, clock_txt, sub="", hot=None, plus=None):
+    """Big scoreline: logos, names, scores; the team that just scored glows with a +N chip."""
+    import html as H
+    away, home = teams_of(event)
+
+    def side(tm, sc, other, right):
+        ab = tm["team"]["abbreviation"]
+        is_hot = hot == ab
+        cls = "hot" if is_hot else ("lead" if sc > other else "")
+        hc = vivid(tm["team"].get("color") or "ffffff", min_l=0.5)
+        chip = f"<div class='plus'>+{plus}</div>" if is_hot and plus else ""
+        disc = f"<div class='disc'><img src='{H.escape(tm['team'].get('logo', ''))}'></div>"
+        txt = (f"<div style='text-align:{'right' if right else 'left'}'><div class='nm'>"
+               f"{H.escape(tm['team'].get('name') or ab)}</div><div class='sc {cls}' style='--hc:{hc}'>{sc}</div>{chip}</div>")
+        return f"<div class='tm{' r' if right else ''}'>{(txt + disc) if right else (disc + txt)}</div>"
+    return (f"<div class='sbx'>{side(away, a_s, h_s, False)}<div class='mid'><div class='clk'>{H.escape(clock_txt)}</div>"
+            f"{f'<div class=st>{H.escape(sub)}</div>' if sub else ''}</div>{side(home, h_s, a_s, True)}</div>")
+
+
+def _pre_total(play, a_s, h_s, abbr, away):
+    """Combined score before this touchdown."""
+    m = re.search(r"\(([^()]*)\)\s*$", play.get("text") or "")
+    pts = 6
+    if m and not re.search(r"fail|miss|block|no good", m.group(1), re.I):
+        pts += 2 if re.search(r"two-point|2pt|2-pt", m.group(1), re.I) else 1
+    return a_s + h_s - pts
 
 
 # ===================================================================== main
