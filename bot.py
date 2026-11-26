@@ -7060,6 +7060,114 @@ def maybe_daily_race(st):
     return _maybe_daily_race_po(st)
 
 
+
+# ------------------------------------------------ go-live safety: restart only between games, and a self-test
+
+HANDOFF_AFTER_MIN = 180         # after 3 hours, restart at the first quiet moment (hard limit stays MAX_RUNTIME)
+
+
+def quiet_now(margin_min=15):
+    """True when no NFL/NBA game is live and nothing kicks off in the next `margin_min` minutes."""
+    now = now_utc()
+    paths = ["football/nfl/scoreboard"]
+    today = datetime.now(ET).date()
+    paths += [f"basketball/nba/scoreboard?dates={(today + timedelta(days=d)).strftime('%Y%m%d')}" for d in (-1, 0, 1)]
+    try:
+        for p in paths:
+            for e in fetch(p).get("events", []):
+                stt = e["status"]["type"]["state"]
+                if stt == "in":
+                    return False
+                if stt == "pre":
+                    mins = (parse_time(e["date"]) - now).total_seconds() / 60
+                    if -30 < mins < margin_min:              # about to start (or late starting)
+                        return False
+        return True
+    except Exception:  # noqa: BLE001
+        return False                                         # can't tell: keep running, the hard limit still applies
+
+
+def _code_version():
+    import hashlib
+    try:
+        return hashlib.sha1(Path(__file__).read_bytes()).hexdigest()[:12]
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
+def maybe_selftest(st):
+    """Once per code update: build a real animated touchdown card on this server, time it, and report privately."""
+    ver = _code_version()
+    if not ALERT_HOOK or st.get("selftest") == ver or SILENT or DRY_RUN or CAPTURE is not None:
+        return
+    st["selftest"] = ver
+    lines, ok = [], True
+
+    def check(name, fn):
+        nonlocal ok
+        t0 = time.time()
+        try:
+            res = fn()
+            lines.append(f"✅ {name}" + (f" · {res}" if res else "") + f" ({time.time() - t0:.1f}s)")
+            return True
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            lines.append(f"❌ {name}: {str(e)[:120]}")
+            return False
+    check("ESPN", lambda: f"{len(fetch('football/nfl/scoreboard').get('events', []))} NFL games this week")
+    check("Sleeper", lambda: f"week {fetch_url(SLEEPER + '/state/nfl').get('week')}")
+    check("Chrome + Pillow", lambda: "ready" if _animations_ready() else (_ for _ in ()).throw(RuntimeError("animations unavailable")))
+    check("Webhooks", lambda: "NFL + NBA set" if NFL_HOOK and NBA_HOOK else (_ for _ in ()).throw(RuntimeError("a webhook is missing")))
+    build = {}
+
+    def card():
+        wk = max(int(fetch_url(SLEEPER + "/state/nfl").get("week") or 2) - 1, 1)
+        evs = fetch(f"football/nfl/scoreboard?seasontype=2&week={wk}").get("events", [])
+        for e in evs:
+            if not e["status"]["type"].get("completed"):
+                continue
+            summary = fetch(f"football/nfl/summary?event={e['id']}")
+            tds = [p for p in summary.get("scoringPlays") or [] if "Touchdown" in (p.get("type") or {}).get("text", "")]
+            if not tds:
+                continue
+            ctx = nfl_ctx(st, evs)
+            html_text = nfl_td_fantasy_html(e, tds[0], summary, ctx["live"], ctx["ol"], ctx["base"], "")
+            t0 = time.time()
+            gif = render_anim(html_text)
+            build["secs"] = time.time() - t0
+            if not gif:
+                raise RuntimeError("the animation could not be built (posts would fall back to still images)")
+            build["gif"] = gif
+            return f"{len(gif) // 1024} KB, built in {build['secs']:.0f}s (head start is {PREP_SECONDS}s)"
+        raise RuntimeError("no finished game with a touchdown found")
+    check("Animated touchdown card", card)
+    if build.get("secs", 0) > PREP_SECONDS - 5:
+        ok = False
+        lines.append(f"⚠️ Animated cards take {build['secs']:.0f}s here: posts could land a few seconds late. "
+                     f"Raise PREP_SECONDS or lower ANIM_FRAMES.")
+    head = "✅ **Self-test passed** on GitHub's server" if ok else "⚠️ **Self-test found a problem**"
+    msg = f"{head} (code {ver})\n" + "\n".join(lines)
+    _POSTER["name"] = "Donald 🩺"
+    _IN_ALERT["on"] = True
+    try:
+        discord(ALERT_HOOK, [], "selftest", content=msg[:1900],
+                files={"selftest.gif": build["gif"]} if build.get("gif") else None)
+    finally:
+        _POSTER.clear()
+        _IN_ALERT["on"] = False
+
+
+_maybe_daily_race_st = maybe_daily_race
+
+
+def maybe_daily_race(st):
+    try:
+        maybe_selftest(st)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"self-test failed to run: {ex}")
+    return _maybe_daily_race_st(st)
+
+
 # ===================================================================== main
 
 def send_test():
@@ -7138,12 +7246,18 @@ def main():
         elapsed = time.time() - start
         if elapsed > MAX_RUNTIME or (not active and not keepalive):
             break
+        # hand over to the next run in a quiet moment (no game on, nothing about to post) instead of mid-game
+        if keepalive and elapsed > HANDOFF_AFTER_MIN * 60 and not active and not _NBA_LIVE["on"] \
+                and _NEXT_WAKE["t"] is None and quiet_now():
+            log_handoff = f"handing over to the next run in a quiet window after {elapsed / 3600:.1f}h"
+            _log_plain(log_handoff)
+            break
         wait = min(POLL_SECONDS, int(CONFIG.get("live_poll_seconds", 15))) if active else idle
         if _NEXT_WAKE["t"]:                          # a post is due to be built soon: wake up exactly then
             wait = min(wait, max(1, _NEXT_WAKE["t"] - time.time()))
             _NEXT_WAKE["t"] = None
             _NBA_LIVE["wake"] = True
-        time.sleep(max(5, min(wait, MAX_RUNTIME - elapsed + 1)))
+        time.sleep(max(1, min(wait, MAX_RUNTIME - elapsed + 1)))
     log("Done.")
 
 
