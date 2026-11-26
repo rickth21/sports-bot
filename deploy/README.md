@@ -1,8 +1,8 @@
 # Running the bot on a free always-on server
 
-Right now the bot runs on GitHub Actions: a ~5h40m job that starts the next one. That works and is free,
-but GitHub's terms are a grey area for always-on bots and every update needs a restart. A small free cloud
-server runs it continuously instead.
+Since 26 Nov 2026 the bot runs on the Oracle Always Free server (systemd service `sports-bot`), not GitHub Actions.
+Updates: upload to GitHub as before; the bot spots new code/config within ~2 minutes and restarts onto it at
+the next quiet moment (no game on, nothing about to post). Never upgrade the Oracle account to Pay As You Go.
 
 **Recommended:** Oracle Cloud "Always Free" (an Ampere/ARM VM with 4 cores and 24 GB RAM, free for good).
 Any Ubuntu 22.04/24.04 server works the same way (Google Cloud e2-micro free tier, a Raspberry Pi at home, etc.).
