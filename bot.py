@@ -6793,6 +6793,7 @@ PO_CSS = """
 .chip{font-size:11.5px;font-weight:900;letter-spacing:1px;border-radius:6px;padding:3px 8px;text-align:center;white-space:nowrap}
 .chip.bye{background:linear-gradient(90deg,#ffd166,#ffb347);color:#1b1305}.chip.in{background:#1faa59;color:#fff}
 .chip.out{background:#3a1218;color:#ff9a9e}.chip.alive{background:rgba(255,255,255,.1);color:#dfe5f1}
+.chip.mir{background:linear-gradient(90deg,#6d28d9,#a855f7);color:#fff;box-shadow:0 0 12px rgba(168,85,247,.55)}
 .pr3 .pc{text-align:right;font-weight:900}
 .pr3.new{outline:2px solid #ffd166;outline-offset:-2px}
 """
@@ -6825,7 +6826,9 @@ def playoff_picture_html(sport, settings, rec, status, changes, odds, week):
     newset = {c[0] for c in changes}
     for rid in sorted(rec, key=lambda r: status[r]["seed"]):
         x, stt = rec[rid], status[rid]
-        if stt["status"] == "alive":
+        if stt["status"] == "alive" and odds.get(rid, (0, 0))[0] < 0.5:
+            chip = "<span class='chip mir'>NEEDS A MIRACLE</span>"      # still possible on paper, never happens in the sims
+        elif stt["status"] == "alive":
             chip = (f"<span class='chip alive'>{stt['magic']} WIN{'S' if stt['magic'] != 1 else ''} TO CLINCH</span>"
                     if stt["magic"] else "<span class='chip alive'>IN THE HUNT</span>")
         else:
@@ -7010,6 +7013,9 @@ def maybe_playoffs(st):
             status = playoff_status(settings, rec, reg)
             key = f"{sport}-{settings.get('season')}"
             store = st.setdefault("playoffs", {}).setdefault(key, {})
+            done_at = store.setdefault("week_done_at", {}).setdefault(str(week), time.time())
+            recap_done = f"{sport}-{settings.get('season')}-{week}" in (st.get("recaps") or [])
+            after_recap = recap_done or time.time() - done_at >= 40 * 3600   # goes out right below the weekly recap
             prev = store.get("status")
             if prev is None:                                  # first look: remember quietly
                 store["status"] = {str(r): v["status"] for r, v in status.items()}
@@ -7017,7 +7023,9 @@ def maybe_playoffs(st):
                 changes = [(r, prev.get(str(r)), v["status"]) for r, v in status.items()
                            if v["status"] in ("in", "bye", "out") and prev.get(str(r)) != v["status"]
                            and not (prev.get(str(r)) == "bye" and v["status"] == "in")]
-                if changes and reg < po - 1 + 1:
+                if changes and not after_recap:
+                    continue                                  # hold it for the recap; nothing is lost
+                if changes:
                     odds, _, _ = simulate_odds(sport, settings, scores, rec, reg)
                     hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
                     html_text = playoff_picture_html(sport, settings, rec, status, changes, odds, reg)
@@ -7026,7 +7034,7 @@ def maybe_playoffs(st):
                         store["status"] = {str(r): v["status"] for r, v in status.items()}
                 else:
                     store["status"] = {str(r): v["status"] for r, v in status.items()}
-            if week >= po - 1:                                # bracket: set, after each round, champion
+            if week >= po - 1 and after_recap:                # bracket: set, after each round, champion (after the recap)
                 stage = min(week - (po - 1), 3)
                 if store.get("bracket_stage", -1) < stage:
                     br = build_bracket(sport, settings, status, week)
