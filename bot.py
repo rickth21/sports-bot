@@ -2090,6 +2090,288 @@ def nfl_slot(slot, st, force=False):
     return any(x == "in" for x in states) or -0.8 <= age < 0.2
 
 
+# ------------------------------------------------------ weekly league recap
+# One graphic per finished Sleeper gameweek (NFL: Tuesday 13:00 UK, NBA: Monday 13:00 UK):
+# results, awards, standings and simulated playoff / title odds.
+
+import random as _random
+
+RECAP_CSS = """
+.sec{font-size:10.5px;letter-spacing:1.6px;color:#9aa3b5;font-weight:600;margin:12px 0 0}
+.res{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin-top:6px}
+.rr{display:grid;grid-template-columns:1fr auto 14px auto 1fr;align-items:center;gap:8px;background:rgba(255,255,255,.055);
+ border-radius:10px;padding:8px 12px;font-variant-numeric:tabular-nums}
+.rr .n{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rr .n.r{text-align:right}
+.rr .n.lo{color:#8b95a8;font-weight:600}
+.rr .p{font-size:19px;font-weight:800}.rr .p.lo{color:#8b95a8;font-weight:700}.rr i{color:#5d6679;font-style:normal;text-align:center}
+.aw{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px}
+.at{background:rgba(255,255,255,.055);border-radius:10px;padding:8px 12px;height:72px}
+.at .k{font-size:10.5px;letter-spacing:1.4px;color:#9aa3b5;font-weight:600}
+.at .v{font-size:16px;font-weight:800;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.at .x{font-size:12.5px;color:#cfd5e1;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tbl{margin-top:6px;background:rgba(255,255,255,.055);border-radius:10px;padding:6px 12px}
+.tr{display:grid;grid-template-columns:26px 1fr 62px 70px 150px 150px;align-items:center;gap:10px;height:27px;
+ font-size:14px;font-variant-numeric:tabular-nums}
+.tr.h{height:22px;font-size:10.5px;letter-spacing:1.3px;color:#9aa3b5;font-weight:600}
+.tr.cut{border-bottom:1.5px dashed rgba(255,255,255,.25)}
+.tr .rk{color:#9aa3b5;font-weight:700}.tr .m{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tr .o{display:grid;grid-template-columns:40px 1fr;align-items:center;gap:8px;font-weight:800}
+.bar{height:6px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden}.bar div{height:6px;border-radius:3px}
+.gw{margin-top:10px;display:flex;gap:10px}
+.gw .col{flex:1;font-size:13.5px;color:#cfd5e1;background:rgba(255,255,255,.055);border-radius:10px;padding:8px 12px}
+.gw b{color:#fff}
+"""
+
+
+def league_settings(sport):
+    lid = str(CONFIG[sport].get("sleeper_league_id") or "").strip()
+    return fetch_url(f"{SLEEPER}/league/{lid}") if lid else None
+
+
+def season_history(sport, upto):
+    """Weekly points and results for weeks 1..upto from Sleeper matchups."""
+    lid = str(CONFIG[sport].get("sleeper_league_id")).strip()
+    scores, rec = {}, {}
+    for wk in range(1, upto + 1):
+        try:
+            ms = fetch_url(f"{SLEEPER}/league/{lid}/matchups/{wk}", tries=2)
+        except Exception:  # noqa: BLE001
+            continue
+        by = {}
+        for m in ms:
+            rid = m["roster_id"]
+            pts = float(m.get("points") or 0)
+            scores.setdefault(rid, []).append(pts)
+            rec.setdefault(rid, {"w": 0, "l": 0, "t": 0, "pf": 0.0})
+            rec[rid]["pf"] += pts
+            if m.get("matchup_id"):
+                by.setdefault(m["matchup_id"], []).append((rid, pts))
+        for pair in by.values():
+            if len(pair) != 2:
+                continue
+            (a, pa), (b, pb) = pair
+            if pa > pb:
+                rec[a]["w"] += 1; rec[b]["l"] += 1  # noqa: E702
+            elif pb > pa:
+                rec[b]["w"] += 1; rec[a]["l"] += 1  # noqa: E702
+            else:
+                rec[a]["t"] += 1; rec[b]["t"] += 1  # noqa: E702
+    return scores, rec
+
+
+def simulate_odds(sport, settings, scores, rec, upto, sims=4000):
+    """Monte Carlo: rest of the regular season (real schedule) + playoffs. Returns {rid: (playoff%, title%)}."""
+    lid = str(CONFIG[sport].get("sleeper_league_id")).strip()
+    s = settings.get("settings", {})
+    po_start = int(s.get("playoff_week_start") or 15)
+    n_po = int(s.get("playoff_teams") or 6)
+    rids = list(rec.keys())
+    allpts = [p for v in scores.values() for p in v if p > 0]
+    lg_mean = sum(allpts) / len(allpts) if allpts else 100
+    sd = (sum((p - lg_mean) ** 2 for p in allpts) / max(1, len(allpts) - 1)) ** 0.5 if allpts else 20
+    mean = {}
+    for r in rids:
+        v = [p for p in scores.get(r, []) if p > 0]
+        mean[r] = (sum(v) + 2 * lg_mean) / (len(v) + 2)
+    sd = max(sd * 0.85, 1.0)
+    sched = []
+    for wk in range(upto + 1, po_start):
+        try:
+            ms = fetch_url(f"{SLEEPER}/league/{lid}/matchups/{wk}", tries=2)
+        except Exception:  # noqa: BLE001
+            ms = []
+        by = {}
+        for m in ms:
+            if m.get("matchup_id"):
+                by.setdefault(m["matchup_id"], []).append(m["roster_id"])
+        pairs = [p for p in by.values() if len(p) == 2]
+        if not pairs:                               # schedule not published: random pairings
+            pool = rids[:]
+            _random.shuffle(pool)
+            pairs = [pool[i:i + 2] for i in range(0, len(pool) - 1, 2)]
+        sched.append(pairs)
+    rnd = _random.Random(42)
+    po_count = {r: 0 for r in rids}
+    title = {r: 0 for r in rids}
+
+    def game(a, b):
+        return a if rnd.gauss(mean[a], sd) >= rnd.gauss(mean[b], sd) else b
+
+    for _ in range(sims):
+        w = {r: rec[r]["w"] + 0.5 * rec[r]["t"] for r in rids}
+        pf = {r: rec[r]["pf"] for r in rids}
+        for pairs in sched:
+            for a, b in pairs:
+                sa, sb = rnd.gauss(mean[a], sd), rnd.gauss(mean[b], sd)
+                pf[a] += sa
+                pf[b] += sb
+                w[a if sa >= sb else b] += 1
+        seeds = sorted(rids, key=lambda r: (-w[r], -pf[r]))[:n_po]
+        for r in seeds:
+            po_count[r] += 1
+        if n_po == 6:
+            q1, q2 = game(seeds[2], seeds[5]), game(seeds[3], seeds[4])
+            s1 = game(seeds[0], q2 if seeds.index(q2) > seeds.index(q1) else q1)
+            s2 = game(seeds[1], q1 if seeds.index(q2) > seeds.index(q1) else q2)
+            champ = game(s1, s2)
+        else:                                        # generic single-elimination by seed
+            alive = seeds[:]
+            while len(alive) > 1:
+                alive = [game(alive[i], alive[-1 - i]) for i in range(len(alive) // 2)] + \
+                        ([alive[len(alive) // 2]] if len(alive) % 2 else [])
+            champ = alive[0]
+        title[champ] += 1
+    return {r: (100 * po_count[r] / sims, 100 * title[r] / sims) for r in rids}, po_start, n_po
+
+
+def recap_card_html(sport, week, live, settings):
+    import html as H
+    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
+    league = CONFIG[sport].get("league_name", "League")
+    players = sleeper_players(sport)
+    names = {rid: x["manager"] for rid, x in live["rosters"].items()}
+
+    games, starters, bench = [], [], []
+    for ra, rb in live["pairs"]:
+        A, B = live["rosters"][ra], live["rosters"][rb]
+        games.append((A, B) if A["points"] >= B["points"] else (B, A))
+    for rid, x in live["rosters"].items():
+        for pid in x["players"]:
+            p = players.get(pid) or {}
+            nm = p.get("full_name") or (f"{p.get('last_name', pid)} D/ST" if p.get("position") == "DEF" else pid)
+            row = {"name": nm, "pts": float(x["pp"].get(pid) or 0), "manager": x["manager"]}
+            (starters if pid in x["starters"] else bench).append(row)
+
+    scores, rec = season_history(sport, week)
+    odds, po_start, n_po = simulate_odds(sport, settings, scores, rec, week)
+    table = sorted(rec.keys(), key=lambda r: (-(rec[r]["w"] + 0.5 * rec[r]["t"]), -rec[r]["pf"]))
+
+    # ---- results + awards
+    rows = "".join(
+        f"<div class='rr'><span class='n'>{H.escape(w['manager'])}</span><span class='p'>{w['points']:.1f}</span><i>·</i>"
+        f"<span class='p lo'>{l['points']:.1f}</span><span class='n r lo'>{H.escape(l['manager'])}</span></div>"
+        for w, l in games)
+    allr = [x for x in live["rosters"].values() if x.get("matchup_id")]
+    top = max(allr, key=lambda x: x["points"])
+    blow = max(games, key=lambda g: g[0]["points"] - g[1]["points"])
+    close = min(games, key=lambda g: g[0]["points"] - g[1]["points"])
+    pow_ = max(starters, key=lambda p: p["pts"], default=None)
+    bb = max(bench, key=lambda p: p["pts"], default=None)
+    unlucky = max((l for _, l in games), key=lambda x: x["points"])
+    fav = max(odds, key=lambda r: odds[r][1])
+    tiles = [
+        ("🏆 TOP SCORE", top["manager"], f"{top['points']:.1f} pts"),
+        ("⭐ PLAYER OF THE WEEK", pow_["name"] if pow_ else "—",
+         f"{pow_['pts']:.1f} pts · {pow_['manager']}" if pow_ else ""),
+        ("💥 BIGGEST WIN", blow[0]["manager"], f"by {blow[0]['points'] - blow[1]['points']:.1f} over {blow[1]['manager']}"),
+        ("😬 CLOSEST FINISH", close[0]["manager"], f"by {close[0]['points'] - close[1]['points']:.1f} over {close[1]['manager']}"),
+        ("🪑 BENCH BLUNDER", bb["name"] if bb else "—", f"{bb['pts']:.1f} pts on {bb['manager']}'s bench" if bb else ""),
+        ("🥶 UNLUCKIEST LOSS", unlucky["manager"], f"{unlucky['points']:.1f} pts and still lost"),
+    ]
+    tiles_html = "".join(f"<div class='at'><div class='k'>{H.escape(k)}</div><div class='v'>{H.escape(v)}</div>"
+                         f"<div class='x'>{H.escape(x)}</div></div>" for k, v, x in tiles)
+
+    # ---- standings + odds
+    def bar(pct, col):
+        return f"<div class='bar'><div style='width:{max(pct, 1.5):.1f}%;background:{col}'></div></div>"
+    trs = ["<div class='tr h'><span>#</span><span>MANAGER</span><span>W-L</span><span>PF</span>"
+           "<span>PLAYOFFS</span><span>TITLE</span></div>"]
+    for i, r in enumerate(table, 1):
+        x = rec[r]
+        wl = f"{x['w']}-{x['l']}" + (f"-{x['t']}" if x["t"] else "")
+        po, ti = odds[r]
+        trs.append(f"<div class='tr{' cut' if i == n_po else ''}'><span class='rk'>{i}</span>"
+                   f"<span class='m'>{H.escape(names.get(r, '?'))}</span><span>{wl}</span><span>{x['pf']:.0f}</span>"
+                   f"<span class='o'><span>{po:.0f}%</span>{bar(po, '#5b7bd5')}</span>"
+                   f"<span class='o'><span>{ti:.0f}%</span>{bar(ti * 2.5, '#f5c542')}</span></div>")
+
+    # ---- next week + context
+    nxt = ""
+    try:
+        lid = str(CONFIG[sport].get("sleeper_league_id")).strip()
+        ms = fetch_url(f"{SLEEPER}/league/{lid}/matchups/{week + 1}", tries=2) if week + 1 < po_start else []
+        by = {}
+        for m in ms:
+            if m.get("matchup_id"):
+                by.setdefault(m["matchup_id"], []).append(m["roster_id"])
+        pairs = [p for p in by.values() if len(p) == 2]
+        if pairs:
+            a, b = max(pairs, key=lambda p: min(odds[p[0]][0], odds[p[1]][0]) + 0.3 * (odds[p[0]][0] + odds[p[1]][0]))
+            wl = lambda r: f"{rec[r]['w']}-{rec[r]['l']}"  # noqa: E731
+            nxt = (f"<b>{H.escape(names[a])}</b> ({wl(a)}) vs <b>{H.escape(names[b])}</b> ({wl(b)})"
+                   f" — playoff odds {odds[a][0]:.0f}% & {odds[b][0]:.0f}%")
+    except Exception as e:  # noqa: BLE001
+        log(f"recap next week unavailable: {e}")
+    left = max(0, po_start - week - 1)
+    ctx = (f"Playoffs start week <b>{po_start}</b> · top <b>{n_po}</b> of {len(table)} qualify · "
+           f"<b>{left}</b> regular-season week{'s' if left != 1 else ''} left") if left else \
+          f"Playoffs start week <b>{po_start}</b> · top <b>{n_po}</b> qualify"
+    gw = (f"<div class='gw'>{'<div class=' + chr(39) + 'col' + chr(39) + '><div class=' + chr(39) + 'ch' + chr(39) + '>GAME TO WATCH NEXT WEEK</div>' + nxt + '</div>' if nxt else ''}"
+          f"<div class='col'><div class='ch'>THE RACE</div>{ctx}<br>Title favourite: <b>{H.escape(names[fav])}</b> "
+          f"{odds[fav][1]:.0f}%</div></div>")
+
+    res_rows = (len(games) + 1) // 2
+    height = 64 + 22 + res_rows * 49 + 22 + 2 * 80 + 22 + 12 + (len(table) + 1) * 27 + 74 + 30
+    body = (f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape(league.upper())} · WEEK {week}</div>"
+            f"<div class='pill'>WEEKLY RECAP</div></div>"
+            f"<div class='sec'>RESULTS</div><div class='res'>{rows}</div>"
+            f"<div class='sec'>AWARDS</div><div class='aw'>{tiles_html}</div>"
+            f"<div class='sec'>TITLE RACE · SIMULATED {4000:,} TIMES</div><div class='tbl'>{''.join(trs)}</div>{gw}")
+    html_text = (f"<!doctype html><html><head><meta charset='utf-8'>"
+                 f"<link href='https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800;900&display=swap' rel='stylesheet'>"
+                 f"<style>{NFL_CSS}{RECAP_CSS}body,.card{{height:{height}px}}</style></head><body>"
+                 f"<div class='card' style='--a:#1faa59;--h:#5b7bd5'><div class='bg'></div>"
+                 f"<div class='in'>{body}</div></div></body></html>")
+    lines = [f"🏆 **{top['manager']}** top-scored with {top['points']:.1f}",
+             f"😬 Closest: **{close[0]['manager']}** beat {close[1]['manager']} by {close[0]['points'] - close[1]['points']:.1f}",
+             f"📈 Title favourite: **{names[fav]}** {odds[fav][1]:.0f}%"]
+    return html_text, height, lines
+
+
+def post_weekly_recap(sport, week, live, settings):
+    html_text, height, lines = recap_card_html(sport, week, live, settings)
+    png = render_png(html_text, 880, height)
+    league = CONFIG[sport].get("league_name", "League")
+    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
+    hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
+    embed = {"author": {"name": f"{league} · Week {week}", "icon_url": logo},
+             "description": "\n".join(lines), "color": 0x1FAA59}
+    if png:
+        embed["image"] = {"url": "attachment://recap.png"}
+    emoji = "🏈" if sport == "nfl" else "🏀"
+    return discord(hook, embed, f"{sport.upper()} weekly recap",
+                   content=f"📊 **WEEK {week} RECAP** · {emoji} {league}", files={"recap.png": png} if png else None)
+
+
+def maybe_weekly_recap(st, sport, force_week=None):
+    """From the recap day/time (UK) until the end of the next day: recap the last week Sleeper has scored."""
+    cfg = CONFIG[sport].get("weekly_recap") or {}
+    if not cfg.get("enabled", True) or not CONFIG[sport].get("sleeper_league_id"):
+        return
+    now = datetime.now(UK)
+    if not force_week:
+        late = (now.weekday() - WEEKDAYS.index(cfg.get("weekday", "Tuesday"))) % 7
+        if late > 1 or (late == 0 and now.hour < cfg.get("hour_uk", 13)):
+            return
+    try:
+        settings = league_settings(sport)
+        week = force_week or int(settings["settings"].get("last_scored_leg") or 0)
+    except Exception as e:  # noqa: BLE001
+        log(f"{sport} recap: league unavailable: {e}")
+        return
+    if not week:
+        return
+    key = f"{sport}-{settings.get('season')}-{week}"
+    done = st.setdefault("recaps", [])
+    if key in done and not force_week:
+        return
+    live = league_live(sport, week=week)
+    if not live or not live["pairs"]:
+        return
+    if post_weekly_recap(sport, week, live, settings):
+        st["recaps"] = (done + [key])[-40:]
+
+
 # ===================================================================== main
 
 def send_test():
@@ -2130,6 +2412,11 @@ def main():
         save_state(st)
         return
 
+    for sport in ("nfl", "nba"):          # weekly Sleeper league recaps (NFL Tue, NBA Mon, 13:00 UK)
+        try:
+            maybe_weekly_recap(st, sport)
+        except Exception as ex:  # noqa: BLE001
+            log(f"{sport} weekly recap error: {ex}")
     start = time.time()
     last_nba = 0.0
     while True:
