@@ -8238,6 +8238,32 @@ def maybe_daily_race(st):
                 log(f"daily race message {want} re-done in place" if ok else f"race message {want} not found")
 
 
+
+# ------------------------------------------------ outside watchdog: check in with healthchecks.io every few minutes
+# If the check-ins stop (bot or whole server down), healthchecks.io posts DOWN in #rick-only. URL lives in the
+# HEALTHCHECK_URL environment variable on the server (not in this public repo).
+
+_HC = {"t": 0.0}
+_save_state_hc = save_state
+
+
+def _hc_ping(url):
+    try:
+        urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "sports-bot"}), timeout=15).read()
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"watchdog check-in failed: {e}")
+
+
+def save_state(st):
+    r = _save_state_hc(st)
+    url = os.environ.get("HEALTHCHECK_URL", "").strip()
+    if url and time.time() - _HC["t"] >= 240:
+        _HC["t"] = time.time()
+        import threading
+        threading.Thread(target=_hc_ping, args=(url,), daemon=True).start()     # never holds up a post
+    return r
+
+
 # ===================================================================== main
 
 def send_test():
