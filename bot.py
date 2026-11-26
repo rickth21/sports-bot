@@ -105,7 +105,14 @@ def discord(hook, embed, label="", content=None, files=None):
                 for em in ems:
                     if (em.get("image") or {}).get("url") == f"attachment://{name}":
                         em["image"]["url"] = fp.as_uri()
-            CAPTURE.append({"content": content, "embeds": ems})
+            atts = []
+            if not embeds:
+                import tempfile as _tf2
+                for name, data in (files or {}).items():
+                    fp = Path(_tf2.mkdtemp()) / name
+                    fp.write_bytes(data)
+                    atts.append(fp.as_uri())
+            CAPTURE.append({"content": content, "embeds": ems, "attachments": atts})
         else:
             CAPTURE.append(embed)
         return True
@@ -2312,17 +2319,16 @@ def recap_card_html(sport, week, live, settings):
 
 def post_weekly_recap(sport, week, live, settings):
     html_text, height, lines = recap_card_html(sport, week, live, settings)
-    png = render_png(html_text, 880, height)
     league = CONFIG[sport].get("league_name", "League")
     logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
     hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
-    embed = {"author": {"name": f"{league} · Week {week}", "icon_url": logo},
-             "description": "\n".join(lines), "color": 0x1FAA59}
-    if png:
-        embed["image"] = {"url": "attachment://recap.png"}
+    html_text = html_text.replace("body,.card{height:", "body,.card{height:auto!important;min-height:").replace(
+        "</body>", "<script>addEventListener('load',()=>document.body.setAttribute('data-h',"
+                   "Math.ceil(document.querySelector('.card').getBoundingClientRect().height)))</script></body>")
+    embed = {"author": {"name": f"{league} · Week {week}", "icon_url": logo}, "color": 0x1FAA59,
+             "img_title": f"Week {week} recap", "img_desc": "\n".join(lines)}
     emoji = "🏈" if sport == "nfl" else "🏀"
-    return discord(hook, embed, f"{sport.upper()} weekly recap",
-                   content=f"📊 **WEEK {week} RECAP** · {emoji} {league}", files={"recap.png": png} if png else None)
+    return _post_card(hook, html_text, f"📊 **WEEK {week} RECAP** · {emoji} {league}", embed, "recap.png")
 
 
 def maybe_weekly_recap(st, sport, force_week=None):
@@ -3190,9 +3196,8 @@ def nfl_preview_fantasy_html(events, live, ol, title, show_teams=None):
             f"<div class='pill'>{'KICK-OFF IMMINENT' if now_utc() > parse_time(events[0]['date']) else 'KICK-OFF ' + k.strftime('%H:%M') + ' UK'}</div></div>"
             f"{games_strip_html(events, pre=True)}"
             + _preview_rows(live, ol, show_teams, league) +
-            f"<div class='sw'><div class='col'><div class='ch'>BIGGEST STAKES</div><b>{H.escape(live['rosters'][stakes]['manager'])}</b>"
-            f" — playoffs {_pct(ol[stakes]['po_w'])} with a win, {_pct(ol[stakes]['po_l'])} with a loss</div>"
-            f"<div class='col'><div class='ch'>SAFEST LEAD</div><b>{H.escape(live['rosters'][fav[0] if ol[fav[0]]['win'] > 50 else fav[1]]['manager'])}</b>"
+            f"<div class='sw' style='grid-template-columns:1fr'>"
+            f"<div class='col'><div class='ch'>SAFEST LEAD THIS WEEK</div><b>{H.escape(live['rosters'][fav[0] if ol[fav[0]]['win'] > 50 else fav[1]]['manager'])}</b>"
             f" — {max(ol[fav[0]]['win'], ol[fav[1]]['win']):.0f}% to win this week</div></div>")
     return _card("--a:#5b7bd5;--h:#d50a0a", body, width=1000)
 
@@ -3247,7 +3252,45 @@ AU_NFL = lambda: {"name": f"NFL · {CONFIG['nfl'].get('league_name', 'League')}"
 AU_NBA = lambda: {"name": f"NBA · {CONFIG['nba'].get('league_name', 'League')} league", "icon_url": NBA_LOGO}  # noqa: E731
 
 
+HL_CSS = """
+.hl{margin:12px 0 4px;padding:12px 16px;border-radius:12px;background:rgba(255,255,255,.07);border-left:4px solid #d97757}
+.hl .h1{font-size:22px;font-weight:900;line-height:1.25;letter-spacing:0}
+.hl .h2{font-size:15.5px;color:#dbe0ea;margin-top:5px;line-height:1.45;letter-spacing:0}
+.hl .h2 b{color:#fff}.hl .h2 i{color:#e9ecf3}
+"""
+
+
+def _md_inline(text):
+    import html as H
+    t = H.escape(text or "")
+    t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
+    t = re.sub(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)", r"<i>\1</i>", t)
+    return t.replace("\n", "<br>")
+
+
+def _inject_headline(html_text, embed):
+    """Put the post's headline (and extra lines) inside the card, just under its top bar."""
+    title = embed.get("img_title", embed.get("title"))
+    desc = embed.get("img_desc", embed.get("description"))
+    if not title and not desc:
+        return html_text
+    block = ("<div class='hl'>" + (f"<div class='h1'>{_md_inline(title)}</div>" if title else "") +
+             (f"<div class='h2'>{_md_inline(desc)}</div>" if desc else "") + "</div>")
+    i = html_text.find("<div class='top'>")
+    j = html_text.find("</div></div>", i) if i >= 0 else -1
+    if j < 0:
+        i = html_text.find("<div class='in'>")
+        return html_text[:i + 16] + block + html_text[i + 16:] if i >= 0 else html_text
+    j += len("</div></div>")
+    html_text = html_text[:j] + block + html_text[j:]
+    return html_text.replace("</style>", HL_CSS + "</style>", 1)
+
+
 def _post_card(hook, html_text, content, embed, name):
+    if (CONFIG.get("bot") or {}).get("image_only", True):
+        png = render_card(_inject_headline(html_text, embed))
+        if png:
+            return discord(hook, [], name, files={name: png})
     png = render_card(html_text)
     if png:
         embed["image"] = {"url": f"attachment://{name}"}
@@ -3358,7 +3401,9 @@ def post_td_fantasy(event, play, summary, ctx):
         _, qg = play_fpts(td)
         who += (f" · QB {short_name(td['qb'])} +{qg:.1f}" + (f" (now {fmt_pts(qn)})" if qn is not None else "") +
                 (f" for {qo['manager']}" if qo else ""))
-    embed = {"author": AU_NFL(), "color": color(team["team"].get("color")), "title": who}
+    embed = {"author": AU_NFL(), "color": color(team["team"].get("color")), "title": who,
+             "img_title": f"{td['scorer']} scores for the {nick}!" if td['kind'] != 'pass'
+             else f"{td['qb']} finds {td['scorer']} — touchdown {nick}!"}
     if call:
         embed["description"] = call
     content = (f"🏈 **TOUCHDOWN {nick.upper()}** · {away['team']['abbreviation']} {a_s}–{h_s} "

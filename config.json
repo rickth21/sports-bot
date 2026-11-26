@@ -1,5 +1,5 @@
 {
-  "bot": { "name": "Donald Claude", "avatar_url": "https://raw.githubusercontent.com/rickth21/sports-bot/main/avatar.png" },
+  "bot": { "name": "Donald Claude", "image_only": true, "avatar_url": "https://raw.githubusercontent.com/rickth21/sports-bot/main/avatar.png" },
   "nfl": {
     "standard_window_note": "Games kicking off Sunday 18:00-23:59 UK time get FT score + fantasy only. Every other game is 'prime time' and also gets live touchdown posts.",
     "standard_window": { "weekday": "Sunday", "start_hour_uk": 18, "end_hour_uk": 24 },
