@@ -6609,6 +6609,10 @@ ANIM_CSS = """
 .otw{animation:a_ot 1s ease-in-out infinite}
 .vd.fleece{animation:a_siren .5s linear infinite}
 .ts.win{animation:a_win 1s ease-in-out infinite}
+@keyframes a_stamp{0%,100%{transform:rotate(-4deg) scale(1)}50%{transform:rotate(-4deg) scale(1.1)}}
+.stp.in .stamp,.stp.bye .stamp{animation:a_stamp 1s ease-in-out infinite}
+@keyframes a_champ{0%,100%{box-shadow:0 0 30px rgba(255,209,102,.8)}50%{box-shadow:0 0 60px rgba(255,209,102,1)}}
+.bkch img,.bkch .bkav{animation:a_champ 1s ease-in-out infinite}
 """
 ANIM_FREEZE = ("*,*::before,*::after{animation-play-state:paused!important;"
                "animation-delay:calc(var(--t,0) * -1s)!important}")
@@ -6618,7 +6622,8 @@ def wants_animation(html_text):
     """Only the big moments move: scoring scoreboards, overtime, season highs and trades."""
     if not (CONFIG.get("animations") or {}).get("enabled", True):
         return False
-    return any(k in html_text for k in ("class='sc hot'", "class='otw'", " sh'", "class='shr'", "class='tw", "class='vd "))
+    return any(k in html_text for k in ("class='sc hot'", "class='otw'", " sh'", "class='shr'", "class='tw", "class='vd ",
+                                        "class='stamp'", "class='card shc'"))
 
 
 def render_anim(html_text, width=None):
@@ -6702,6 +6707,349 @@ def _post_card(hook, html_text, content, embed, name):
         if gif:
             return discord(hook, [], name, files={name.rsplit(".", 1)[0] + ".gif": gif})
     return _post_card_still(hook, html_text, content, embed, name)
+
+
+
+# ------------------------------------------------ playoffs: clinched / eliminated posts and the bracket
+
+def completed_week(sport, settings):
+    """Last week whose games are all finished. NFL: the current week counts as soon as its last game ends."""
+    s = settings.get("settings") or {}
+    done = int(s.get("last_scored_leg") or 0)
+    if sport == "nfl":
+        leg = int(s.get("leg") or 0)
+        if leg > done:
+            try:
+                evs = fetch(f"football/nfl/scoreboard?seasontype=2&week={leg}").get("events", [])
+                if evs and all(e["status"]["type"].get("completed") for e in evs):
+                    done = leg
+            except Exception:  # noqa: BLE001
+                pass
+    return done
+
+
+def _byes(n_po):
+    size = 1
+    while size < n_po:
+        size *= 2
+    return size - n_po                                     # 6-team playoffs -> 2 byes
+
+
+def playoff_status(settings, rec, week):
+    """Per roster: 'bye' (bye clinched), 'in' (spot clinched), 'out' (eliminated) or 'alive', plus the magic number.
+    Mathematically certain: ties always count against the team, so nothing is called early."""
+    s = settings.get("settings") or {}
+    po, n = int(s.get("playoff_week_start") or 15), int(s.get("playoff_teams") or 6)
+    byes = _byes(n)
+    rem = max(po - 1 - week, 0)
+    wins = {r: rec[r]["w"] + 0.5 * rec[r]["t"] for r in rec}
+    out = {}
+    if rem == 0:                                          # regular season over: the real seeding decides
+        order = sorted(rec, key=lambda r: (-wins[r], -rec[r]["pf"]))
+        for i, r in enumerate(order):
+            out[r] = {"status": "bye" if i < byes else ("in" if i < n else "out"), "magic": None, "seed": i + 1}
+        return out
+    for r in rec:
+        others = [t for t in rec if t != r]
+        can_catch = sum(1 for t in others if wins[t] + rem >= wins[r])
+        if byes and can_catch <= byes - 1:
+            st_ = "bye"
+        elif can_catch <= n - 1:
+            st_ = "in"
+        elif sum(1 for t in others if wins[t] > wins[r] + rem) >= n:
+            st_ = "out"
+        else:
+            st_ = "alive"
+        magic = None
+        if st_ == "alive":
+            magic = next((k for k in range(1, rem + 1)
+                          if sum(1 for t in others if wins[t] + rem >= wins[r] + k) <= n - 1), None)
+        out[r] = {"status": st_, "magic": magic}
+    for i, r in enumerate(sorted(rec, key=lambda r: (-wins[r], -rec[r]["pf"]))):
+        out[r]["seed"] = i + 1
+    return out
+
+
+PO_CSS = """
+.pw{display:grid;grid-template-columns:520px 1fr;gap:16px;margin-top:12px}
+.nw{display:flex;flex-direction:column;gap:10px}
+.stp{display:grid;grid-template-columns:64px 1fr auto;gap:14px;align-items:center;border-radius:16px;padding:12px 16px;
+ background:rgba(255,255,255,.06);border:2px solid rgba(255,255,255,.12)}
+.stp img,.stp .av{width:64px;height:64px;border-radius:50%;object-fit:cover;background:#2a3350;display:flex;align-items:center;
+ justify-content:center;font-weight:900;font-size:26px}
+.stp b{display:block;font-size:26px;font-weight:900}.stp small{font-size:15px;color:#cfd5e1;font-weight:700}
+.stamp{font-size:20px;font-weight:900;letter-spacing:2px;padding:8px 14px;border-radius:10px;transform:rotate(-4deg);white-space:nowrap}
+.stp.in{border-color:#1faa59;background:rgba(31,170,89,.16)}.stp.in .stamp{background:#1faa59;color:#fff;box-shadow:0 0 22px rgba(31,170,89,.7)}
+.stp.bye{border-color:#ffd166;background:rgba(255,209,102,.14)}.stp.bye .stamp{background:linear-gradient(90deg,#ffd166,#ffb347);color:#1b1305;
+ box-shadow:0 0 24px rgba(255,190,70,.8)}
+.stp.out{border-color:#7a1f2b;background:rgba(122,31,43,.25)}.stp.out .stamp{background:#3a1218;color:#ff9a9e;border:2px solid #ff9a9e}
+.ps{background:rgba(255,255,255,.05);border-radius:14px;padding:8px 12px}
+.pr3{display:grid;grid-template-columns:34px 1fr 64px 70px 170px 70px;gap:10px;align-items:center;height:40px;font-size:17px;
+ font-variant-numeric:tabular-nums;border-radius:8px;padding:0 10px}
+.pr3:nth-child(odd){background:rgba(255,255,255,.035)}
+.pr3.h{height:26px;font-size:11.5px;letter-spacing:1.4px;color:#9aa3b5;font-weight:800;background:none}
+.pr3 .m{font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pr3 .sd{color:#9aa3b5;font-weight:900}
+.pr3.cut{box-shadow:inset 0 -2px 0 rgba(255,209,102,.7)}.pr3.byecut{box-shadow:inset 0 -2px 0 rgba(255,255,255,.25)}
+.chip{font-size:11.5px;font-weight:900;letter-spacing:1px;border-radius:6px;padding:3px 8px;text-align:center;white-space:nowrap}
+.chip.bye{background:linear-gradient(90deg,#ffd166,#ffb347);color:#1b1305}.chip.in{background:#1faa59;color:#fff}
+.chip.out{background:#3a1218;color:#ff9a9e}.chip.alive{background:rgba(255,255,255,.1);color:#dfe5f1}
+.pr3 .pc{text-align:right;font-weight:900}
+.pr3.new{outline:2px solid #ffd166;outline-offset:-2px}
+"""
+
+
+def _avatar(pe):
+    import html as H
+    return (f"<img src='https://sleepercdn.com/avatars/thumbs/{H.escape(pe['avatar'])}'>" if pe.get("avatar")
+            else f"<div class='av'>{H.escape(pe['manager'][:1].upper())}</div>")
+
+
+def playoff_picture_html(sport, settings, rec, status, changes, odds, week):
+    import html as H
+    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
+    people = _league_people(sport)
+    s = settings.get("settings") or {}
+    n, po = int(s.get("playoff_teams") or 6), int(s.get("playoff_week_start") or 15)
+    byes = _byes(n)
+    words = {"bye": ("BYE CLINCHED", "a first-round bye is locked in"), "in": ("CLINCHED", "a playoff spot is locked in"),
+             "out": ("ELIMINATED", "no way back into the top " + str(n))}
+    tiles = []
+    for rid, old, new in changes:
+        pe = people.get(rid, {"manager": "?"})
+        r = rec[rid]
+        tiles.append(f"<div class='stp {new}'>{_avatar(pe)}<div><b>{H.escape(pe['manager'])}</b>"
+                     f"<small>{r['w']}-{r['l']} · {H.escape(words[new][1])}</small></div>"
+                     f"<div class='stamp'>{'🔒 ' if new != 'out' else '❌ '}{words[new][0]}</div></div>")
+    rows = ["<div class='pr3 h'><span>#</span><span>MANAGER</span><span>W-L</span><span>PF</span><span>STATUS</span>"
+            "<span style='text-align:right'>PLAYOFFS</span></div>"]
+    newset = {c[0] for c in changes}
+    for rid in sorted(rec, key=lambda r: status[r]["seed"]):
+        x, stt = rec[rid], status[rid]
+        if stt["status"] == "alive":
+            chip = (f"<span class='chip alive'>{stt['magic']} WIN{'S' if stt['magic'] != 1 else ''} TO CLINCH</span>"
+                    if stt["magic"] else "<span class='chip alive'>IN THE HUNT</span>")
+        else:
+            chip = f"<span class='chip {stt['status']}'>{ {'bye': 'BYE ✓', 'in': 'CLINCHED ✓', 'out': 'ELIMINATED'}[stt['status']] }</span>"
+        cls = " cut" if stt["seed"] == n else (" byecut" if stt["seed"] == byes and byes else "")
+        rows.append(f"<div class='pr3{cls}{' new' if rid in newset else ''}'><span class='sd'>{stt['seed']}</span>"
+                    f"<span class='m'>{H.escape(people.get(rid, {}).get('manager', '?'))}</span>"
+                    f"<span>{x['w']}-{x['l']}{'-' + str(x['t']) if x['t'] else ''}</span><span>{x['pf']:.0f}</span>{chip}"
+                    f"<span class='pc'>{odds.get(rid, (0, 0))[0]:.0f}%</span></div>")
+    ins = [people[c[0]]["manager"] for c in changes if c[2] in ("in", "bye") and c[0] in people]
+    outs = [people[c[0]]["manager"] for c in changes if c[2] == "out" and c[0] in people]
+    head = " · ".join(x for x in (
+        (" & ".join(ins) + (" clinch" if len(ins) > 1 else " clinches") + " a playoff spot!") if ins else "",
+        (" & ".join(outs) + (" are" if len(outs) > 1 else " is") + " eliminated") if outs else "") if x)
+    left = max(po - 1 - week, 0)
+    body = (f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape((settings.get('name') or '').upper())} · PLAYOFF PICTURE"
+            f" · AFTER WEEK {week}</div><div class='pill'>{left} WEEK{'S' if left != 1 else ''} LEFT · TOP {n} · {byes} BYES</div></div>"
+            f"<div class='hl'><div class='h1'>{H.escape(head)}</div>"
+            f"<div class='h2'>The gold line is the playoff cut; the top {byes} skip the first round.</div></div>"
+            f"<div class='pw'><div class='nw'>{''.join(tiles)}</div><div class='ps'>{''.join(rows)}</div></div>")
+    html_text = _card("--a:#1faa59;--h:#d4af37", body, None, HL_CSS + PO_CSS + "body,.card{width:1400px!important}", width=1400)
+    return _nba_theme(html_text, None, "PLAYOFF PICTURE") if sport == "nba" else html_text
+
+
+# ---- bracket
+
+def team_model(scores):
+    """Mean and spread of each team's weekly score (shrunk towards the league average)."""
+    allp = [p for v in scores.values() for p in v if p > 0]
+    lg = sum(allp) / len(allp) if allp else 100
+    sd = ((sum((p - lg) ** 2 for p in allp) / max(1, len(allp) - 1)) ** 0.5 if allp else 20) * 0.85
+    return {r: ((sum(p for p in v if p > 0) + 2 * lg) / (len([p for p in v if p > 0]) + 2)) for r, v in scores.items()}, max(sd, 1.0)
+
+
+def build_bracket(sport, settings, status, week):
+    """Seeds, byes, every playoff game so far (with scores) and what's next. Standard Sleeper format:
+    round 1 = 3v6 and 4v5, then 1 plays the 4/5 winner and 2 the 3/6 winner, then the final."""
+    s = settings.get("settings") or {}
+    po = int(s.get("playoff_week_start") or 15)
+    seed = {status[r]["seed"]: r for r in status if status[r]["seed"] <= int(s.get("playoff_teams") or 6)}
+    lid = str(CONFIG[sport].get("sleeper_league_id")).strip()
+
+    def pts(wk):
+        if wk > week:
+            return {}
+        try:
+            return {m["roster_id"]: float(m.get("points") or 0) for m in fetch_url(f"{SLEEPER}/league/{lid}/matchups/{wk}")}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def game(a, b, wk):
+        p = pts(wk)
+        g = {"a": a, "b": b, "wk": wk, "pa": p.get(a), "pb": p.get(b), "win": None}
+        if a is not None and b is not None and wk <= week and g["pa"] is not None and g["pb"] is not None:
+            g["win"] = a if g["pa"] >= g["pb"] else b
+        return g
+    r1 = [game(seed.get(4), seed.get(5), po), game(seed.get(3), seed.get(6), po)]
+    r2 = [game(seed.get(1), r1[0]["win"], po + 1), game(seed.get(2), r1[1]["win"], po + 1)]
+    fin = game(r2[0]["win"], r2[1]["win"], po + 2)
+    return {"seed": seed, "r1": r1, "r2": r2, "final": fin, "champ": fin["win"], "po": po}
+
+
+def bracket_odds(br, scores, sims=6000):
+    """Title chances from here: simulate every unplayed game with each team's scoring level."""
+    import random as _r
+    mean, sd = team_model(scores)
+    rnd = _r.Random(11)
+    wins = {}
+
+    def play(a, b):
+        return a if rnd.gauss(mean.get(a, 100), sd) >= rnd.gauss(mean.get(b, 100), sd) else b
+    for _ in range(sims):
+        w1 = [g["win"] or play(g["a"], g["b"]) for g in br["r1"]]
+        w2 = [br["r2"][i]["win"] or play(br["r2"][i]["a"], w1[i]) for i in range(2)]
+        ch = br["final"]["win"] or play(w2[0], w2[1])
+        wins[ch] = wins.get(ch, 0) + 1
+    return {r: 100.0 * c / sims for r, c in wins.items()}
+
+
+BR_CSS = """
+.bkg{display:grid;grid-template-columns:1fr 1fr 1fr 300px;gap:22px;margin-top:14px;align-items:stretch}
+.bkc{display:flex;flex-direction:column;gap:10px}.bkc .bkm{flex:1;display:flex;flex-direction:column;justify-content:space-around;gap:14px}
+.bkc .bkh{font-size:12px;letter-spacing:2px;color:#9aa3b5;font-weight:900;text-align:center}
+.bkmu{background:rgba(255,255,255,.06);border-radius:14px;padding:6px;display:flex;flex-direction:column;gap:5px;position:relative}
+.bks{display:grid;grid-template-columns:30px 40px 1fr auto;gap:10px;align-items:center;border-radius:10px;padding:6px 10px;
+ background:rgba(0,0,0,.22);min-height:54px}
+.bks img,.bks .bkav{width:40px;height:40px;border-radius:50%;object-fit:cover;background:#2a3350;display:flex;align-items:center;
+ justify-content:center;font-weight:900;font-size:17px}
+.bks .bksd{font-weight:900;color:#ffd166;text-align:center;font-size:16px}
+.bks b{display:block;font-size:18px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bks small{font-size:12.5px;color:#aab3c5;font-weight:700}
+.bks .bksc{font-size:22px;font-weight:900;font-variant-numeric:tabular-nums}.bks .bkod{font-size:15px;font-weight:900;color:#7ee2a8}
+.bks.bkw{background:linear-gradient(90deg,rgba(255,209,102,.28),rgba(255,209,102,.08));box-shadow:inset 4px 0 0 #ffd166}
+.bks.bkl{opacity:.42}.bks.bkt b{color:#8b95a8}
+.bkbye{font-size:12px;letter-spacing:1.5px;font-weight:900;color:#ffd166;text-align:center;padding:4px}
+.bkch{border-radius:18px;padding:18px;text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
+ background:radial-gradient(circle at 50% 30%,rgba(255,209,102,.35),rgba(255,209,102,.05) 70%);border:2px solid rgba(255,209,102,.6)}
+.bkch .bktr{font-size:70px;line-height:1}.bkch b{font-size:28px;font-weight:900}.bkch small{font-size:14px;color:#dfe5f1;font-weight:700}
+.bkch img,.bkch .bkav{width:96px;height:96px;border-radius:50%;object-fit:cover;background:#2a3350;border:4px solid #ffd166;
+ box-shadow:0 0 30px rgba(255,209,102,.8);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:36px}
+.bkodl{display:flex;flex-direction:column;gap:6px;width:100%;margin-top:6px}
+.bkodl div{display:grid;grid-template-columns:1fr 52px;font-size:15px;font-weight:800;text-align:left}
+.bkodl i{grid-column:1/-1;height:7px;border-radius:4px;background:rgba(255,255,255,.08);overflow:hidden;font-style:normal}
+.bkodl i em{display:block;height:7px;background:linear-gradient(90deg,#ffd166,#ffb347)}
+"""
+
+
+def _bkav(pe):
+    return _avatar(pe).replace("class='av'", "class='bkav'")
+
+
+def bracket_html(sport, settings, br, rec, odds, stage):
+    import html as H
+    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
+    people = _league_people(sport)
+    seed_of = {r: s for s, r in br["seed"].items()}
+
+    def slot(rid, g=None, side=None):
+        if rid is None:
+            return "<div class='bks bkt'><span class='bksd'>?</span><div class='bkav'>?</div><div><b>To be decided</b></div><span></span></div>"
+        pe = people.get(rid, {"manager": "?"})
+        x = rec.get(rid, {"w": 0, "l": 0})
+        cls, right = "", (f"<span class='bkod'>{odds.get(rid, 0):.0f}%</span>" if odds else "<span></span>")
+        if g and g.get("win"):
+            cls = " bkw" if g["win"] == rid else " bkl"
+            right = f"<span class='bksc'>{(g['pa'] if side == 'a' else g['pb']):.1f}</span>"
+        return (f"<div class='bks{cls}'><span class='bksd'>{seed_of.get(rid, '')}</span>{_bkav(pe)}"
+                f"<div><b>{H.escape(pe['manager'])}</b><small>{x['w']}-{x['l']}</small></div>{right}</div>")
+
+    def mu(g, note=""):
+        return f"<div class='bkmu'>{slot(g['a'], g, 'a')}{slot(g['b'], g, 'b')}{note}</div>"
+    po = br["po"]
+    r1 = (f"<div class='bkc'><div class='bkh'>ROUND 1 · WEEK {po}</div><div class='bkm'>"
+          f"<div class='bkmu'>{slot(br['seed'].get(1))}<div class='bkbye'>BYE TO THE SEMI-FINALS</div></div>"
+          f"{mu(br['r1'][0])}{mu(br['r1'][1])}"
+          f"<div class='bkmu'>{slot(br['seed'].get(2))}<div class='bkbye'>BYE TO THE SEMI-FINALS</div></div></div></div>")
+    r2 = (f"<div class='bkc'><div class='bkh'>SEMI-FINALS · WEEK {po + 1}</div><div class='bkm'>"
+          f"{mu(br['r2'][0])}{mu(br['r2'][1])}</div></div>")
+    fn = f"<div class='bkc'><div class='bkh'>FINAL · WEEK {po + 2}</div><div class='bkm'>{mu(br['final'])}</div></div>"
+    if br["champ"]:
+        pe = people.get(br["champ"], {"manager": "?"})
+        side = (f"<div class='bkch'><div class='bktr'>🏆</div>{_bkav(pe)}<b>{H.escape(pe['manager'])}</b>"
+                f"<small>{H.escape((settings.get('name') or 'League'))} champion {settings.get('season', '')}</small></div>")
+    else:
+        alive = sorted(odds.items(), key=lambda kv: -kv[1])
+        bars = "".join(f"<div><span>{H.escape(people.get(r, {}).get('manager', '?'))}</span><span>{p:.0f}%</span>"
+                       f"<i><em style='width:{max(p, 2):.0f}%'></em></i></div>" for r, p in alive)
+        side = f"<div class='bkch'><div class='bktr'>🏆</div><small>TITLE ODDS · SIMULATED 6,000 TIMES</small><div class='bkodl'>{bars}</div></div>"
+    titles = {0: "THE PLAYOFFS ARE SET", 1: "ROUND 1 RESULTS", 2: "THE FINAL IS SET", 3: "CHAMPION CROWNED"}
+    head = {0: "Six teams, one trophy: the bracket is set",
+            1: "Round 1 is done: the semi-finals are set",
+            2: "Two left standing: it's the final",
+            3: f"🏆 {people.get(br['champ'], {}).get('manager', '?')} is the champion!"}.get(stage, "")
+    body = (f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape((settings.get('name') or '').upper())} · PLAYOFFS "
+            f"{settings.get('season', '')}</div><div class='pill'>{titles.get(stage, 'PLAYOFFS')}</div></div>"
+            f"<div class='hl'><div class='h1'>{H.escape(head)}</div></div>"
+            f"<div class='bkg'>{r1}{r2}{fn}{side}</div>")
+    html_text = _card("--a:#d4af37;--h:#5b7bd5", body, None,
+                      HL_CSS + BR_CSS + "body,.card{width:1560px!important}",
+                      width=1560)
+    if br["champ"]:
+        html_text = html_text.replace("<div class='card'", "<div class='card shc'", 1).replace("</style>", SH_CSS + "</style>", 1)
+    return _nba_theme(html_text, None, "PLAYOFFS") if sport == "nba" else html_text
+
+
+def maybe_playoffs(st):
+    """Post when someone clinches / is eliminated, the bracket when the playoffs are set, after each round, and the champion."""
+    for sport in ("nfl", "nba"):
+        if not CONFIG[sport].get("sleeper_league_id") or not (CONFIG[sport].get("playoff_posts") or {}).get("enabled", True):
+            continue
+        try:
+            settings = league_settings(sport)
+            s = settings.get("settings") or {}
+            po = int(s.get("playoff_week_start") or 15)
+            week = completed_week(sport, settings)
+            if week < 1:
+                continue
+            reg = min(week, po - 1)
+            scores, rec = season_history(sport, reg)
+            if not rec:
+                continue
+            status = playoff_status(settings, rec, reg)
+            key = f"{sport}-{settings.get('season')}"
+            store = st.setdefault("playoffs", {}).setdefault(key, {})
+            prev = store.get("status")
+            if prev is None:                                  # first look: remember quietly
+                store["status"] = {str(r): v["status"] for r, v in status.items()}
+            else:
+                changes = [(r, prev.get(str(r)), v["status"]) for r, v in status.items()
+                           if v["status"] in ("in", "bye", "out") and prev.get(str(r)) != v["status"]
+                           and not (prev.get(str(r)) == "bye" and v["status"] == "in")]
+                if changes and reg < po - 1 + 1:
+                    odds, _, _ = simulate_odds(sport, settings, scores, rec, reg)
+                    hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
+                    html_text = playoff_picture_html(sport, settings, rec, status, changes, odds, reg)
+                    post = _nba_post if sport == "nba" else (lambda h, c, e, n: _post_card(hook, h, c, e, n))
+                    if post(html_text, "🔒 **PLAYOFF PICTURE**", {}, "playoffs.png"):
+                        store["status"] = {str(r): v["status"] for r, v in status.items()}
+                else:
+                    store["status"] = {str(r): v["status"] for r, v in status.items()}
+            if week >= po - 1:                                # bracket: set, after each round, champion
+                stage = min(week - (po - 1), 3)
+                if store.get("bracket_stage", -1) < stage:
+                    br = build_bracket(sport, settings, status, week)
+                    hscores, _ = season_history(sport, po - 1)
+                    odds = {} if br["champ"] else bracket_odds(br, hscores)
+                    html_text = bracket_html(sport, settings, br, rec, odds, stage)
+                    hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
+                    post = _nba_post if sport == "nba" else (lambda h, c, e, n: _post_card(hook, h, c, e, n))
+                    if post(html_text, "🏆 **PLAYOFFS**", {}, "bracket.png"):
+                        store["bracket_stage"] = stage
+        except Exception as ex:  # noqa: BLE001
+            log(f"{sport} playoff posts error: {ex}")
+
+
+_maybe_daily_race_po = maybe_daily_race
+
+
+def maybe_daily_race(st):
+    try:
+        maybe_playoffs(st)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"playoff check failed: {ex}")
+    return _maybe_daily_race_po(st)
 
 
 # ===================================================================== main
