@@ -4572,6 +4572,217 @@ def nfl_prime_slot(slot, st, getctx, force=False):
     return _nfl_prime_slot_v5(slot, st, getctx, force)
 
 
+# ------------------------------------------------ clutch field goals (one-score game, final minute / overtime)
+
+FG_CSS = """
+.sb5{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:18px;margin-top:10px;background:rgba(9,12,22,.62);
+ border-radius:14px;padding:12px 18px}
+.sb5 .tm{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:900;color:#e3e7ef}
+.sb5 .tm.r{justify-content:flex-end}
+.sb5 .tm img{width:52px;height:52px;object-fit:contain}
+.sb5 .sc{font-size:46px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1}
+.sb5 .sc.lo{color:#8b95a8}
+.sb5 .mid{text-align:center}
+.sb5 .clk{font-size:13px;letter-spacing:1.5px;font-weight:800;color:#ffd166}
+.sb5 .wp{font-size:12px;color:#c3cad8;font-weight:700;margin-top:4px}
+"""
+
+
+def clutch_fg(play, event):
+    """A field goal kicked when the game was within 3, with under a minute left in the 4th (or any in overtime)."""
+    if (play.get("type") or {}).get("abbreviation") != "FG":
+        return False
+    q = (play.get("period") or {}).get("number", 0)
+    try:
+        m, s = (play.get("clock") or {}).get("displayValue", "15:00").split(":")
+        left = int(m) * 60 + int(s)
+    except ValueError:
+        left = 900
+    if q > 4:
+        return bool(CONFIG["nfl"].get("overtime_posts"))
+    if not CONFIG["nfl"].get("clutch_field_goals") or q < 4 or left > 60:
+        return False
+    away, _ = teams_of(event)
+    a, h = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    before = (a - 3) - h if play["team"]["abbreviation"] == away["team"]["abbreviation"] else a - (h - 3)
+    return abs(before) <= 3
+
+
+def nfl_fg_html(event, play, summary, live, ol, base):
+    import html as H
+    away, home = teams_of(event)
+    abbr = play["team"]["abbreviation"]
+    kt = away if abbr == away["team"]["abbreviation"] else home
+    other = home if kt is away else away
+    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    q = play.get("period", {}).get("number", 0)
+    clock = play.get("clock", {}).get("displayValue", "")
+    m = re.match(r"^(.+?) (\d+) Yd Field Goal", play.get("text") or "")
+    kicker, yds = (m.group(1), int(m.group(2))) if m else ("Kicker", 0)
+    proj = nfl_projections(live["week"])
+    final = event["status"]["type"].get("state") == "post"
+    mine, theirs = (a_s, h_s) if kt is away else (h_s, a_s)
+    tag = ("WALK-OFF" if final and mine > theirs else "TIES IT" if mine == theirs else
+           "GO-AHEAD" if mine > theirs and mine - 3 <= theirs else f"LEAD NOW {mine - theirs}" if mine > theirs
+           else f"WITHIN {theirs - mine}")
+    wp = ""
+    for w in summary.get("winprobability") or []:
+        if str(w.get("playId")) == str(play.get("id")):
+            hp = float(w.get("homeWinPercentage") or 0) * 100
+            fav, pct = (home, hp) if hp >= 50 else (away, 100 - hp)
+            wp = f"<div class='wp'>ESPN win chance: {fav['team']['abbreviation']} {pct:.0f}%</div>"
+
+    def side(t, sc, lo, right):
+        img = f"<img src='{H.escape(t['team'].get('logo', ''))}'>"
+        name = f"<span>{t['team']['abbreviation']}</span>"
+        score = f"<span class='sc{' lo' if lo else ''}'>{sc}</span>"
+        inner = (score + name + img) if right else (img + name + score)
+        return f"<div class='tm{' r' if right else ''}'>{inner}</div>"
+    sb = (f"<div class='sb5'>{side(away, a_s, a_s < h_s, False)}"
+          f"<div class='mid'><div class='clk'>{'FINAL' if final else ('OT' if q > 4 else 'Q4') + ' · ' + clock + ' LEFT'}</div>{wp}</div>"
+          f"{side(home, h_s, h_s < a_s, True)}</div>")
+
+    # kicker panel (same look as the touchdown card)
+    k = next((x for x in nfl_kickers(summary) if name_key(x["name"]) == name_key(kicker)), None)
+    kid = k["id"] if k else boxscore_id(summary, kicker)
+    o = league_owner(kid, kicker)
+    gain = kicker_fpts(yds)
+    pj = proj.get(str(_sl_pid(kicker, abbr) or ""), 0.0)
+    now = k["pts"] if k else None
+    bar = ""
+    if pj and now is not None:
+        pct = min(100.0, now / pj * 100)
+        bar = (f"<div class='pb5'><div class='bar'><div class='{'over' if now >= pj else ''}' style='width:{max(pct, 3):.0f}%'></div></div>"
+               f"<span>{'<b>beat</b> ' if now >= pj else ''}proj <b>{pj:.1f}</b></span></div>")
+    own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
+           else "<b>Unrostered</b> — free agent")
+    panel = (f"<div class='pair one'><div class='pp5'><img src='{H.escape(nfl_headshot(kid) or kt['team'].get('logo', ''))}'><div>"
+             f"<div class='role'>KICKER · {abbr}</div><div class='nm'>{H.escape(kicker)}</div>"
+             f"<div class='gn'><b>+{gain:g}</b>{f'<span>now <em>{fmt_pts(now)}</em> pts</span>' if now is not None else ''}</div>"
+             f"{bar}<div class='ow3'>{own}</div></div></div></div>")
+
+    # fantasy impact: kicker's owner + the defence that conceded
+    rows = []
+    if o:
+        rid = next((r for r, x in live["rosters"].items() if x["manager"] == o["manager"]), None)
+        opp = next((b if a == rid else a for a, b in live["pairs"] if rid in (a, b)), None) if rid else None
+        if opp:
+            pa, pb = _proj_total(rid, live, ol, event, proj), _proj_total(opp, live, ol, event, proj)
+            rows.append(f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(o['manager'])}</b>"
+                        f"<span>projected <b class='{'u' if pa >= pb else 'dn'}'>{pa:.1f}</b> – {pb:.1f} vs "
+                        f"{H.escape(live['rosters'][opp]['manager'])}</span>"
+                        f"<span>win <b>{ol[rid]['win']:.0f}%</b></span><span>playoffs <b>{ol[rid]['po']:.0f}%</b></span></div>")
+    od = league_owner(f"def:{sl_team(other['team']['abbreviation'])}", "")
+    if od:
+        sc = league_scoring("nfl")
+
+        def tier(n):
+            for lo, hi, key in ((0, 0, "pts_allow_0"), (1, 6, "pts_allow_1_6"), (7, 13, "pts_allow_7_13"),
+                                (14, 20, "pts_allow_14_20"), (21, 27, "pts_allow_21_27"), (28, 34, "pts_allow_28_34"),
+                                (35, 999, "pts_allow_35p")):
+                if lo <= n <= hi:
+                    return float(sc.get(key) or 0)
+            return 0.0
+        d = tier(mine) - tier(mine - 3)
+        if abs(d) >= 0.05:
+            dn = next((x for x in nfl_defenses(summary, event) if x["team"] == other["team"]["abbreviation"]), None)
+            now_d = f" → now <b>{fmt_pts(dn['pts'])}</b> pts" if dn else ""
+            rows.append(f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(od['manager'])}</b>"
+                        f"<span>{H.escape(other['team'].get('name') or '')} D/ST loses <b class='dn'>{abs(d):g}</b>"
+                        f"{now_d} ({mine} allowed)</span>"
+                        f"<span>{'starting' if od['starting'] else 'bench'}</span><span></span></div>")
+    if not o:
+        rows.insert(0, f"<div class='im'><span class='ar'>🆓</span><b class='who5'>{H.escape(kicker)}</b>"
+                       f"<span>is unrostered — {gain:g} pts going spare on waivers</span><span></span><span></span></div>")
+    imp = f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>" if rows else ""
+
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>FIELD GOAL · {'OT' if q > 4 else 'Q' + str(q)} {clock} · "
+            f"{away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div>"
+            f"<div class='pill'>{tag}</div></div>{sb}"
+            f"<div class='sec' style='margin-top:10px'>{yds}-YARD FIELD GOAL · GOOD</div>{panel}{imp}")
+    t = kt["team"]
+    ca = vivid(t.get("color") or "1faa59")
+    ch = vivid(t.get("alternateColor") or t.get("color") or "5b7bd5", min_l=0.5)
+    co = vivid(other["team"].get("color") or "5b7bd5")
+    bg = (f".bg{{opacity:1!important;background:"
+          f"linear-gradient(120deg,{ca}d9 0%,{ca}73 38%,rgba(13,18,32,0) 78%),"
+          f"linear-gradient(300deg,{co}38 0%,rgba(13,18,32,0) 22%)!important}}"
+          f".hl{{border-left-color:{ch}!important}}")
+    return _card(f"--a:{ca};--h:{ch}", body, extra_css=V4_CSS + TD5_CSS + FG_CSS + bg), tag, kicker, yds, kt, mine, theirs
+
+
+def post_fg_clutch(event, play, summary, ctx):
+    html_text, tag, kicker, yds, kt, mine, theirs = nfl_fg_html(event, play, summary, ctx["live"], ctx["ol"], ctx["base"])
+    nick = kt["team"].get("name") or kt["team"]["abbreviation"]
+    left = play.get("clock", {}).get("displayValue", "")
+    what = {"WALK-OFF": f"{nick} win it {mine}–{theirs}!",
+            "TIES IT": f"all square at {mine} with {left} left!",
+            "GO-AHEAD": f"{nick} lead {mine}–{theirs} with {left} left!"}.get(tag, f"{nick} {mine}–{theirs} with {left} left")
+    embed = {"author": AU_NFL(), "color": color(kt["team"].get("color")),
+             "title": f"{kicker} from {yds} — {what}"}
+    return _post_card(NFL_HOOK, html_text, f"🏈 FIELD GOAL {nick.upper()}", embed, "fg.png")
+
+
+_nfl_prime_slot_fg = nfl_prime_slot
+
+
+def post_overtime(event, summary, ctx):
+    """The game is heading to overtime: everyone's points after regulation + projected matchups."""
+    away, home = teams_of(event)
+    a, h = int(num(away.get("score"))), int(num(home.get("score")))
+    html_text = nfl_game_fantasy_html(event, summary, ctx["live"], ctx["ol"], ctx["base"])
+    html_text = (html_text.replace("<div class='pill'>FULL-TIME</div>", "<div class='pill'>OVERTIME</div>", 1)
+                 .replace("YOUR LEAGUE'S PLAYERS IN THIS GAME", "YOUR LEAGUE'S PLAYERS · POINTS AFTER REGULATION", 1))
+    owned = [(p, o) for p in nfl_fantasy(summary) for o in [league_owner(p.get("id"), p["name"])] if o]
+    desc = (f"{owned[0][0]['name']} leads the way with {fmt_pts(owned[0][0]['pts'])} for {owned[0][1]['manager']}"
+            " · every overtime score gets a post" if owned else "Every overtime score gets a post")
+    embed = {"author": AU_NFL(), "color": 0xD97757,
+             "title": f"We're going to overtime! {away['team'].get('name')} {a}–{h} {home['team'].get('name')}",
+             "description": desc}
+    return _post_card(NFL_HOOK, html_text, "⏱️ **OVERTIME**", embed, "ot.png")
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    """+ field goals in a one-score game's final minute, the overtime post, and every overtime score."""
+    if CONFIG["nfl"].get("clutch_field_goals") or CONFIG["nfl"].get("overtime_posts"):
+        for e in slot:
+            if e["status"]["type"]["state"] not in ("in", "post"):
+                continue
+            g = st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})
+            if g.get("final"):
+                continue
+            q = e["status"].get("period", 0)
+            if e["status"]["type"]["state"] == "in" and (q < 4 or (q == 4 and clock_secs(e) > 90)):
+                continue
+            summary = fetch(f"football/nfl/summary?event={e['id']}")
+            if CONFIG["nfl"].get("overtime_posts") and not g.get("ot"):
+                tied = int(num(teams_of(e)[0].get("score"))) == int(num(teams_of(e)[1].get("score")))
+                end_reg = q == 4 and tied and e["status"]["type"].get("name") == "STATUS_END_PERIOD"
+                if (q >= 5 or end_reg) and e["status"]["type"]["state"] == "in":
+                    ctx = getctx()
+                    if ctx and post_overtime(e, summary, ctx):
+                        g["ot"] = True
+            if e["status"]["type"]["state"] == "post":
+                # game just ended (walk-off): post any touchdown from the last few minutes before full-time
+                for p in summary.get("scoringPlays", []):
+                    if p["id"] in g["tds"] or (p.get("type") or {}).get("abbreviation") != "TD":
+                        continue
+                    _, d = play_detail(summary, p.get("id"))
+                    wc = (d or {}).get("wallclock")
+                    recent = (time.time() - _wallclock_ts(wc) < 900) if wc else (p.get("period") or {}).get("number", 0) > 4
+                    if recent:
+                        ctx = getctx()
+                        if ctx and post_td_fantasy(e, p, summary, ctx):
+                            g["tds"].append(p["id"])
+            for p in summary.get("scoringPlays", []):
+                if p["id"] in g["tds"] or not clutch_fg(p, e):
+                    continue
+                ctx = getctx()
+                if ctx and post_fg_clutch(e, p, summary, ctx):
+                    g["tds"].append(p["id"])
+    return _nfl_prime_slot_fg(slot, st, getctx, force)
+
+
 # ===================================================================== main
 
 def send_test():
