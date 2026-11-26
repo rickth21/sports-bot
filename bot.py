@@ -3466,8 +3466,7 @@ def post_td_fantasy(event, play, summary, ctx):
         who += (f" · QB {short_name(td['qb'])} +{qg:.1f}" + (f" (now {fmt_pts(qn)})" if qn is not None else "") +
                 (f" for {qo['manager']}" if qo else ""))
     embed = {"author": AU_NFL(), "color": color(team["team"].get("color")), "title": who,
-             "img_title": f"{td['scorer']} scores for the {nick}!" if td['kind'] != 'pass'
-             else f"{td['qb']} finds {td['scorer']} — touchdown {nick}!"}
+             "img_title": _td_headline(td, nick)}
     if call:
         embed["description"] = call
     content = (f"🏈 **TOUCHDOWN {nick.upper()}** · {away['team']['abbreviation']} {a_s}–{h_s} "
@@ -4364,6 +4363,12 @@ TD5_CSS = """
 .mu5 .sc{text-align:center;font-size:20px;font-weight:900;font-variant-numeric:tabular-nums;margin-bottom:3px}.mu5 .sc .lo{color:#8b95a8}
 .mu5 .wcx{text-align:center;font-size:10px;letter-spacing:1px;color:#9aa3b5;font-weight:700;margin-top:3px}
 .mu5 .wcx .u{color:#7ee2a8}.mu5 .wcx .dn{color:#ff9a9e}
+.pp5.hot{box-shadow:0 0 0 2px #ffd166,0 0 26px rgba(255,190,60,.45)!important;background:linear-gradient(120deg,rgba(60,42,8,.85),rgba(9,12,22,.75))!important}
+.pb5.win .bar{height:10px;background:rgba(255,209,102,.15);box-shadow:0 0 14px rgba(255,190,60,.75)}
+.pb5.win .bar div{height:10px;background:linear-gradient(90deg,#ff9f1c,#ffd166 40%,#fff3b0 55%,#ffd166 70%,#ff9f1c)!important}
+.pb5 .beat{background:linear-gradient(90deg,#ffd166,#ff9f1c);color:#1b1305!important;padding:3px 10px;border-radius:8px;
+ font-weight:900;font-size:12.5px!important;letter-spacing:.6px;box-shadow:0 0 12px rgba(255,190,60,.6)}
+.pjn{font-size:11px;color:#c3cad8;font-weight:700;margin-top:2px}
 .pp5,.cv,.imp{background:rgba(9,12,22,.62)!important}
 .pp5 .role,.cv .tg,.imp .ih{color:#c3cad8!important}
 .pp5 .ow3,.pp5 .gn span,.cv,.pb5 span{color:#e3e7ef!important}
@@ -4473,13 +4478,12 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
         pj = proj.get(str(_sl_pid(name, abbr) or ""), 0.0)
         bar = ""
         if pj and now is not None:
-            pct = min(100.0, now / pj * 100)
-            bar = (f"<div class='pb5'><div class='bar'><div class='{'over' if now >= pj else ''}' style='width:{max(pct, 3):.0f}%'></div></div>"
-                   f"<span>{'<b>beat</b> ' if now >= pj else ''}proj <b>{pj:.1f}</b></span></div>")
+            bar = proj_bar(now, pj)
         own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
                else "<b>Unrostered</b> — free agent")
         tot = f"<span>now <em>{fmt_pts(now)}</em> pts</span>" if now is not None else ""
-        return o, (f"<div class='pp5'><img src='{H.escape(hs)}'><div><div class='role'>{role}</div>"
+        hot = " hot" if pj and now is not None and now >= pj else ""
+        return o, (f"<div class='pp5{hot}'><img src='{H.escape(hs)}'><div><div class='role'>{role}</div>"
                    f"<div class='nm'>{H.escape(name)}</div><div class='gn'><b>+{gain_:.1f}</b>{tot}</div>{bar}"
                    f"<div class='ow3'>{own}</div></div></div>")
 
@@ -4567,9 +4571,8 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
             f"{play.get('clock', {}).get('displayValue', '')} · {away['team']['abbreviation']} {a_s}–{h_s} "
             f"{home['team']['abbreviation']}</div><div class='pill'>{H.escape(tag)}</div></div>"
             + score_hero(event, a_s, h_s, f"{'OT' if q > 4 else 'Q' + str(q)} · {play.get('clock', {}).get('displayValue', '')}",
-                         H.escape(tag), hot=abbr, plus=(a_s + h_s) - _pre_total(play, a_s, h_s, abbr, away)) +
-            f"<div class='sec' style='margin-top:10px'>{H.escape(what.upper())}</div>"
-            f"<div class='{cls}'>{panels}</div>{_conversion_html(play, summary, abbr)}{''.join(mus)}")
+                         tag, hot=abbr, plus=(a_s + h_s) - _pre_total(play, a_s, h_s, abbr, away), big=_td_yards_label(td)) +
+            f"<div class='{cls}' style='margin-top:12px'>{panels}</div>{_conversion_html(play, summary, abbr)}{''.join(mus)}")
     t = scorer_team["team"]
     other = (home if scorer_team is away else away)["team"]
     ca = vivid(t.get("color") or "1faa59")
@@ -4669,12 +4672,11 @@ def nfl_fg_html(event, play, summary, live, ol, base):
     now = k["pts"] if k else None
     bar = ""
     if pj and now is not None:
-        pct = min(100.0, now / pj * 100)
-        bar = (f"<div class='pb5'><div class='bar'><div class='{'over' if now >= pj else ''}' style='width:{max(pct, 3):.0f}%'></div></div>"
-               f"<span>{'<b>beat</b> ' if now >= pj else ''}proj <b>{pj:.1f}</b></span></div>")
+        bar = proj_bar(now, pj)
     own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
            else "<b>Unrostered</b> — free agent")
-    panel = (f"<div class='pair one'><div class='pp5'><img src='{H.escape(nfl_headshot(kid) or kt['team'].get('logo', ''))}'><div>"
+    hot = " hot" if pj and now is not None and now >= pj else ""
+    panel = (f"<div class='pair one'><div class='pp5{hot}'><img src='{H.escape(nfl_headshot(kid) or kt['team'].get('logo', ''))}'><div>"
              f"<div class='role'>KICKER · {abbr}</div><div class='nm'>{H.escape(kicker)}</div>"
              f"<div class='gn'><b>+{gain:g}</b>{f'<span>now <em>{fmt_pts(now)}</em> pts</span>' if now is not None else ''}</div>"
              f"{bar}<div class='ow3'>{own}</div></div></div></div>")
@@ -4718,8 +4720,8 @@ def nfl_fg_html(event, play, summary, live, ol, base):
             f"{away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div>"
             f"<div class='pill'>{tag}</div></div>"
             + score_hero(event, a_s, h_s, ("FINAL" if final else ("OT" if q > 4 else "Q4") + " · " + clock + " LEFT"),
-                         tag, hot=abbr, plus=3) +
-            f"<div class='sec' style='margin-top:10px'>{yds}-YARD FIELD GOAL · GOOD</div>{panel}{imp}")
+                         tag, hot=abbr, plus=3, big=f"{yds}-YARD FG") +
+            f"{panel}{imp}")
     t = kt["team"]
     ca = vivid(t.get("color") or "1faa59")
     ch = vivid(t.get("alternateColor") or t.get("color") or "5b7bd5", min_l=0.5)
@@ -5204,10 +5206,11 @@ SB_CSS = """
 .sbx .mid{text-align:center}
 .sbx .clk{font-size:14px;font-weight:900;letter-spacing:2px;color:#ffd166}
 .sbx .st{font-size:12px;font-weight:800;letter-spacing:1.5px;color:#c3cad8;margin-top:4px}
+.sbx .yd{font-size:30px;font-weight:900;line-height:1.05;color:#fff;margin-top:6px;letter-spacing:.5px;white-space:nowrap}
 """
 
 
-def score_hero(event, a_s, h_s, clock_txt, sub="", hot=None, plus=None):
+def score_hero(event, a_s, h_s, clock_txt, sub="", hot=None, plus=None, big=None):
     """Big scoreline: logos, names, scores; the team that just scored glows with a +N chip."""
     import html as H
     away, home = teams_of(event)
@@ -5223,6 +5226,7 @@ def score_hero(event, a_s, h_s, clock_txt, sub="", hot=None, plus=None):
                f"{H.escape(tm['team'].get('name') or ab)}</div><div class='sc {cls}' style='--hc:{hc}'>{sc}</div>{chip}</div>")
         return f"<div class='tm{' r' if right else ''}'>{(txt + disc) if right else (disc + txt)}</div>"
     return (f"<div class='sbx'>{side(away, a_s, h_s, False)}<div class='mid'><div class='clk'>{H.escape(clock_txt)}</div>"
+            f"{f'<div class=yd>{H.escape(big)}</div>' if big else ''}"
             f"{f'<div class=st>{H.escape(sub)}</div>' if sub else ''}</div>{side(home, h_s, a_s, True)}</div>")
 
 
@@ -5307,6 +5311,34 @@ def post_weekly_recap(sport, week, live, settings):
         return _post_weekly_recap_named(sport, week, live, settings)
     finally:
         _POSTER.clear()
+
+
+def _td_yards_label(td):
+    y = td.get("yds")
+    kind = {"pass": "TD PASS", "rush": "TD RUN"}.get(td.get("kind"), "RETURN TD")
+    return f"{y}-YARD {kind}" if y is not None else kind
+
+
+def _td_headline(td, nick):
+    y = td.get("yds")
+    yd = f"{y}-yard " if y is not None else ""
+    if td.get("kind") == "pass":
+        return f"{td['qb']} finds {td['scorer']} for a {yd}TD — {nick}!"
+    if td.get("kind") == "rush":
+        return f"{td['scorer']} {yd}TD run — {nick}!"
+    return f"{td['scorer']} {yd}return TD — {nick}!"
+
+
+def proj_bar(now, pj):
+    """Points vs projection. Beating it is celebrated: gold glowing bar + badge (💥 at 150%+)."""
+    if now < pj:
+        pct = max(now / pj * 100, 3)
+        return (f"<div class='pb5'><div class='bar'><div style='width:{pct:.0f}%'></div></div>"
+                f"<span>proj <b>{pj:.1f}</b></span></div>")
+    over = now - pj
+    badge = (f"💥 SMASHED PROJ · +{over:.1f}" if now >= 1.5 * pj else f"🔥 BEAT PROJ · +{over:.1f}")
+    return (f"<div class='pb5 win'><div class='bar'><div style='width:100%'></div></div>"
+            f"<span class='beat'>{badge}</span></div><div class='pjn'>projected {pj:.1f}</div>")
 
 
 # ===================================================================== main
