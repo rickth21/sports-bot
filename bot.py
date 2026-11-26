@@ -9752,20 +9752,27 @@ _RANKS = {}
 
 RANK_CSS = """
 .pp5,.pr2,.as{position:relative}
-.prk{position:absolute;z-index:6;font-style:normal;font-weight:900;font-size:14px;line-height:1;letter-spacing:.2px;
- padding:3px 4px;min-width:58px;text-align:center;box-sizing:border-box;border-radius:6px;background:rgba(10,14,24,.88);color:#aab3c5;border:1px solid rgba(255,255,255,.18);
- white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums}
-.pp5>.prk{left:12px;bottom:10px}.pr2>.prk{left:8px;bottom:6px}.as>.prk{left:6px;bottom:4px;font-size:12px;width:50px}
-.prk.r12{color:#f0b48a;border-color:#b8734a}
-.prk.r5{color:#eef2f8;border-color:#c9d1de;box-shadow:0 0 8px rgba(220,228,240,.45)}
-.prk.r3{background:linear-gradient(180deg,#ffe08a,#f5b942);color:#1b1305;border-color:#ffe9a8}
-.prk.r1{background:linear-gradient(90deg,#f5b942,#fff3b0,#f5b942);background-size:120px 100%;color:#1b1305;border-color:#fff3b0;
- box-shadow:0 0 10px rgba(255,210,90,.8)}
+.phw{position:relative;display:block;width:fit-content;line-height:0}
+.pr2>.phw{grid-column:1;grid-row:1/3}.pr2>.phw>img{width:58px!important;height:58px!important}
+.prk{position:absolute;left:50%;bottom:-12px;transform:translateX(-50%);z-index:6;font-style:normal;font-weight:900;font-size:16px;
+ line-height:22px;height:24px;width:68px;text-align:center;letter-spacing:.3px;border-radius:999px;box-sizing:border-box;
+ background:#1f2937;color:#f3f4f6;border:1.5px solid #6b7280;white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums;
+ text-shadow:none}
+.as .prk{width:58px;font-size:14px;height:22px;line-height:20px;bottom:-10px}
+.prk.r12{background:linear-gradient(180deg,#f8fafc,#cbd5e1);color:#0f172a;border-color:#f8fafc}
+.prk.r5{background:linear-gradient(135deg,#6d28d9,#a855f7 60%,#e879f9);color:#fff;border-color:#f0abfc;
+ box-shadow:0 0 12px rgba(192,132,252,.85)}
+.prk.r3{background:linear-gradient(180deg,#ffe08a,#f5b942);color:#1b1305;border-color:#fff1b8;box-shadow:0 0 12px rgba(255,200,80,.85)}
+.prk.r1{background:linear-gradient(90deg,#f5b942,#fff6c2,#f5b942,#ffd166);background-size:136px 100%;color:#1b1305;
+ border-color:#fffbe6;box-shadow:0 0 16px rgba(255,210,90,1),0 0 4px #fff}
+.prk .sp{display:inline-block;margin-right:2px}
 """
 
 ANIM_CSS += """
-@keyframes a_rk{from{background-position:0 0}to{background-position:120px 0}}
+@keyframes a_rk{from{background-position:0 0}to{background-position:136px 0}}
+@keyframes a_tw{0%,100%{opacity:.35;transform:scale(.8)}50%{opacity:1;transform:scale(1.2)}}
 .prk.r1{animation:a_rk 1s linear infinite}
+.prk.r5 .sp{animation:a_tw .5s ease-in-out infinite}
 """
 
 
@@ -9804,7 +9811,8 @@ def position_ranks(sport):
 
 def _rank_badge(pos, rk):
     tier = "r1" if rk == 1 else "r3" if rk <= 3 else "r5" if rk <= 5 else "r12" if rk <= 12 else ""
-    return f"<em class='prk {tier}'>{pos}{rk}</em>"
+    mark = "<span class='sp'>👑</span>" if rk == 1 else ("<span class='sp'>✦</span>" if 4 <= rk <= 5 else "")
+    return f"<em class='prk {tier}'>{mark}{pos}{rk}</em>"
 
 
 def rank_badges(html_text):
@@ -9831,7 +9839,7 @@ def rank_badges(html_text):
                 e = _div_end(html_text, m.start())
                 blk = html_text[m.start():e]
                 pid = None
-                img = re.search(r"<img[^>]*src='([^']+)'", blk)
+                img = re.search(r"<img[^>]*src='([^']+)'[^>]*>", blk)
                 if img:
                     mm = re.search(r"/players/thumb/(\w+)\.", img.group(1)) or None
                     if mm:
@@ -9847,11 +9855,11 @@ def rank_badges(html_text):
                         pid = tm if tm in ranks else None
                     else:
                         pid = by_name.get(name_key(t))
-                if pid in ranks and "class='prk" not in blk:
+                if pid in ranks and "class='prk" not in blk and img:
                     pos, rk = ranks[pid]
-                    out.append((e - len("</div>"), _rank_badge(pos, rk)))
-            for at, badge in sorted(out, reverse=True):
-                html_text = html_text[:at] + badge + html_text[at:]
+                    out.append((m.start() + img.start(), m.start() + img.end(), _rank_badge(pos, rk)))
+            for a0, a1, badge in sorted(out, reverse=True):          # badge centred on the photo's bottom edge
+                html_text = html_text[:a0] + "<span class='phw'>" + html_text[a0:a1] + badge + "</span>" + html_text[a1:]
                 found = True
         return html_text.replace("</style>", RANK_CSS + "</style>", 1) if found else html_text
     except Exception as ex:  # noqa: BLE001
