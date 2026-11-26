@@ -1,8 +1,17 @@
 {
  "alert_hello": true,
+ "alert_log": [],
+ "anim_builds": [
+  [
+   1795700121,
+   17.6
+  ]
+ ],
  "animations_ready": true,
+ "daily_report": "2026-11-26",
  "heartbeat": "2026-11",
  "initialized": true,
+ "live_boards": {},
  "nba": {
   "401909314": {
    "date": "2026-11-25",
@@ -403,7 +412,22 @@
    }
   }
  },
- "selftest": "8d846c71f585",
+ "post_log": [
+  {
+   "kind": "report",
+   "t": 1795700096,
+   "where": "alert"
+  },
+  {
+   "kind": "selftest",
+   "t": 1795700121,
+   "where": "alert"
+  }
+ ],
+ "run_starts": [
+  1795700095
+ ],
+ "selftest": "1070cadf29a0",
  "trade_tries": {},
  "trades_seen": {
   "nba": [
