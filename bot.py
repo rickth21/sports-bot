@@ -9287,7 +9287,7 @@ body,.card{width:1100px!important}
 .pr2>div:nth-of-type(3){grid-column:2;grid-row:2;display:flex;align-items:center;gap:10px;min-width:0}
 .pr2 .mt{display:none!important}
 .pr2 .nm2{font-size:24px!important}.pr2 .nm2 span{display:none!important}
-.pr2 .ln{font-size:21px!important;margin-top:2px!important}
+.pr2 .ln{font-size:20px!important;margin-top:2px!important;white-space:normal!important;overflow:visible!important;line-height:1.15!important}
 .pr2 .fp{font-size:31px!important;padding:5px 0!important;line-height:1.05!important}
 .pr2 .fp small,.pr2 .fp.pjx small{font-size:20px!important;letter-spacing:0!important}
 .pr2 .fp.pjx i{font-size:20px!important}
@@ -9742,12 +9742,125 @@ def ribbon_merge(html_text):
         return html_text
 
 
+# ---- positional rank badge on every player photo ("WR12"): the league-scoring season rank, like the Sleeper app.
+#      Same size for everyone; only the style escalates (#1 shimmering gold, top 3 gold, top 5 silver, top 12 bronze).
+_RANKS = {}
+
+RANK_CSS = """
+.pp5,.pr2,.as{position:relative}
+.prk{position:absolute;z-index:6;font-style:normal;font-weight:900;font-size:14px;line-height:1;letter-spacing:.2px;
+ padding:3px 0;width:58px;text-align:center;box-sizing:border-box;border-radius:6px;background:rgba(10,14,24,.88);color:#aab3c5;border:1px solid rgba(255,255,255,.18);
+ white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums}
+.pp5>.prk{left:12px;bottom:10px}.pr2>.prk{left:8px;bottom:6px}.as>.prk{left:6px;bottom:4px;font-size:12px;width:50px}
+.prk.r12{color:#f0b48a;border-color:#b8734a}
+.prk.r5{color:#eef2f8;border-color:#c9d1de;box-shadow:0 0 8px rgba(220,228,240,.45)}
+.prk.r3{background:linear-gradient(180deg,#ffe08a,#f5b942);color:#1b1305;border-color:#ffe9a8}
+.prk.r1{background:linear-gradient(90deg,#f5b942,#fff3b0,#f5b942);background-size:120px 100%;color:#1b1305;border-color:#fff3b0;
+ box-shadow:0 0 10px rgba(255,210,90,.8)}
+"""
+
+ANIM_CSS += """
+@keyframes a_rk{from{background-position:0 0}to{background-position:120px 0}}
+.prk.r1{animation:a_rk 1s linear infinite}
+"""
+
+
+def position_ranks(sport):
+    """{sleeper pid: (position, rank)} from this season's stats scored with the league's settings (cached a day)."""
+    hit = _RANKS.get(sport)
+    if hit and time.time() - hit[0] < 86400:
+        return hit[1]
+    out = {}
+    try:
+        season = fetch_url(f"{SLEEPER}/state/{sport}").get("season")
+        stats = fetch_url(f"{SLEEPER}/stats/{sport}/regular/{season}?season_type=regular") or {}
+        sc = league_scoring(sport)
+        players = sleeper_players(sport)
+        by_pos = {}
+        for pid, st_ in stats.items():
+            if not isinstance(st_, dict):
+                continue
+            p = players.get(pid) or {}
+            pos = "DEF" if (sport == "nfl" and pid.isalpha() and pid.isupper()) else (p.get("position") or "")
+            if not pos:
+                continue
+            pts = sum(float(v or 0) * float(sc[k]) for k, v in st_.items() if k in sc and isinstance(v, (int, float)))
+            if pts > 0:
+                by_pos.setdefault(pos, []).append((pts, pid))
+        for pos, lst in by_pos.items():
+            for i, (_, pid) in enumerate(sorted(lst, reverse=True), 1):
+                out[pid] = (pos, i)
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"positional ranks unavailable: {e}")
+        if hit:
+            return hit[1]
+    _RANKS[sport] = (time.time(), out)
+    return out
+
+
+def _rank_badge(pos, rk):
+    tier = "r1" if rk == 1 else "r3" if rk <= 3 else "r5" if rk <= 5 else "r12" if rk <= 12 else ""
+    return f"<em class='prk {tier}'>{pos}{rk}</em>"
+
+
+def rank_badges(html_text):
+    try:
+        sport = "nba" if "class='nbar'" in html_text else "nfl"
+        ranks = position_ranks(sport)
+        if not ranks:
+            return html_text
+        players = sleeper_players(sport)
+        by_espn = _RANKS.setdefault(f"{sport}-espn", {})
+        if not by_espn:
+            for pid, p in players.items():
+                if p.get("espn_id"):
+                    by_espn[str(p["espn_id"])] = pid
+        by_name = {}
+        for pid in ranks:
+            p = players.get(pid) or {}
+            if p.get("full_name"):
+                by_name.setdefault(name_key(p["full_name"]), pid)
+        found = False
+        for cls, name_re in (("pp5", r"class='nm'>([^<]+)"), ("pr2", r"class='nm2'>([^<]+)"), ("as", r"<b>([^<]+)</b>")):
+            out, i = [], 0
+            for m in re.finditer(r"<div class='%s[ '][^>]*>" % cls, html_text):
+                e = _div_end(html_text, m.start())
+                blk = html_text[m.start():e]
+                pid = None
+                img = re.search(r"<img[^>]*src='([^']+)'", blk)
+                if img:
+                    mm = re.search(r"/players/thumb/(\w+)\.", img.group(1)) or None
+                    if mm:
+                        pid = mm.group(1)
+                    else:
+                        mm = re.search(r"/headshots/(?:nfl|nba)/players/full/(\d+)\.", img.group(1))
+                        pid = by_espn.get(mm.group(1)) if mm else None
+                nm = re.search(name_re, blk)
+                if not pid and nm:
+                    t = nm.group(1).strip()
+                    if t.endswith(" D/ST") and sport == "nfl":
+                        tm = sl_team(t.split()[0])
+                        pid = tm if tm in ranks else None
+                    else:
+                        pid = by_name.get(name_key(t))
+                if pid in ranks and "class='prk" not in blk:
+                    pos, rk = ranks[pid]
+                    out.append((e - len("</div>"), _rank_badge(pos, rk)))
+            for at, badge in sorted(out, reverse=True):
+                html_text = html_text[:at] + badge + html_text[at:]
+                found = True
+        return html_text.replace("</style>", RANK_CSS + "</style>", 1) if found else html_text
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"rank badges skipped: {ex}")
+        return html_text
+
+
 _render_card_small = render_card
 _render_anim_small = render_anim
 
 
 def _inline_ready(html_text):
-    return ribbon_merge(hype_mark(readable_inline(_shape_more(_moment_landscape(html_text)))))
+    return rank_badges(ribbon_merge(hype_mark(readable_inline(_shape_more(_moment_landscape(html_text))))))
 
 
 def render_card(html_text, width=None):
