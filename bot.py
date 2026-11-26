@@ -899,6 +899,8 @@ def nfl_game(event, st, force=False):
                 if not force and not has_pat and is_latest and time.time() - first < TD_PAT_WAIT \
                         and state == "in":
                     continue
+                if not force and state == "in" and not td_ready(summary, p, first):
+                    continue
                 if post_touchdown(event, p, summary):
                     g["tds"].append(p["id"])
                     g["pending"].pop(p["id"], None)
@@ -3489,6 +3491,8 @@ def nfl_prime_slot(slot, st, getctx, force=False):
                 first = g["pending"].setdefault(p["id"], time.time())
                 if not has_pat and i == len(plays) - 1 and time.time() - first < TD_PAT_WAIT:
                     continue
+                if not td_ready(summary, p, first):
+                    continue
                 ctx = getctx()
                 ok = post_td_fantasy(e, p, summary, ctx) if ctx else post_touchdown(e, p, summary)
                 if ok:
@@ -4220,6 +4224,23 @@ def nfl_headshot(pid):
         ab = str(pid)[4:].lower()
         return f"https://a.espncdn.com/i/teamlogos/nfl/500/{ {'was': 'wsh'}.get(ab, ab) }.png"
     return _nfl_headshot_base(pid)
+
+
+# ------------------------------------------------ spoiler delay for touchdown posts
+
+def td_ready(summary, play, first_seen):
+    """True once the play is at least nfl.spoiler_delay_seconds old (for people watching on a delay).
+    Uses ESPN's time of the play when it has one, otherwise when the bot first saw it."""
+    delay = float(CONFIG["nfl"].get("spoiler_delay_seconds", 60))
+    t0 = first_seen
+    try:
+        _, d = play_detail(summary, play.get("id"))
+        wc = (d or {}).get("wallclock")
+        if wc:
+            t0 = datetime.strptime(wc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except Exception:  # noqa: BLE001
+        pass
+    return time.time() >= t0 + delay
 
 
 # ===================================================================== main
