@@ -1588,6 +1588,8 @@ def season_history(sport, upto):
             if len(pair) != 2:
                 continue
             (a, pa), (b, pb) = pair
+            rec[a]["pa"] = rec[a].get("pa", 0.0) + pb                       # points against
+            rec[b]["pa"] = rec[b].get("pa", 0.0) + pa
             if pa > pb:
                 rec[a]["w"] += 1; rec[b]["l"] += 1  # noqa: E702
             elif pb > pa:
@@ -3232,7 +3234,7 @@ def scoring_line_html(p):
 
 RACE_CSS = """
 .rt{margin-top:10px;background:rgba(255,255,255,.05);border-radius:12px;padding:8px 14px}
-.rr2{display:grid;grid-template-columns:30px minmax(0,1fr) 172px 56px 60px 240px 180px;align-items:center;gap:12px;height:40px;
+.rr2{display:grid;grid-template-columns:30px minmax(0,1fr) 172px 56px 60px 60px 236px 172px;align-items:center;gap:12px;height:40px;
  font-size:16px;font-variant-numeric:tabular-nums}
 .rr2.h{height:26px;font-size:11px;letter-spacing:1.4px;color:#9aa3b5;font-weight:700}
 .rr2.cut{border-bottom:2px dashed rgba(245,197,66,.55)}
@@ -3243,6 +3245,7 @@ RACE_CSS = """
 .rb div{height:8px;border-radius:999px}
 .mv{font-size:13px;font-weight:800}.mv.u{color:#7ee2a8}.mv.dn{color:#ff9a9e}.mv.z{color:#5d6679}
 .race-note{font-size:13px;color:#9aa3b5;margin-top:8px}
+.rr2 .pa{color:#aab3c5}
 .rr2 .chip{font-size:11.5px;font-weight:900;letter-spacing:1px;border-radius:6px;padding:4px 8px;text-align:center;white-space:nowrap;justify-self:start}
 .rr2 .chip.bye{background:linear-gradient(90deg,#ffd166,#ffb347);color:#1b1305;box-shadow:0 0 12px rgba(255,190,70,.5)}
 .rr2 .chip.in{background:#1faa59;color:#fff;box-shadow:0 0 12px rgba(31,170,89,.5)}
@@ -3271,7 +3274,7 @@ def playoff_race_html(ctx, prev, title_date):
         x = rec.get(r) or {"w": 0, "l": 0, "t": 0, "pf": 0}
         return (-(x["w"] + 0.5 * x["t"]), -x["pf"])
     order = sorted(ol, key=_standing)
-    rows = ["<div class='rr2 h'><span>#</span><span>MANAGER</span><span>STATUS</span><span>W-L</span><span>PF</span>"
+    rows = ["<div class='rr2 h'><span>#</span><span>MANAGER</span><span>STATUS</span><span>W-L</span><span>PF</span><span>PA</span>"
             "<span>PLAYOFFS · SINCE YESTERDAY</span><span>TITLE CHANCE</span></div>"]
 
     def chip(r, po):
@@ -3299,7 +3302,7 @@ def playoff_race_html(ctx, prev, title_date):
         rc = " clin" if kk in ("in", "bye") else (" elim" if kk == "out" else "")
         rows.append(f"<div class='rr2{' cut' if i == n_po else ''}{rc}'><span class='k'>{i}</span>"
                     f"<span class='m'>{H.escape(live['rosters'][r]['manager'])}</span>{chip(r, po)}"
-                    f"<span>{x['w']}-{x['l']}{'-' + str(x['t']) if x['t'] else ''}</span><span>{x['pf']:.0f}</span>"
+                    f"<span>{x['w']}-{x['l']}{'-' + str(x['t']) if x['t'] else ''}</span><span>{x['pf']:.0f}</span><span class='pa'>{x.get('pa', 0):.0f}</span>"
                     f"<span class='o'><span>{po:.0f}%</span><div class='rb'><div style='width:{max(po, 1.5):.1f}%;"
                     f"background:linear-gradient(90deg,#d97757,#f2a77f)'></div></div>{mv}</span>"
                     f"<span class='o2'><span>{ti:.0f}%</span><div class='rb'><div style='width:{min(100, max(ti * 2.5, 1.5)):.1f}%;"
@@ -8215,7 +8218,7 @@ def maybe_daily_race(st):
         tries = st.setdefault("race_redo_tries", {})
         if tries.get(want, 0) < 3:
             tries[want] = tries.get(want, 0) + 1
-            ok = redo_race_post(st, want)
+            ok = redo_race_post(st, want.split(":")[0])
             if ok or ok is None:                                         # None = message gone: nothing to fix
                 st["race_redo_done"] = want
                 log(f"daily race message {want} re-done in place" if ok else f"race message {want} not found")
