@@ -7503,6 +7503,13 @@ WB_CSS = """
 .lv2{display:inline-block;background:#ff3d3d;color:#fff;font-weight:900;font-size:12px;letter-spacing:1.5px;padding:2px 8px;
  border-radius:5px;margin-right:8px}
 .lv2.f{background:#4b5563}.lv2.p{background:#1faa59}
+.top{font-size:21px!important;letter-spacing:1.5px!important}.top img{width:32px!important;height:32px!important}
+.top .pill{font-size:20px!important;padding:5px 12px!important}.lv2{font-size:18px!important}
+.nbar{font-size:22px!important;padding:8px 32px!important}
+.wbh .h2{font-size:22px!important}
+.wch{font-size:19px!important;padding-left:72px!important}
+.wr{height:80px!important}.wr .ws{font-size:23px!important}.wr .wno{font-size:23px!important}
+.wtag{font-size:17px!important;top:-13px!important}
 """
 
 _WB_PENDING = {}
@@ -9080,6 +9087,238 @@ def render_card(html_text, width=None):
 
 def render_anim(html_text, width=None):
     return _render_anim_tall(_shape_more(_moment_landscape(html_text)), width)
+
+
+# ------------------------------------------------ readable without opening: in-game cards sized for Discord's inline view
+#   Donald attaches each card as a plain image; Discord desktop shows it scaled to fit about 550 x 350 px, so a card
+#   W px wide shows its text at 550 / W of its size. Target: the smallest meaningful text >= ~11px on screen, i.e.
+#   about W / 50 px in the card. Less text, bigger: no top strip (the scoreboard says it), no commentary line on
+#   moment cards, no per-row matchup column on game cards (the pinned weekly board has those), and long player
+#   lists show the top 8 with the rest in one line. Few rows -> bigger rows that fill the panel.
+#   tools/inline_size.py measures any card.
+
+INLINE_W = 550
+_MIN_TEXT_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const f=%s;"
+                "document.querySelectorAll('.card *').forEach(el=>{if(![...el.childNodes].some(n=>n.nodeType==3&&n.textContent.trim()))return;"
+                "const s=parseFloat(getComputedStyle(el).fontSize);if(s<f)el.style.fontSize=f+'px';});});</script>")
+
+BIG_MOMENT_CSS = """
+.in>.top{display:none!important}
+.in>.hl{margin:0 0 12px!important;padding:10px 18px!important}
+.hl .h1{font-size:28px!important;line-height:1.18!important}
+.hl .h2{display:none!important}
+.sbx{padding:10px 22px!important;margin-top:0!important;gap:12px!important}
+.sbx .disc{width:80px!important;height:80px!important}.sbx .disc img{width:62px!important;height:62px!important}
+.sbx .tm{gap:14px!important}
+.sbx .nm{font-size:24px!important}
+.sbx .sc{font-size:84px!important}
+.sbx .clk{font-size:22px!important}
+.sbx .yd{font-size:34px!important;margin-top:4px!important}
+.sbx .st{font-size:22px!important;margin-top:6px!important;padding:3px 14px!important}
+.sbx .plus{font-size:24px!important;padding:1px 12px!important;margin-top:4px!important}
+.sbx .tryt{font-size:22px!important;padding:3px 12px!important;margin:8px 0 0!important}
+.lsx{gap:14px!important;margin-top:12px!important;align-items:stretch!important}
+.lsx>.lcol,.lsx>.rcol{display:flex;flex-direction:column;gap:12px}
+.lsx .lcol>*{margin-top:0!important}
+.lsx .lcol>.pair{flex:1;display:flex!important;flex-direction:column;gap:12px!important;margin:0!important}
+.lsx .lcol>.pair>.pp5{flex:1}
+.lsx .rcol>.imp,.lsx .rcol>.sw5{flex:1}
+.lsx .rcol .cv{margin-bottom:0!important}
+.pp5{grid-template-columns:92px minmax(0,1fr)!important;gap:16px!important;padding:10px 16px!important;align-items:center!important}
+.pp5 img{width:92px!important;height:92px!important;border-radius:14px!important}
+.pp5 .role{display:none!important}
+.pp5 .nm{font-size:26px!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pp5 .gn{gap:10px!important;margin-top:2px!important}
+.pp5 .gn b{font-size:40px!important}
+.pp5 .gn span{font-size:22px!important}.pp5 .gn span em{font-size:26px!important}
+.pb5:not(:has(.beat)){display:none!important}
+.pb5{margin-top:6px!important;display:block!important}.pb5 .bar{display:none!important}
+.pb5 .beat{display:inline-block;font-size:22px!important;font-weight:900!important;padding:4px 12px!important;letter-spacing:.4px!important;
+ background:#ffd166!important;color:#140d00!important;box-shadow:none!important;text-shadow:none!important;border-radius:9px!important}
+.pjn{font-size:22px!important;margin-top:4px!important}.pjn b{font-size:22px!important}
+.pp5 .ow3{font-size:22px!important;margin-top:4px!important}
+.cv{font-size:21px!important;padding:10px 16px!important;gap:10px!important}
+.cv .tg,.cv .ok,.cv .no{font-size:20px!important}.cv .cvw{font-size:21px!important}
+.imp{padding:12px 18px!important;display:flex;flex-direction:column}
+.imp .ih{font-size:21px!important;letter-spacing:1.5px!important;margin-bottom:2px!important}
+.imp .ih+.im{margin-top:auto!important}.imp .im:last-child{margin-bottom:auto!important}
+.lsx .im{grid-template-columns:26px minmax(0,1fr) auto!important;font-size:22px!important;padding:10px 0!important;
+ column-gap:12px!important;row-gap:4px!important}
+.lsx .im>*{grid-row:auto!important}
+.lsx .im>:nth-child(1){grid-column:1!important;grid-row:1!important}
+.lsx .im>:nth-child(2){grid-column:2!important;grid-row:1!important}
+.lsx .im>:nth-child(4){grid-column:3!important;grid-row:1!important;text-align:right}
+.lsx .im>:nth-child(3){grid-column:2/-1!important;grid-row:2!important;font-size:22px!important}
+.lsx .im>:nth-child(5){grid-column:2/-1!important;grid-row:3!important}
+.lsx .im>:nth-child(5):empty{display:none}
+.lsx .im .who5{font-size:27px!important}
+.lsx .im .ar{font-size:22px!important}
+.imp:not(:has(.im+.im+.im)) .im .who5{font-size:31px!important}
+.imp:not(:has(.im+.im+.im)) .im{font-size:24px!important}
+.imp:not(:has(.im+.im+.im)) .im>:nth-child(3){font-size:24px!important}
+.imp:not(:has(.im+.im)) .im .who5{font-size:36px!important}.imp:not(:has(.im+.im)) .im{font-size:27px!important}
+.imp:not(:has(.im+.im)) .im>:nth-child(3){font-size:27px!important}
+.sw5{padding:14px 20px!important;display:flex;flex-direction:column;justify-content:space-evenly}
+.sw5 .ih{font-size:21px!important}.sw5 .lb{font-size:21px!important}
+.sw5 .big{font-size:40px!important}.sw5 .row{grid-template-columns:110px 1fr 120px!important}
+"""
+
+BIG_LIST_CSS = """
+body,.card{width:1100px!important}
+.in{grid-template-columns:minmax(0,1fr) auto!important;column-gap:14px!important}
+.in>.top{display:none!important}
+.in>.nbar{font-size:22px!important}
+.in>.hl{margin-top:0!important;display:flex;flex-direction:column;justify-content:center}
+.in>.sb5,.in>.sbx{margin-top:0!important}
+.hl .h1{font-size:27px!important;line-height:1.18!important}.hl .h2{font-size:21px!important;line-height:1.3!important;margin-top:6px!important}
+.sb5{padding:12px 20px!important;gap:14px!important;grid-template-columns:auto auto auto!important;justify-content:center}.sb5 .sc{font-size:68px!important}
+.sb5 .tm>span:not(.sc){display:none!important}
+.sb5 .tm img{width:58px!important;height:58px!important}.sb5 .clk{font-size:22px!important;line-height:1.15}
+.sbx{padding:12px 20px!important;gap:14px!important;grid-template-columns:auto auto auto!important;justify-content:center}.sbx .sc{font-size:68px!important}.sbx .nm{display:none!important}
+.sbx .disc{width:62px!important;height:62px!important}.sbx .disc img{width:48px!important;height:48px!important}
+.sbx .clk{font-size:22px!important}
+.hd{margin-top:12px!important}.hd .s2{display:none!important}.hd .big2{font-size:27px!important}
+.pl2{column-gap:12px!important;row-gap:8px!important;margin-top:8px!important}
+.pr2{grid-template-columns:58px minmax(0,1fr) 118px!important;grid-template-rows:auto auto;column-gap:12px!important;row-gap:2px!important;
+ padding:8px 12px!important;height:auto!important;min-height:0!important;align-items:center!important}
+.pr2>img{grid-column:1;grid-row:1/3;width:58px!important;height:58px!important}
+.pr2>div:nth-of-type(1){grid-column:2;grid-row:1}
+.pr2>.fp{grid-column:3;grid-row:1/3}
+.pr2>div:nth-of-type(3){grid-column:2;grid-row:2;display:flex;align-items:center;gap:10px;min-width:0}
+.pr2 .mt{display:none!important}
+.pr2 .nm2{font-size:24px!important}.pr2 .nm2 span{display:none!important}
+.pr2 .ln{font-size:21px!important;margin-top:2px!important}
+.pr2 .fp{font-size:31px!important;padding:5px 0!important;line-height:1.05!important}
+.pr2 .fp small,.pr2 .fp.pjx small{font-size:20px!important;letter-spacing:0!important}
+.pr2 .fp.pjx i{font-size:20px!important}
+.pr2 .ow{font-size:22px!important;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pr2 .bd{font-size:18px!important;padding:2px 8px!important;margin-top:0!important;flex:none;letter-spacing:1px!important}
+.pr2 .shr{font-size:16px!important}.pr2 .shr em{font-size:14px!important}
+.more{grid-column:1/-1;font-size:20px!important;line-height:1.4!important;margin-top:10px!important;color:#c3cad8!important}
+.in>.lg2{display:none!important}
+.pr2.sh{padding-top:16px!important}.pr2 .shr{left:auto!important;right:134px!important;top:-13px!important}
+"""
+
+BIG_GROUP_CSS = """
+body,.card{width:1100px!important}
+.in>.top{display:none!important}
+.in>.nbar{font-size:22px!important}
+.hl{margin-top:0!important}.hl .h1{font-size:28px!important;line-height:1.2!important}
+.hl .h2{font-size:21px!important;line-height:1.35!important}
+.rows{display:grid!important;grid-template-columns:1fr 1fr;gap:12px!important;margin-top:12px}
+.gl{grid-template-columns:minmax(0,1fr) auto!important;padding:12px 14px!important;row-gap:10px!important;align-content:start}
+.gl .sc2{grid-template-columns:40px auto auto 16px auto auto 40px!important;justify-content:start;font-size:22px!important;gap:8px!important}
+.gl .sc2 img{width:40px!important;height:40px!important}
+.gl .sc2 b{font-size:34px!important}
+.gl .st{font-size:19px!important;justify-self:end}
+.gl .f1{grid-column:1/-1;font-size:20px!important;white-space:normal!important}
+.tpr{grid-template-columns:30px minmax(0,1fr) 78px!important;grid-template-rows:auto auto;row-gap:2px!important;
+ font-size:22px!important;padding:8px 12px!important}
+.tpr .rk5{grid-row:1/3}
+.tpr .nm5{grid-column:2;font-size:23px!important}.tpr .nm5 small{font-size:17px!important}
+.tpr .fp5{grid-column:3;grid-row:1/3;font-size:27px!important;padding:4px 0!important}
+.tpr .pj5{display:none!important}
+.tpr .ow5{grid-column:2;grid-row:2;font-size:20px!important;display:flex;gap:8px;align-items:center;min-width:0}
+.tpr .ow5 em{font-size:15px!important}
+.tpr .ln5{display:none!important}
+.tpr .shr{display:none!important}
+"""
+
+BIG_OT_CSS = """
+body,.card{width:1100px!important}
+.otg{grid-template-columns:1fr 1.15fr!important;gap:20px!important}
+.otg .otw{font-size:104px!important}
+.ots{font-size:24px!important}
+.otv .nm{font-size:24px!important}.otv .sc{font-size:70px!important}.otv .vs{font-size:24px!important}
+.otq{font-size:20px!important}
+.otl{padding:12px 18px!important}.otl .ih{font-size:19px!important;line-height:1.3}
+.otr{grid-template-columns:minmax(0,1fr) auto!important;row-gap:4px!important;padding:10px 0!important}
+.otr .mg{font-size:26px!important}
+.otr .ch{justify-content:flex-end}.otr .ch span{font-size:21px!important;padding:3px 9px!important}
+.otr .pj{grid-column:1/-1;text-align:left!important;font-size:21px!important}.otr .pj b{font-size:22px!important}
+.otr .flip{font-size:17px!important}
+.tape span{font-size:18px!important}
+"""
+
+
+def _cap_rows(html_text, keep=8):
+    """Long game cards: the top `keep` players in full, everyone else in one 'also' line."""
+    s = html_text.find("<div class='pl2'>")
+    if s < 0:
+        return html_text
+    e = _div_end(html_text, s)
+    inner = html_text[s + len("<div class='pl2'>"):e - len("</div>")]
+    rows, i = [], 0
+    while True:
+        j = inner.find("<div class='pr2", i)
+        if j < 0:
+            break
+        k = _div_end(inner, j)
+        rows.append(inner[j:k])
+        i = k
+    if len(rows) <= keep:
+        return html_text
+    import html as H
+    extra = []
+    for r in rows[keep:]:
+        nm = re.search(r"class='nm2'>([^<]+)", r)
+        pts = re.search(r"class='fp[^']*'>([^<]+)", r)
+        ow = re.search(r"class='ow'>([^<]+)", r)
+        if nm:
+            extra.append(f"<b>{H.escape(H.unescape(nm.group(1)).strip())}</b> {pts.group(1) if pts else ''}"
+                         + (f" ({H.escape(H.unescape(ow.group(1)))})" if ow else ""))
+    more = f"<div class='more'>Also: {' · '.join(extra)}</div>"
+    n = keep
+    html_text = (html_text[:s] + "<div class='pl2'>" + "".join(rows[:keep]) + "</div>" + more + html_text[e:])
+    return re.sub(r"\.pl2\{grid-template-rows:repeat\(\d+,auto\)\}", f".pl2{{grid-template-rows:repeat({(n + 1) // 2},auto)}}",
+                  html_text)
+
+
+def readable_inline(html_text):
+    """Re-size an in-game card so it reads in Discord without opening it (see the note above)."""
+    try:
+        if "<div class='rt'>" in html_text or "class='rc'" in html_text:
+            return html_text                                  # trades / race / recaps: not in-game cards
+        if "class='otg'" in html_text:
+            css, w = BIG_OT_CSS, 1100
+            html_text = html_text.replace("<br>win ", " · win ")
+        elif "class='lsx'" in html_text:
+            css, w = BIG_MOMENT_CSS, MOMENT_W
+            m = re.search(r"<div class='tryt [a-z]+'>[^<]*</div>", html_text)
+            if m and "<div class=st>" in html_text:          # try tag under the lead line, not under the +N chip
+                html_text = html_text.replace(m.group(0), "", 1)
+                k = html_text.find("</div>", html_text.find("<div class=st>")) + len("</div>")
+                html_text = html_text[:k] + m.group(0) + html_text[k:]
+            html_text = html_text.replace("<div class='pjn'>projected ", "<div class='pjn'>proj ")
+        elif "<div class='pl2'>" in html_text and "class='pr2" in html_text:
+            busy = "<div class='h2'>" in html_text or "class='nbar'" in html_text
+            html_text = _cap_rows(html_text, 6 if busy else 8)       # extra headline lines: fewer full rows
+            css, w = BIG_LIST_CSS, 1100
+        elif "class='gl'" in html_text and "class='tpr" in html_text:
+            css, w = BIG_GROUP_CSS, 1100
+        else:
+            return html_text
+        floor = round(w / INLINE_W * 9.5, 1)                 # safety net: nothing under ~9.5px on screen
+        html_text = re.sub(r"body,\.card\{width:\d+px(!important)?\}", "", html_text)
+        css = f"body,.card{{width:{w}px!important}}" + css
+        return (html_text.replace("<style>", "<style>" + f"body,.card{{width:{w}px!important}}", 1)
+                .replace("</style>", css + "</style>", 1)
+                .replace("</head>", _MIN_TEXT_JS % floor + "</head>", 1))
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"inline sizing skipped: {ex}")
+        return html_text
+
+
+_render_card_small = render_card
+_render_anim_small = render_anim
+
+
+def render_card(html_text, width=None):
+    return _render_card_small(readable_inline(_shape_more(_moment_landscape(html_text))), width)
+
+
+def render_anim(html_text, width=None):
+    return _render_anim_small(readable_inline(_shape_more(_moment_landscape(html_text))), width)
 
 
 
