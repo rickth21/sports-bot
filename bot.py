@@ -4345,7 +4345,7 @@ TD5_CSS = """
 .sec{color:#e3e7ef!important}
 .imp{margin-top:8px;border-radius:12px;padding:8px 14px}
 .imp .ih{font-size:10.5px;letter-spacing:1.4px;font-weight:800;margin-bottom:2px}
-.im{display:grid;grid-template-columns:18px 140px 1fr 120px 120px;align-items:center;gap:10px;font-size:14px;color:#e3e7ef;
+.im{display:grid;grid-template-columns:18px 130px 1fr 110px 120px;align-items:center;gap:10px;font-size:14px;color:#e3e7ef;
  padding:5px 0;border-top:1px solid rgba(255,255,255,.07)}
 .ih + .im{border-top:none}
 .im b{color:#fff}.im .who5{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -4485,9 +4485,11 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
         if pw is not None and abs(me["win"] - pw) >= 1:
             d = me["win"] - pw
             sw = f" <span class='{'u' if d > 0 else 'dn'}'>{'▲' if d > 0 else '▼'}{abs(d):.0f}</span>"
-        lead = me["cur"] >= op["cur"]
+        on = H.escape(live["rosters"][opp]["manager"])
+        pa, pb = _proj_total(rid, live, ol, event, proj), _proj_total(opp, live, ol, event, proj)
+        cls = "u" if pa >= pb else "dn"
         return (f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(o['manager'])}</b>"
-                f"<span><b class='{'' if lead else 'lo'}'>{me['cur']:.1f}</b> – {op['cur']:.1f} vs {H.escape(live['rosters'][opp]['manager'])}</span>"
+                f"<span>projected <b class='{cls}'>{pa:.1f}</b> – {pb:.1f} vs {on}</span>"
                 f"<span>win <b>{me['win']:.0f}%</b>{sw}</span>"
                 f"<span>playoffs <b>{me['po']:.0f}%</b></span></div>")
 
@@ -4517,8 +4519,10 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
         if abs(d) < 0.05:
             return ""
         nick = con["team"].get("name") or con["team"]["abbreviation"]
+        dn = next((x for x in nfl_defenses(summary, event) if x["team"] == con["team"]["abbreviation"]), None)
+        now_txt = f" → now <b>{fmt_pts(dn['pts'])}</b> pts" if dn else ""
         return (f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(o['manager'])}</b>"
-                f"<span>{H.escape(nick)} D/ST <b class='dn'>{d:+g}</b> · {after} pts allowed</span>"
+                f"<span>{H.escape(nick)} D/ST loses <b class='dn'>{abs(d):g}</b>{now_txt} ({after} allowed)</span>"
                 f"<span>{'starting' if o['starting'] else 'bench'}</span><span></span></div>")
 
     seen, rows = set(), []
