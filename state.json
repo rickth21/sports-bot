@@ -1,5 +1,6 @@
 {
  "alert_hello": true,
+ "animations_ready": true,
  "heartbeat": "2026-11",
  "initialized": true,
  "nba": {
