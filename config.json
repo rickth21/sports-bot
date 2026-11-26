@@ -47,7 +47,7 @@
       "skip_weekday": "Tuesday",
       "redo_message_id": "1575512639180771409:2"
     },
-    "spoiler_delay_seconds": 60,
+    "spoiler_delay_seconds": 0,
     "td_card_v5": true,
     "clutch_field_goals": true,
     "overtime_posts": true,
@@ -116,8 +116,8 @@
       "idle_refresh_min": 0
     }
   },
-  "spoiler_delay_seconds": 60,
-  "live_poll_seconds": 15,
+  "spoiler_delay_seconds": 0,
+  "live_poll_seconds": 5,
   "paused": false,
   "test_mode": {
     "enabled": false,
