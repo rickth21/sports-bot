@@ -31,6 +31,7 @@ if(cs.visibility=='hidden'||cs.display=='none'||parseFloat(cs.opacity)==0)contin
 out.push([t.slice(0,40),Math.round(parseFloat(cs.fontSize)*s*10)/10,t.length]);
 if(!el.__r&&el.getClientRects().length<2){el.__r=1;els.push(el);}}
 const tr=[];c.querySelectorAll('*').forEach(e=>{const cs=getComputedStyle(e);if(cs.display=='none')return;if(e.textContent.trim()&&e.scrollWidth>e.clientWidth+1&&(cs.overflow=='hidden'||cs.textOverflow=='ellipsis'||cs.overflowX=='hidden'))tr.push(e.textContent.trim().slice(0,40));});
+c.querySelectorAll('*').forEach(e=>{const cs=getComputedStyle(e);if(cs.display=='none'||cs.overflow=='hidden')return;if([...e.childNodes].some(n=>n.nodeType==3&&n.textContent.trim())&&e.scrollWidth>e.clientWidth+2&&e.clientWidth>0)tr.push('SPILLS: '+e.textContent.trim().slice(0,30));});
 const ov=[];const cr=c.getBoundingClientRect();
 for(let i=0;i<els.length;i++){const a=els[i].getBoundingClientRect();
  if(a.right>cr.right+1||a.left<cr.left-1)ov.push(['outside card',els[i].textContent.trim().slice(0,30)]);

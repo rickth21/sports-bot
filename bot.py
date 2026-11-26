@@ -4222,7 +4222,7 @@ def nfl_gc_html(event, play, summary, live, ol, before, after):
     cbar = max(cands, key=_pop) if cands else ca
 
     def lab(ab, p):
-        return f"{ab} {p:.0f}%" if p >= 27 else (f"{p:.0f}%" if p >= 10 else "")
+        return f"{ab} {p:.0f}%" if p >= 30 else (f"{p:.0f}%" if p >= 20 else "")
 
     def bar(p):                                         # gaining team in its boldest colour, the other side light grey
         return (f"<div class='bar'><div class='sg' style='width:{p:.1f}%;background:{cbar}'>{lab(ga_, p)}</div>"
@@ -9214,13 +9214,14 @@ BIG_MOMENT_CSS = """
 .pp5{grid-template-columns:92px minmax(0,1fr)!important;gap:16px!important;padding:10px 16px!important;align-items:center!important}
 .pp5 img{width:92px!important;height:92px!important;border-radius:14px!important}
 .pp5 .role{display:none!important}
-.pp5 .nm{font-size:26px!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pp5 .nm{font-size:26px!important;white-space:normal;overflow:visible;line-height:1.1}
+.pp5 .nm.lng,.lsx .lcol .pp5 .nm.lng{font-size:22px!important}
 .pp5 .gn{gap:10px!important;margin-top:2px!important}
 .pp5 .gn b{font-size:40px!important}
 .pp5 .gn span{font-size:22px!important}.pp5 .gn span em{font-size:26px!important}
 .pb5:not(:has(.beat)){display:none!important}
 .pb5{margin-top:6px!important;display:block!important}.pb5 .bar{display:none!important}
-.pb5 .beat{display:inline-block;font-size:22px!important;font-weight:900!important;padding:4px 12px!important;letter-spacing:.4px!important;
+.pb5 .beat{display:inline-block;max-width:100%;white-space:normal!important;font-size:21px!important;font-weight:900!important;padding:4px 12px!important;letter-spacing:.4px!important;
  background:#ffd166!important;color:#140d00!important;box-shadow:none!important;text-shadow:none!important;border-radius:9px!important}
 .pjn{font-size:22px!important;margin-top:4px!important}.pjn b{font-size:22px!important}
 .lsx .lcol:not(:has(.pp5+.pp5)) .pp5{grid-template-columns:124px minmax(0,1fr)!important}
@@ -9234,23 +9235,23 @@ BIG_MOMENT_CSS = """
 .imp{padding:12px 18px!important;display:flex;flex-direction:column}
 .imp .ih{font-size:21px!important;letter-spacing:1.5px!important;margin-bottom:2px!important}
 
-.lsx .im{grid-template-columns:26px minmax(0,1fr) auto!important;font-size:22px!important;padding:10px 0!important;
+.lsx .im{grid-template-columns:26px max-content minmax(0,1fr)!important;font-size:22px!important;padding:10px 0!important;
  column-gap:12px!important;row-gap:4px!important}
 .lsx .im>*{grid-row:auto!important}
 .lsx .im>:nth-child(1){grid-column:1!important;grid-row:1!important}
 .lsx .im>:nth-child(2){grid-column:2!important;grid-row:1!important}
-.lsx .im>:nth-child(4){grid-column:3!important;grid-row:1!important;text-align:right}
+.lsx .im>:nth-child(4){grid-column:3!important;grid-row:1!important;text-align:right;white-space:normal!important;min-width:0;font-size:21px!important}
 .lsx .im>:nth-child(3){grid-column:2/-1!important;grid-row:2!important;font-size:22px!important}
 .lsx .im>:nth-child(5){grid-column:2/-1!important;grid-row:3!important}
 .lsx .im>:nth-child(5):empty{display:none}
 .lsx .im .who5{font-size:27px!important}
-.lsx .im .who5{white-space:normal!important;overflow:visible!important;text-overflow:clip!important;min-width:0}
-.lsx .imp .im .who5.lng.lng{font-size:24px!important}
+.lsx .im .who5{white-space:normal!important;overflow:visible!important;text-overflow:clip!important;min-width:0;overflow-wrap:anywhere}
+.lsx .imp .im .who5.lng.lng.lng.lng{font-size:24px!important}
 .lsx .im .ar{font-size:22px!important}
 .imp:not(:has(.im+.im+.im)) .im .who5{font-size:31px!important}
 .imp:not(:has(.im+.im+.im)) .im{font-size:24px!important}
 .imp:not(:has(.im+.im+.im)) .im>:nth-child(3){font-size:24px!important}
-.imp:has(.im+.im+.im) .im{grid-template-columns:26px minmax(0,1fr) auto auto!important;padding:7px 0!important;column-gap:10px!important}
+.imp:has(.im+.im+.im) .im{grid-template-columns:26px max-content minmax(0,1fr)!important;padding:7px 0!important;column-gap:10px!important}
 .imp:has(.im+.im+.im) .im>:nth-child(5){display:none!important}
 .imp:has(.im+.im+.im) .im .who5{font-size:25px!important}
 .imp:not(:has(.im+.im)) .im .who5{font-size:36px!important}.imp:not(:has(.im+.im)) .im{font-size:27px!important}
@@ -9286,7 +9287,7 @@ body,.card{width:1100px!important}
 .pr2>.fp{grid-column:3;grid-row:1/3}
 .pr2>div:nth-of-type(3){grid-column:2;grid-row:2;display:flex;align-items:center;gap:10px;min-width:0}
 .pr2 .mt{display:none!important}
-.pr2 .nm2{font-size:24px!important}.pr2 .nm2 span{display:none!important}
+.pr2 .nm2{font-size:24px!important;white-space:normal!important;overflow:visible!important;line-height:1.1}.pr2 .nm2 span{display:none!important}
 .pr2 .ln{font-size:20px!important;margin-top:2px!important;white-space:normal!important;overflow:visible!important;line-height:1.15!important}
 .pr2 .fp{font-size:31px!important;padding:5px 0!important;line-height:1.05!important}
 .pr2 .fp small,.pr2 .fp.pjx small{font-size:20px!important;letter-spacing:0!important}
@@ -9376,6 +9377,7 @@ def _dense_css(html_text):
 
 
 def _dense_html(html_text):
+    html_text = re.sub(r"<span class='m'>([^<]{13,})</span>", r"<span class='m' style='font-size:.82em'>\1</span>", html_text)
     return html_text.replace("PLAYOFFS · SINCE YESTERDAY", "PLAYOFFS")
 
 
@@ -9433,6 +9435,7 @@ def readable_inline(html_text):
         elif "class='lsx'" in html_text:
             css, w = BIG_MOMENT_CSS, MOMENT_W
             html_text = re.sub(r"<b class='who5'>([^<]{13,})</b>", r"<b class='who5 lng'>\1</b>", html_text)
+            html_text = re.sub(r"<div class='nm'>([^<]{14,})</div>", r"<div class='nm lng'>\1</div>", html_text)
             m = re.search(r"<div class='tryt [a-z]+'>[^<]*</div>", html_text)
             if m and "<div class=st>" in html_text:          # try tag under the lead line, not under the +N chip
                 html_text = html_text.replace(m.group(0), "", 1)
@@ -9538,6 +9541,7 @@ body,.card{width:1100px!important}
 .wnr{display:grid;grid-template-columns:44px minmax(0,1fr) auto 92px;gap:10px;align-items:center;padding:7px 0;min-height:70px}
 .wnr+.wnr{border-top:1px solid rgba(255,255,255,.08)}
 .wnr .rk{font-size:22px;font-weight:900;color:#ffd166;text-align:center}
+.wnr .wnm.s{font-size:19px;overflow:visible;text-overflow:clip}
 .wnr .wnm{font-size:24px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:none;letter-spacing:0}
 .wnr .wch2{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px}
 .wnr .wch2 span{background:#f5c542;color:#1b1f2a;font-weight:900;font-size:17px;border-radius:7px;padding:1px 8px;white-space:nowrap}
@@ -9575,7 +9579,7 @@ def nfl_preview_fantasy_html(events, live, ol, title, show_teams=None):
             chips = "".join(
                 f"<span>{H.escape(short_name((players.get(p) or {}).get('full_name') or '') or (players.get(p) or {}).get('last_name', p) + ' D/ST')}"
                 f"<small>{proj.get(str(p), 0):.1f}</small></span>" for p in ps[:3])
-            who = (f"<div class='wch2'>{chips}</div>" if ps else "<div class='no'>nobody in this game</div>")
+            who = (f"<div class='wch2'>{chips}</div>" if ps else "<div class='no'>nobody playing</div>")
             if o["po"] < 0.5 and (o["po_w"] or 0) < 0.5:
                 po = "<div class='po'><span class='out'>out of the race</span></div>"
             else:
@@ -9584,7 +9588,7 @@ def nfl_preview_fantasy_html(events, live, ol, title, show_teams=None):
                          if o["po_w"] is not None and o["po_l"] is not None and abs(o["po_w"] - o["po_l"]) >= 3 else "")
                       + "</div>")
             rows.append(f"<div class='wnr{' fav' if w >= 50 else ''}'><div class='rk'>#{pe.get('rank', '–')}</div>"
-                        f"<div style='min-width:0'><div class='wnm'>{H.escape(live['rosters'][r]['manager'])}</div>{who}</div>"
+                        f"<div style='min-width:0'><div class='wnm{' s' if len(live['rosters'][r]['manager']) > 10 else ''}'>{H.escape(live['rosters'][r]['manager'])}</div>{who}</div>"
                         f"{po}<div class='wp'>{w:.0f}%</div></div>")
         tag = "<div class='tg'>🔥 COIN FLIP</div>" if 42 <= ol[a]["win"] <= 58 and any_in else ""
         tiles.append(f"<div class='wnt{'' if any_in else ' cold'}'>{tag}{''.join(rows)}</div>")
@@ -9749,7 +9753,7 @@ _RANKS = {}
 RANK_CSS = """
 .pp5,.pr2,.as{position:relative}
 .prk{position:absolute;z-index:6;font-style:normal;font-weight:900;font-size:14px;line-height:1;letter-spacing:.2px;
- padding:3px 0;width:58px;text-align:center;box-sizing:border-box;border-radius:6px;background:rgba(10,14,24,.88);color:#aab3c5;border:1px solid rgba(255,255,255,.18);
+ padding:3px 4px;min-width:58px;text-align:center;box-sizing:border-box;border-radius:6px;background:rgba(10,14,24,.88);color:#aab3c5;border:1px solid rgba(255,255,255,.18);
  white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums}
 .pp5>.prk{left:12px;bottom:10px}.pr2>.prk{left:8px;bottom:6px}.as>.prk{left:6px;bottom:4px;font-size:12px;width:50px}
 .prk.r12{color:#f0b48a;border-color:#b8734a}
