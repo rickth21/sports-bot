@@ -7064,6 +7064,124 @@ def nba_game_fantasy_html(event, summary, live, max_rows=7):
     return _widen(_nba_game_fantasy_html_tall(event, summary, live, max_rows))
 
 
+
+# ------------------------------------------------ images: download them ourselves and embed them (no broken pictures)
+
+_IMG = {}
+_IMG_EXT = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "svg": "image/svg+xml", "webp": "image/webp",
+            "gif": "image/gif"}
+SILHOUETTE = ("data:image/svg+xml;base64," + __import__("base64").b64encode(
+    b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='#c4ccd6'/>"
+    b"<circle cx='50' cy='38' r='19' fill='#8e9aab'/><path d='M14 100c2-22 17-34 36-34s34 12 36 34z' fill='#8e9aab'/></svg>"
+).decode())
+
+
+def _logo_fallback(url):
+    """Team initials in a circle, e.g. .../nba/500/gs.png -> GS."""
+    m = re.search(r"/([a-z0-9]{2,5})\.(?:png|jpg|svg)", url.lower())
+    code = (m.group(1) if m else "?").upper()[:4]
+    svg = (f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='48' fill='#2a3350'/>"
+           f"<text x='50' y='50' dy='.35em' text-anchor='middle' font-family='Arial,Helvetica,sans-serif' font-weight='900' "
+           f"font-size='{34 if len(code) <= 3 else 26}' fill='#ffffff'>{code}</text></svg>")
+    return "data:image/svg+xml;base64," + __import__("base64").b64encode(svg.encode()).decode()
+
+
+def _fetch_img(url):
+    if url in _IMG:
+        return _IMG[url]
+    import base64
+    data, ctype = None, None
+    for i in range(3):
+        try:
+            import html as _h
+            req = urllib.request.Request(_h.unescape(url), headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                body = r.read()
+                ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip()
+            if body and len(body) > 100 and (ctype.startswith("image/") or url.lower().endswith(tuple(_IMG_EXT))):
+                data = body
+                break
+        except Exception:  # noqa: BLE001
+            time.sleep(0.6 * (i + 1))
+    if data:
+        if not ctype.startswith("image/"):
+            ctype = _IMG_EXT.get(url.lower().rsplit(".", 1)[-1].split("?")[0], "image/png")
+        uri = f"data:{ctype};base64," + base64.b64encode(data).decode()
+    else:
+        headshot = any(k in url for k in ("headshot", "/players/", "thumb", "avatars"))
+        uri = SILHOUETTE if headshot else _logo_fallback(url)
+        _log_plain(f"image unavailable, using a placeholder: {url[:90]}")
+    _IMG[url] = uri
+    return uri
+
+
+def inline_images(html_text):
+    """Swap every web image in a card for an embedded copy (or a placeholder), so the screenshot never shows a broken one."""
+    urls = sorted(set(re.findall(r"""src=['"](https?://[^'"]+)['"]""", html_text)))
+    todo = [u for u in urls if u not in _IMG]
+    if todo:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(_fetch_img, todo))
+    for u in urls:
+        html_text = html_text.replace(f"src='{u}'", f"src='{_IMG[u]}'").replace(f'src="{u}"', f'src="{_IMG[u]}"')
+    # an <img> with no picture at all (empty src) gets the silhouette too
+    return html_text.replace("src=''", f"src='{SILHOUETTE}'")
+
+
+_render_card_web = render_card
+_render_png_web = render_png
+
+
+def render_card(html_text, width=None):
+    try:
+        html_text = inline_images(html_text)
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"image embedding skipped: {e}")
+    return _render_card_web(html_text, width)
+
+
+def render_png(html_text, width=880, height=530):
+    try:
+        html_text = inline_images(html_text)
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"image embedding skipped: {e}")
+    return _render_png_web(html_text, width, height)
+
+
+
+# ------------------------------------------------ starting / bench / free agent: loud, solid tags + a coloured row edge
+
+FAN_CSS += """
+.bd{font-size:12.5px!important;font-weight:900!important;letter-spacing:1.3px!important;padding:3px 9px!important;
+ border-radius:6px!important;margin-top:4px!important}
+.bd.st{background:#1faa59!important;color:#fff!important;box-shadow:0 0 12px rgba(31,170,89,.5)}
+.bd.bn{background:#64748b!important;color:#fff!important}
+.bd.fa{background:#f5c542!important;color:#1b1305!important;box-shadow:0 0 12px rgba(245,197,66,.5)}
+.pr2:has(.bd.st){box-shadow:inset 5px 0 0 #1faa59}
+.pr2:has(.bd.bn){box-shadow:inset 5px 0 0 #64748b}
+.pr2:has(.bd.fa){box-shadow:inset 5px 0 0 #f5c542}
+.tpr .ow5 em{font-size:11.5px!important;font-weight:900!important;letter-spacing:1.2px!important;padding:2px 8px!important;border-radius:5px!important}
+.tpr .ow5 em.s{background:#1faa59!important;color:#fff!important}
+.tpr .ow5 em.b{background:#64748b!important;color:#fff!important}
+.tpr:has(em.s){box-shadow:inset 4px 0 0 #1faa59}
+.tpr:has(em.b){box-shadow:inset 4px 0 0 #64748b}
+"""
+
+
+
+_nba_batch_html_narrow = nba_batch_html
+
+
+def nba_batch_html(mode, events, summaries, live, title):
+    """Grouped NBA card, landscape: wider so owner tags and stat lines never get cut off."""
+    return _nba_batch_html_narrow(mode, events, summaries, live, title).replace(
+        "</style>", "body,.card{width:1300px!important}"
+        ".tpr{grid-template-columns:28px 250px 64px 128px 300px 1fr!important}"
+        ".tpr .ow5{display:flex;align-items:center;gap:8px;min-width:0}.tpr .ow5 em{flex:none}"
+        ".tpr .ln5{font-size:14px!important}</style>", 1)
+
+
 # ===================================================================== main
 
 def send_test():
