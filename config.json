@@ -46,7 +46,7 @@
       "hour_uk": 14,
       "skip_weekday": "Tuesday"
     },
-    "spoiler_delay_seconds": 21,
+    "spoiler_delay_seconds": 35,
     "td_card_v5": true,
     "clutch_field_goals": true,
     "overtime_posts": true,
@@ -99,6 +99,6 @@
       "mention_role_id": ""
     }
   },
-  "spoiler_delay_seconds": 21,
+  "spoiler_delay_seconds": 35,
   "live_poll_seconds": 15
 }
