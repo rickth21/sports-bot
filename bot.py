@@ -2955,11 +2955,20 @@ def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=7):
         rows.append({**p, "owner": o["manager"] if o else None, "starting": bool(o and o["starting"])})
     owned = [r for r in rows if r["owner"]][:max_rows]
     fa = next((r for r in rows if not r["owner"]), None)
-    mu = nba_matchup_lookup(live)
+    mu = {}
+    try:                                       # projected finals (current scores mean little mid-week)
+        proj = nfl_projections(live["week"])
+        for ra, rb in live["pairs"]:
+            pa, pb = _proj_total(ra, live, ol, event, proj), _proj_total(rb, live, ol, event, proj)
+            mu[live["rosters"][ra]["manager"]] = (pa, live["rosters"][rb]["manager"], pb)
+            mu[live["rosters"][rb]["manager"]] = (pb, live["rosters"][ra]["manager"], pa)
+    except Exception as ex:  # noqa: BLE001
+        log(f"projected matchups unavailable: {ex}")
+        mu = nba_matchup_lookup(live)
     prs = []
     for i, r in enumerate(owned):
         m = mu.get(r["owner"])
-        mt = (f"<div class='mt'><b class='{'w' if m[0] >= m[2] else 'l'}'>{m[0]:.1f}</b> – {m[2]:.1f}<br>vs {H.escape(m[1])}</div>"
+        mt = (f"<div class='mt'>proj <b class='{'w' if m[0] >= m[2] else 'l'}'>{m[0]:.1f}</b> – {m[2]:.1f}<br>vs {H.escape(m[1])}</div>"
               if m else "")
         prs.append(f"<div class='pr2{' lead' if i == 0 else ''}'><img src='{H.escape(nfl_headshot(r.get('id')))}'>"
                    f"<div><div class='nm2'>{H.escape(r['name'])}<span>{r['team']} · {r.get('pos', '')}</span></div>"
