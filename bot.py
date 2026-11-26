@@ -2661,6 +2661,9 @@ def clock_secs(e):
         return 0.0
 
 
+_NBA_LIVE = {"on": False}       # any NBA game live (or just finished and not posted): check every 20s, not every 5 min
+
+
 def run_nba(st, dates=None, force=False):
     """Fantasy-first NBA posts, grouped by when games actually finish / reach half-time."""
     if not NBA_HOOK and not DRY_RUN and not SILENT and not force:
@@ -2677,6 +2680,8 @@ def run_nba(st, dates=None, force=False):
     G = lambda e: st["nba"].setdefault(e["id"], {"date": e["date"][:10]})  # noqa: E731
     now_s = time.time()
     live_games = [e for e in events if e["status"]["type"]["state"] == "in"]
+    _NBA_LIVE["on"] = bool(live_games) or any(
+        e["status"]["type"]["state"] == "post" and not G(e).get("posted") for e in events)
 
     # ---------------------------------------------------------------- full time
     finals = []
@@ -2693,8 +2698,11 @@ def run_nba(st, dates=None, force=False):
         finals.append(e)
     if finals:
         first = st.setdefault("nba_ft_wait", now_s)
-        closing = [e for e in live_games if e["status"].get("period", 0) >= 4]
-        if force or not closing or now_s - first >= 25 * 60:
+        # only hold for a game that's really about to finish: 4th quarter / OT with <= 1:00 on the clock (max 10 minutes)
+        cfg = CONFIG.get("nba") or {}
+        closing = [e for e in live_games if e["status"].get("period", 0) >= 4
+                   and clock_secs(e) <= float(cfg.get("ft_group_if_clock_under_secs", 60))]
+        if force or not closing or now_s - first >= float(cfg.get("ft_group_max_wait_minutes", 10)) * 60:
             if SILENT:
                 ok = True
             else:
@@ -3593,6 +3601,12 @@ def nfl_prime_slot(slot, st, getctx, force=False):
                 continue
             summary = fetch(f"football/nfl/summary?event={e['id']}")
             if not force and not event_ready(g, "ft_seen", summary):
+                active = True
+                continue
+            # another game in this slot in its last 2:00 of the 4th (or OT)? hold so they post together (max 10 min)
+            closing = [o for o in slot if o is not e and o["status"]["type"]["state"] == "in"
+                       and o["status"].get("period", 0) >= 4 and clock_secs(o) <= 120]
+            if closing and not force and time.time() - g.setdefault("ft_hold", time.time()) < 600:
                 active = True
                 continue
             ctx = getctx()
@@ -7112,12 +7126,13 @@ def main():
             active = run_nfl(st)
         except Exception as ex:  # noqa: BLE001
             log(f"NFL error: {ex}")
-        if time.time() - last_nba >= NBA_EVERY:
+        if time.time() - last_nba >= (20 if _NBA_LIVE["on"] else NBA_EVERY):
             try:
                 run_nba(st)
             except Exception as ex:  # noqa: BLE001
                 log(f"NBA error: {ex}")
             last_nba = time.time()
+        active = active or _NBA_LIVE["on"]
         save_state(st)
         now_saved = json.dumps(st, sort_keys=True)
         if keepalive and now_saved != saved and time.time() - last_push >= 120:
