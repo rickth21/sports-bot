@@ -9343,6 +9343,47 @@ body,.card{width:1100px!important}
 """
 
 
+DENSE_CSS = """
+.card>.in{display:block!important}
+.r2 .n{white-space:normal!important;overflow:visible!important;text-overflow:clip!important;line-height:1.1}
+.rr2 .m,.tr2 .m,.cm .n,.card .m{overflow:visible!important;text-overflow:clip!important}
+.tr2 .m,.cm .n{white-space:normal!important;line-height:1.1}
+"""
+RACE_BIG_CSS = """
+.rr2{grid-template-columns:34px minmax(0,1fr) 228px 70px 80px 80px 250px 170px!important;height:44px!important;font-size:22px!important}
+.rr2.h{height:30px!important;font-size:16px!important;letter-spacing:1px!important}
+.rr2 .chip{font-size:16px!important;padding:4px 10px!important;letter-spacing:.6px!important}
+.rr2 .o{grid-template-columns:62px 1fr 54px!important}.rr2 .o2{grid-template-columns:60px 1fr!important}
+.mv{font-size:18px!important}
+.race-note{display:none!important}
+.cmp{grid-template-columns:1fr 1fr!important;gap:8px 14px!important}
+.cmp .cm{font-size:21px!important;padding:8px 14px!important;grid-template-columns:minmax(0,1fr) 170px minmax(0,1fr)!important}
+.cmp .cm .n{white-space:nowrap;overflow:visible!important;text-overflow:clip!important}
+.cmp .mt2 b{font-size:20px!important}
+"""
+
+
+DENSE_FIT_CSS = ".card{max-height:%dpx!important;overflow:hidden!important}"   # never taller than the box; else natural
+
+
+def _dense_floor(html_text):
+    """Trades and the race read better with a text floor; recaps / playoff cards keep their own sizes (sidebars)."""
+    return 8.0 if ("<div class='rt'>" in html_text or "TRADE" in html_text) else 0
+
+
+def _dense_css(html_text):
+    return DENSE_CSS + (RACE_BIG_CSS if "<div class='rt'>" in html_text else "")
+
+
+def _dense_html(html_text):
+    return html_text.replace("PLAYOFFS · SINCE YESTERDAY", "PLAYOFFS")
+
+
+def _card_width(html_text):
+    m = re.findall(r"body,\.card\{width:(\d+)px", html_text)
+    return int(m[-1]) if m else 880
+
+
 def _cap_rows(html_text, keep=8):
     """Long game cards: the top `keep` players in full, everyone else in one 'also' line."""
     s = html_text.find("<div class='pl2'>")
@@ -9379,9 +9420,14 @@ def _cap_rows(html_text, keep=8):
 def readable_inline(html_text):
     """Re-size an in-game card so it reads in Discord without opening it (see the note above)."""
     try:
-        if "<div class='rt'>" in html_text or "class='rc'" in html_text:
-            return html_text                                  # trades / race / recaps: not in-game cards
-        if "class='otg'" in html_text:
+        floor_k = 9.5
+        if "class='wbg'" in html_text or "class='wn'" in html_text:
+            return html_text                                  # weekly boards / pre-game card: sized by their own code
+        if "<div class='rt'>" in html_text or "class='rc'" in html_text or "class='card shc'" not in html_text \
+                and not any(k in html_text for k in ("class='otg'", "class='lsx'", "class='pl2'", "class='gl'")):
+            css, w, floor_k = _dense_css(html_text), _card_width(html_text), _dense_floor(html_text)   # trades, recaps, race
+            html_text = _dense_html(html_text)
+        elif "class='otg'" in html_text:
             css, w = BIG_OT_CSS, 1100
             html_text = html_text.replace("<br>win ", " · win ")
         elif "class='lsx'" in html_text:
@@ -9409,14 +9455,17 @@ def readable_inline(html_text):
         elif "class='gl'" in html_text and "class='tpr" in html_text:
             css, w = BIG_GROUP_CSS, 1100
         else:
-            return html_text
-        floor = round(w / INLINE_W * 9.5, 1)                 # safety net: nothing under ~9.5px on screen
+            css, w, floor_k = _dense_css(html_text), _card_width(html_text), _dense_floor(html_text)
+            html_text = _dense_html(html_text)
+        floor = round(w / INLINE_W * floor_k, 1)             # safety net: nothing under ~9.5px (dense: 9) on screen
         hmax = int(w * INLINE_H / INLINE_W)                   # fixed shape: Discord shows it at its full width
+        dense = css.startswith(DENSE_CSS)
         html_text = re.sub(r"body,\.card\{width:\d+px(!important)?\}", "", html_text)
-        css = f"body,.card{{width:{w}px!important}}" + css + FIT_CSS % hmax
+        fit = (DENSE_FIT_CSS if dense else FIT_CSS) % hmax
+        css = f"body,.card{{width:{w}px!important}}" + css + fit
         return (html_text.replace("<style>", "<style>" + f"body,.card{{width:{w}px!important}}", 1)
                 .replace("</style>", css + "</style>", 1)
-                .replace("</head>", _MIN_TEXT_JS % floor + _FIT_JS + "</head>", 1))
+                .replace("</head>", (_MIN_TEXT_JS % floor if floor_k else "") + _FIT_JS + "</head>", 1))
     except Exception as ex:  # noqa: BLE001
         _log_plain(f"inline sizing skipped: {ex}")
         return html_text
