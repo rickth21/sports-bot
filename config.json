@@ -52,7 +52,11 @@
     "overtime_posts": true,
     "game_changer_swing": 12,
     "pin_final_hours": 16,
-    "hide_pin_notice": true
+    "hide_pin_notice": true,
+    "trades": {
+      "enabled": true,
+      "mention_role_id": "1410731373425197250"
+    }
   },
   "nba": {
     "batch_note": "-1 = one post per game as soon as it finishes. Set e.g. 60 to group games that tip off within 60 minutes of each other into one post.",
@@ -89,7 +93,11 @@
       ],
       "every_post_weeks_before_playoffs": 6
     },
-    "bot_name": "Donald 🏀"
+    "bot_name": "Donald 🏀",
+    "trades": {
+      "enabled": true,
+      "mention_role_id": ""
+    }
   },
   "spoiler_delay_seconds": 60,
   "live_poll_seconds": 15

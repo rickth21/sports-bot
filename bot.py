@@ -137,6 +137,8 @@ def discord(hook, embed, label="", content=None, files=None):
         payload["avatar_url"] = who["avatar_url"]
     if content:
         payload["content"] = content
+        roles = re.findall(r"<@&(\d+)>", content)
+        payload["allowed_mentions"] = {"parse": [], "roles": roles}
     if files:
         boundary = "----sportsbot" + str(int(time.time() * 1000))
         parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
@@ -6570,11 +6572,19 @@ def trade_card_html(ev):
 def post_trade(sport, t):
     ev = trade_eval(sport, t)
     html_text = trade_card_html(ev)
-    names = " ⇄ ".join(x["pe"]["manager"] for x in ev["sides"])
     hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
+    role = str(((CONFIG.get(sport) or {}).get("trades") or {}).get("mention_role_id") or "").strip()
+    content = f"<@&{role}>" if role.isdigit() else None       # e.g. @NFLfantasy: pinged on every trade
+    png = render_card(html_text)
     if sport == "nba":
-        return _nba_post(html_text, f"🤝 **TRADE** · {names}", {}, "trade.png")
-    return _post_card(hook, html_text, f"🤝 **TRADE** · {names}", {}, "trade.png")
+        _POSTER["name"] = (CONFIG.get("nba") or {}).get("bot_name") or "Donald 🏀"
+    try:
+        if png:
+            return discord(hook, [], "trade", content=content, files={"trade.png": png})
+        names = " ⇄ ".join(x["pe"]["manager"] for x in ev["sides"])
+        return discord(hook, {"title": f"🤝 Trade: {names}", "description": ev["take"]}, "trade", content=content)
+    finally:
+        _POSTER.clear()
 
 
 def maybe_trades(st):
