@@ -12399,5 +12399,244 @@ def _inline_ready(html_text):
         return h
 
 
+
+# ------------------------------------------------ a subtle roast when a rostered player messes up
+#   ONE small italic line on the card, aimed at the owner (Sleeper display name), only about the fantasy moment:
+#   picks, lost fumbles, missed kicks, turnovers on downs, a started D/ST giving up a TD, a big bust at full-time, and
+#   "bench cost you" in the recap. Kind: never on injuries, never for a team already out of the playoff race, and no
+#   line repeats for the same owner within a week (remembered in state "roasts"). Config "roasts": false turns it off.
+ROAST_LINES = {
+    "pick": [
+        "🫠 Bold strategy, {o}.", "{p} just found the other team's receiver. {o} noticed.",
+        "{o} drafted {p} for moments exactly like… not this.", "That one's going on {o}'s highlight reel. The wrong one.",
+        "{p} playing for both teams tonight, {o}?", "Somewhere, {o} is refreshing the app very hard.",
+        "{o}, that's a turnover with extra steps.", "{p} with a generous gift. {o} did not ask for it.",
+        "Respectfully, {o}: maybe check the waiver wire.", "{o}'s QB room just got very quiet.",
+    ],
+    "fumble": [
+        "Butterfingers, and {o} is holding the bag.", "{p} let go. {o} can't.", "{o} would like that one back.",
+        "Ball security is a lifestyle, {o}.", "{p} put it on the turf. {o} put head in hands.",
+        "Grip it and rip it, {o}. Mostly grip it.",
+    ],
+    "miss": [
+        "{p} thanks {o} for the playing time.", "{o} starting a kicker: brave. Trusting one: braver.",
+        "Wide of the posts, wide of {o}'s hopes.", "{o} felt that one in the standings.",
+        "That's three points {o} won't see again.", "{p} aimed for {o}'s heart and missed that too.",
+        "Kickers are people too, {o}. Unreliable people.", "{o} might want to look at the kicker market.",
+    ],
+    "downs": [
+        "Fourth-and-ouch for {o}.", "{o}'s guys came up a yard short. Story of the season?",
+        "{o} believed. The fourth down didn't.", "Close only counts in horseshoes, {o}.",
+    ],
+    "dst": [
+        "{o}'s D/ST is taking the night off.", "{o} started that defence on purpose, apparently.",
+        "{p} D/ST: open for business, {o}.", "{o}'s defence just waved them through.",
+        "Bold of {o} to start the {p} D/ST tonight.", "The {p} D/ST is giving {o} trust issues.",
+    ],
+    "bust": [
+        "{o}'s bench is having a better night.", "{p} left the projection in the locker room, {o}.",
+        "{o}, that's a rental you can return.", "{p} gave {o} a whole lot of nothing.",
+        "Projection: big. Reality: {o}'s {p}.", "{o} might want to check the waiver wire.",
+        "{p} spent tonight in airplane mode, {o}.",
+    ],
+    "bench": [
+        "{o}'s bench is louder than the starters.", "Lineup set by {o}. Allegedly.",
+        "The best players {o} owns were watching from the bench.", "{o}: start 'em next time, maybe?",
+        "{o}'s bench would like a word.",
+    ],
+}
+ROAST_CSS = ".rst{margin-top:8px;font-size:18px;font-style:italic;font-weight:600;color:#aeb7c7;line-height:1.3}" \
+            ".rst b{color:#e6e9ef;font-style:italic}"
+
+
+def _roast_ok(owner, txt=""):
+    if not CONFIG.get("roasts", True) or not owner or re.search(r"injur|carted|hurt", txt or "", re.I):
+        return False
+    return True
+
+
+def roast_line(kind, owner, player=""):
+    """One playful line for this owner and moment (no repeat for the same owner within 7 days), or ''."""
+    import html as H
+    pool = ROAST_LINES.get(kind) or []
+    if not pool or not owner:
+        return ""
+    st = _NFL_ST.get("st") or {}
+    mem = st.setdefault("roasts", {}) if st is not None else {}
+    now = time.time()
+    used = {x[0] for x in mem.get(owner, []) if now - x[1] < 7 * 86400}
+    pick = [ln for ln in pool if f"{kind}:{ln}" not in used] or pool
+    r = _random.Random(f"{owner}|{player}|{kind}|{int(now // 3600)}")
+    ln = r.choice(pick)
+    mem[owner] = [x for x in mem.get(owner, []) if now - x[1] < 7 * 86400][-30:] + [(f"{kind}:{ln}", now)]
+    txt = ln.replace("{o}", "\x00o\x00").replace("{p}", "\x00p\x00")
+    txt = H.escape(txt).replace("\x00o\x00", f"<b>{H.escape(owner)}</b>").replace("\x00p\x00", H.escape(short_name(player) or player))
+    return f"<div class='rst'>{txt}</div>"
+
+
+def _roast_into(h, line):
+    """Put the roast line at the bottom of the card's fantasy impact panel (or after the scorer panel)."""
+    if not line:
+        return h
+    i = h.find("<div class='imp'>")
+    if i >= 0:
+        e = _div_end(h, i) - len("</div>")
+        h = h[:e] + line + h[e:]
+    else:
+        return h
+    return h.replace("</style>", ROAST_CSS + "</style>", 1)
+
+
+def _alive(live, ol, manager):
+    """False for a team already out of the playoff race (no roasting them)."""
+    try:
+        rid = next((r for r, x in live["rosters"].items() if x["manager"] == manager), None)
+        return rid is None or rid not in ol or ol[rid].get("po", 100) >= 0.5
+    except Exception:  # noqa: BLE001
+        return True
+
+
+# missed kick card: the kicker's owner
+_nfl_miss_html_roast = nfl_miss_html
+
+
+def nfl_miss_html(event, play, summary, live, ol, info):
+    h = _nfl_miss_html_roast(event, play, summary, live, ol, info)
+    try:
+        if info["kind"] in ("fg", "xp") and info.get("kicker"):
+            k = next((x for x in nfl_kickers(summary) if name_key(x["name"]) == name_key(info["kicker"])), None)
+            o = league_owner(k["id"] if k else boxscore_id(summary, info["kicker"]), info["kicker"])
+            if o and o.get("starting") and _roast_ok(o["manager"], play.get("text")) and _alive(live, ol, o["manager"]):
+                h = _roast_into(h, roast_line("miss", o["manager"], info["kicker"]))
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"roast skipped: {ex}")
+    return h
+
+
+# turnover card: the QB (pick / fumble / stopped on downs)
+_nfl_turnover_html_roast = nfl_turnover_html
+
+
+def nfl_turnover_html(event, play, summary, live, ol, info):
+    res = _nfl_turnover_html_roast(event, play, summary, live, ol, info)
+    try:
+        if info.get("passer"):
+            o = league_owner(boxscore_id(summary, info["passer"]), info["passer"])
+            if o and o.get("starting") and _roast_ok(o["manager"], play.get("text")) and _alive(live, ol, o["manager"]):
+                kind = {"int": "pick", "fumble": "fumble", "downs": "downs"}[info["kind"]]
+                res = (_roast_into(res[0], roast_line(kind, o["manager"], info["passer"])),) + tuple(res[1:])
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"roast skipped: {ex}")
+    return res
+
+
+# game-changer card (interceptions / fumbles that swing the game): the player who gave it away
+_nfl_gc_html_roast = nfl_gc_html
+
+
+def nfl_gc_html(event, play, summary, live, ol, before, after):
+    res = _nfl_gc_html_roast(event, play, summary, live, ol, before, after)
+    try:
+        kind, victim = res[1], res[3]
+        if victim and kind in ("INTERCEPTION", "FUMBLE"):
+            o = league_owner(boxscore_id(summary, victim), victim)
+            if o and o.get("starting") and _roast_ok(o["manager"], play.get("text")) and _alive(live, ol, o["manager"]):
+                line = roast_line("pick" if kind == "INTERCEPTION" else "fumble", o["manager"], victim)
+                h = res[0]
+                h = _roast_into(h, line) if "<div class='imp'>" in h else \
+                    h.replace("</div></div><script>", line + "</div></div><script>", 1).replace("</style>", ROAST_CSS + "</style>", 1)
+                res = (h,) + tuple(res[1:])
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"roast skipped: {ex}")
+    return res
+
+
+# touchdown card: the started D/ST that just gave it up (and a pick-six thrower)
+_nfl_td_html_roast = nfl_td_fantasy_html
+
+
+def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
+    h = _nfl_td_html_roast(event, play, summary, live, ol, base, *a, **k)
+    try:
+        if "class='rst'" in h:
+            return h
+        away, home = teams_of(event)
+        abbr = (play.get("team") or {}).get("abbreviation", "")
+        con = home if away["team"]["abbreviation"] == abbr else away
+        td = td_parse(play)
+        line = ""
+        if td.get("kind") == "int" and td.get("sub"):
+            text = (_PLAYTXT.get(str(play.get("id"))) or ("", []))[0]
+            m = re.search(rf"({_ABBR}) pass", text)
+            if m:
+                qb = _full_name(m.group(1), (_PLAYTXT.get(str(play.get("id"))) or ("", []))[1], con["team"]["abbreviation"])
+                o = league_owner(boxscore_id(summary, qb), qb)
+                if o and o.get("starting") and _roast_ok(o["manager"], play.get("text")) and _alive(live, ol, o["manager"]):
+                    line = roast_line("pick", o["manager"], qb)
+        if not line:
+            od = league_owner(f"def:{sl_team(con['team']['abbreviation'])}", "")
+            if (od and od.get("starting") and "D/ST loses" in h and _roast_ok(od["manager"], play.get("text"))
+                    and _alive(live, ol, od["manager"])):       # only when it actually cost them points
+                line = roast_line("dst", od["manager"], con["team"].get("name") or con["team"]["abbreviation"])
+        if line:
+            h = _roast_into(h, line)
+            _last_td_html["h"] = h
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"roast skipped: {ex}")
+    return h
+
+
+# full-time game card: the biggest bust among started players
+_nfl_game_fantasy_html_roast = nfl_game_fantasy_html
+
+
+def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=30):
+    h = _nfl_game_fantasy_html_roast(event, summary, live, ol, base, max_rows)
+    try:
+        if event["status"]["type"].get("state") != "post" or not CONFIG.get("roasts", True):
+            return h
+        proj = nfl_projections(live["week"])
+        worst = None
+        for p in nfl_fantasy(summary):
+            o = league_owner(p.get("id"), p["name"])
+            if not (o and o.get("starting")) or not _alive(live, ol, o["manager"]):
+                continue
+            pj = float(proj.get(str(_sl_pid(p["name"], p.get("team", "")) or ""), 0) or 0)
+            if pj >= 12 and p["pts"] <= 0.35 * pj and (worst is None or p["pts"] / pj < worst[0]):
+                worst = (p["pts"] / pj, p["name"], o["manager"])
+        if worst:
+            line = roast_line("bust", worst[2], worst[1])
+            i = h.find("<div class='more'>")
+            if i < 0:
+                i = h.find("</div></div><script>")
+            if i >= 0:
+                h = h[:i] + line + h[i:]
+                h = h.replace("</style>", ROAST_CSS + ".pl2+.rst,.more+.rst,.rst{margin:8px 2px 0}</style>", 1)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"roast skipped: {ex}")
+    return h
+
+
+# weekly recap: "bench cost you"
+_recap_v2_roast = recap_v2_html
+
+
+def recap_v2_html(sport, week, live, settings):
+    a, b = _recap_v2_roast(sport, week, live, settings)
+    try:
+        m = re.search(r"💔 Bench cost ([^<]+?) the win</span>", a)
+        if m and CONFIG.get("roasts", True):
+            import html as H
+            owner = H.unescape(m.group(1))
+            line = roast_line("bench", owner)
+            if line:
+                j = a.find("</div>", m.end())
+                a = a[:j] + " <i class='rsi'>" + re.sub(r"</?div[^>]*>", "", line) + "</i>" + a[j:]
+                a = a.replace("</style>", ".rsi{font-style:italic;color:#aeb7c7}.rsi b{color:#e6e9ef}</style>", 1)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"roast skipped: {ex}")
+    return a, b
+
+
 if __name__ == "__main__":
     main()
