@@ -2333,8 +2333,9 @@ def _card(css_vars, body, height=None, extra_css="", width=880):
             f"<style>{NFL_CSS}{SLOT_CSS}{FAN_CSS}{RECAP_CSS}{OUT_CSS}{V2_CSS}{globals().get('V4_CSS', '')}{extra_css}"
             f"body,.card{{height:auto!important}}.card{{padding-bottom:6px}}{wide}</style></head><body>"
             f"<div class='card' style='{css_vars}'><div class='bg'></div><div class='in'>{body}</div></div>"
-            f"<script>addEventListener('load',()=>document.body.setAttribute('data-h',"
-            f"Math.ceil(document.querySelector('.card').getBoundingClientRect().height)))</script></body></html>")
+            f"<script>addEventListener('load',()=>(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve())"
+            f".then(()=>setTimeout(()=>document.body.setAttribute('data-h',"
+            f"Math.ceil(document.querySelector('.card').getBoundingClientRect().height)),60)))</script></body></html>")
 
 
 def render_card(html_text, width=None):
@@ -9210,7 +9211,8 @@ def _moment_landscape(html_text):
         if e < 0 or e > tail:
             return html_text
         rest = html_text[e:tail]
-        cut = min([k for k in (rest.find("<div class='cv'>"), rest.find("<div class='imp'>")) if k >= 0], default=-1)
+        cut = min([k for k in (rest.find("<div class='cv'>"), rest.find("<div class='imp'>"), rest.find("<div class='fx'>"))
+                   if k >= 0], default=-1)
         if cut <= 0 or not rest[:cut].strip():
             return html_text
         block = f"<div class='lsx'><div class='lcol'>{rest[:cut]}</div><div class='rcol'>{rest[cut:]}</div></div>"
@@ -9626,6 +9628,18 @@ def meter_html(win_a, size=""):
 
 
 # ---- pre-game "who needs what": landscape tiles, standings order, readable without opening
+#   Starters in gold; bench players in this game as muted outlined chips after them. Bench chips never add a line:
+#   as many as fit, then "+N bench" (a small script in the card does the fitting).
+BENCH_FIT_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const go=()=>{"
+                "document.querySelectorAll('.wch2').forEach(w=>{const bn=[...w.querySelectorAll('span.bn')];if(!bn.length)return;"
+                "const st=[...w.querySelectorAll('span:not(.bn)')];bn.forEach(b=>b.style.display='none');"
+                "const base=st.length?w.offsetHeight:(bn[0].style.display='',w.offsetHeight);bn[0].style.display='none';"
+                "let n=bn.length,more=null;const put=()=>{if(more)more.remove();more=null;if(n<bn.length){more=document.createElement('span');"
+                "more.className='bn';more.textContent='+'+(bn.length-n)+' bench';w.appendChild(more);}};"
+                "let k=0;for(;k<bn.length;k++){bn[k].style.display='';n=k+1;put();if(w.offsetHeight>base+1){bn[k].style.display='none';n=k;put();"
+                "if(w.offsetHeight>base+1&&more){more.textContent='+'+(bn.length-n);}break;}}"
+                "bn.slice(n).forEach(b=>b.remove());});};"
+                "(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(go);});</script>")
 WHO_CSS = """
 body,.card{width:1100px!important}
 .top{font-size:20px!important;letter-spacing:1.5px!important}.top img{width:32px!important;height:32px!important}
@@ -9643,6 +9657,9 @@ body,.card{width:1100px!important}
 .wnr .wch2 span{background:#f5c542;color:#1b1f2a;font-weight:900;font-size:17px;border-radius:7px;padding:1px 8px;white-space:nowrap}
 .wnr .wch2 span small{font-size:14px;font-weight:800;opacity:.75;margin-left:5px}
 .wnr .no{font-size:18px;color:#8b95a8;font-style:italic;margin-top:3px;white-space:nowrap}
+.wnr .wch2 span.bn{background:transparent;color:#c3cad8;box-shadow:inset 0 0 0 1.5px #6b7385;font-weight:800}
+.wnr .wch2 span.bn i{font-style:normal;font-size:12px;font-weight:900;letter-spacing:.8px;color:#8b95a8;margin-right:5px}
+.wnr .wch2 span.bn small{opacity:.9}
 .wnr .po{text-align:right;font-size:18px;font-weight:800;color:#cfd5e1;white-space:nowrap;line-height:1.25}
 .wnr .po b{color:#fff;font-size:21px}.wnr .po .g{color:#7ee2a8}.wnr .po .r{color:#ff9a9e}.wnr .po .out{color:#7d879b;font-style:italic}
 .wnr .wp{height:52px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:900;
@@ -9665,17 +9682,30 @@ def nfl_preview_fantasy_html(events, live, ol, title, show_teams=None):
     def mine(r):
         return [p for p in ol[r]["left"] if show_teams is None or (players.get(p) or {}).get("team") in show_teams]
 
+    here = show_teams or {sl_team(t["team"]["abbreviation"]) for e in events for t in teams_of(e)}
+
+    def bench(r):
+        x = live["rosters"][r]
+        on = set(x.get("starters") or [])
+        out = [p for p in x.get("players") or [] if p not in on and ((players.get(p) or {}).get("team") or p) in here]
+        return sorted(out, key=lambda p: -proj.get(str(p), 0))
+
+    def chip_name(p):
+        pl = players.get(p) or {}
+        return short_name(pl.get("full_name") or "") or (pl.get("last_name", p) + " D/ST")
+
     tiles = []
     for a, b in _rank_sorted(live["pairs"], ol):
         rows, any_in = [], False
         for r, w in ((a, ol[a]["win"]), (b, 100 - ol[a]["win"])):
             pe, o = ppl.get(r) or {}, ol[r]
             ps = mine(r)
+            bn = bench(r)
             any_in = any_in or bool(ps)
-            chips = "".join(
-                f"<span>{H.escape(short_name((players.get(p) or {}).get('full_name') or '') or (players.get(p) or {}).get('last_name', p) + ' D/ST')}"
-                f"<small>{proj.get(str(p), 0):.1f}</small></span>" for p in ps[:3])
-            who = (f"<div class='wch2'>{chips}</div>" if ps else "<div class='no'>nobody playing</div>")
+            chips = "".join(f"<span>{H.escape(chip_name(p))}<small>{proj.get(str(p), 0):.1f}</small></span>" for p in ps[:3])
+            chips += "".join(f"<span class='bn'><i>BN</i>{H.escape(chip_name(p))}<small>{proj.get(str(p), 0):.1f}</small></span>"
+                             for p in bn[:6])
+            who = (f"<div class='wch2'>{chips}</div>" if ps or bn else "<div class='no'>nobody playing</div>")
             if o["po"] < 0.5 and (o["po_w"] or 0) < 0.5:
                 po = "<div class='po'><span class='out'>out of the race</span></div>"
             else:
@@ -9691,7 +9721,7 @@ def nfl_preview_fantasy_html(events, live, ol, title, show_teams=None):
     pill = "KICK-OFF IMMINENT" if now_utc() > parse_time(events[0]["date"]) else f"KICK-OFF {k:%H:%M} UK"
     body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL · WEEK {live['week']} · {H.escape(title.upper())}</div>"
             f"<div class='pill'>{pill}</div></div><div class='wn'>{''.join(tiles)}</div>")
-    return _card("--a:#5b7bd5;--h:#d50a0a", body, extra_css=WHO_CSS, width=1100)
+    return _card("--a:#5b7bd5;--h:#d50a0a", body, extra_css=WHO_CSS, width=1100).replace("<head>", "<head>" + BENCH_FIT_JS, 1)
 
 
 # ---- big games get hype: NFL 30+ "BIG GAME", 40+ "MONSTER GAME"; NBA (lock-in, defence-heavy) 55+ / 70+.
@@ -11227,6 +11257,191 @@ def nfl_prime_slot(slot, st, getctx, force=False):
         except Exception as ex:  # noqa: BLE001
             _log_plain(f"details refresh of touchdown {pid} skipped: {ex}")
     return active
+
+
+
+# ------------------------------------------------ touchdown cards: useful extras in the spare space (right column)
+#   In order of usefulness (waiver watch first for an unrostered scorer; the middle two rotate for variety): win chance
+#   + scoring drive + game state, the scorer's line today, league players in this game, waiver watch. All are added;
+#   a small script in the card removes the lowest ones until nothing overflows (so the card never shrinks for them).
+FILL_CSS = """
+.lsx>.rcol{min-width:0}.lsx .rcol:has(.fx)>.imp{flex:0 0 auto!important}
+.lsx .rcol>.fx:last-child{flex:1}
+.fx{min-width:0;overflow:hidden;background:rgba(9,12,22,.62);border-radius:14px;padding:10px 16px 11px;box-shadow:inset 4px 0 0 var(--a)}
+.fx .fh{font-size:15px;font-weight:900;letter-spacing:1.6px;color:#c3cad8;margin-bottom:5px}
+.fx .fr{display:flex;flex-wrap:wrap;justify-content:space-between;column-gap:14px;min-width:0;font-size:20px;line-height:1.25;
+ color:#e3e7ef;white-space:nowrap}
+.fx .fr span:last-child{margin-left:auto}
+.fx .fr+.fr{margin-top:3px}
+.fx .fr b{color:#fff;font-weight:900}.fx .fr .u{color:#7ee2a8}.fx .fr .dn{color:#ff9a9e}.fx .fr .g{color:#ffd166}
+.fx .fr span:last-child{text-align:right;color:#c3cad8}
+.fx .fr span:first-child{overflow:hidden;text-overflow:clip}
+.sbx .sc.hot{text-shadow:0 0 22px var(--hc,#ffd166),0 0 44px var(--hc,#ffd166)!important}
+"""
+FILL_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const go=()=>{const c=document.querySelector('.card');"
+           "if(!c)return;const fx=[...document.querySelectorAll('.fx')];"
+           "while(fx.length&&(c.scrollHeight>c.clientHeight+1||[...document.querySelectorAll('.fx .fr')].some(r=>r.scrollWidth>r.clientWidth+1)))"
+           "{fx.pop().remove();}};(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(go);});</script>")
+_NEXTWK = {}
+
+
+def _fx(head, rows):
+    import html as H
+    rows = [r for r in rows if r]
+    if not rows:
+        return ""
+    return f"<div class='fx'><div class='fh'>{H.escape(head)}</div>" + "".join(
+        f"<div class='fr'><span>{a}</span><span>{b}</span></div>" for a, b in rows) + "</div>"
+
+
+def _stat_line(summary, name):
+    """'15/20 · 247 yds · 2 TD' passing, then rushing / receiving, from the box score."""
+    want = {"passing": ("completions/passingAttempts", "passingYards", "passingTouchdowns", "interceptions"),
+            "rushing": ("rushingAttempts", "rushingYards", "rushingTouchdowns"),
+            "receiving": ("receptions", "receivingYards", "receivingTouchdowns")}
+    out = []
+    for team in (summary.get("boxscore") or {}).get("players") or []:
+        for cat in team.get("statistics") or []:
+            if cat.get("name") not in want:
+                continue
+            keys = cat.get("keys") or []
+            for a in cat.get("athletes") or []:
+                if (a.get("athlete") or {}).get("displayName") != name:
+                    continue
+                v = dict(zip(keys, a.get("stats") or []))
+                if cat["name"] == "passing":
+                    t = f"{v.get('completions/passingAttempts', '')} · {v.get('passingYards', 0)} pass yds"
+                    t += f" · {v.get('passingTouchdowns', 0)} TD" if v.get("passingTouchdowns") not in (None, "0") else ""
+                    t += f" · {v.get('interceptions')} INT" if v.get("interceptions") not in (None, "0") else ""
+                elif cat["name"] == "rushing":
+                    t = f"{v.get('rushingAttempts', 0)} car · {v.get('rushingYards', 0)} yds"
+                    t += f" · {v.get('rushingTouchdowns')} TD" if v.get("rushingTouchdowns") not in (None, "0") else ""
+                else:
+                    t = f"{v.get('receptions', 0)} rec · {v.get('receivingYards', 0)} yds"
+                    t += f" · {v.get('receivingTouchdowns')} TD" if v.get("receivingTouchdowns") not in (None, "0") else ""
+                out.append((cat["name"], t))
+    return out
+
+
+def _fill_sections(event, play, summary, live, td, owned):
+    import html as H
+    away, home = teams_of(event)
+    abbr = (play.get("team") or {}).get("abbreviation", "")
+    team = away if away["team"]["abbreviation"] == abbr else home
+    nick = team["team"].get("name") or abbr
+    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    secs = {}
+    # 1) win chance + drive + game state
+    rows = []
+    wp = summary.get("winprobability") or []
+    sw = _win_swing(summary, play.get("id"), team is home)
+    if sw:
+        d = sw[1] - sw[0]
+        rows.append((f"{H.escape(nick)} win", f"<b>{sw[1]:.0f}%</b> <span class='{'u' if d >= 0 else 'dn'}'>"
+                     f"{'▲' if d >= 0 else '▼'}{abs(d):.0f}</span>"))
+    elif wp:
+        w = float(wp[-1].get("homeWinPercentage") or 0) * 100
+        rows.append((f"{H.escape(nick)} win", f"<b>{(w if team is home else 100 - w):.0f}%</b>"))
+    dr = summary.get("drives") or {}
+    for dv in list(dr.get("previous") or []) + ([dr["current"]] if dr.get("current") else []):
+        if any(str(p.get("id")) == str(play.get("id")) for p in dv.get("plays") or []) and dv.get("description"):
+            m = re.match(r"(\d+) plays?, (-?\d+) yards?, ([\d:]+)", dv["description"])
+            if m:
+                rows.append(("Drive", f"<b>{m.group(1)}</b> plays · <b>{m.group(2)}</b> yds · {m.group(3)}"))
+            break
+    q = (play.get("period") or {}).get("number", 0)
+    clk = (play.get("clock") or {}).get("displayValue", "")
+    diff = abs(a_s - h_s)
+    state = ("tied" if diff == 0 else "one-score game" if diff <= 8 else "two-score game" if diff <= 16 else f"{diff}-point game")
+    when = f"{clk} " + (f"Q{q}" if q <= 4 else "OT")
+    rows.append(("Game", f"<b class='g'>{state}</b> · {when}"))
+    secs["game"] = _fx("WIN CHANCE & DRIVE", rows)
+    # 2) scorer's line today
+    names = [td.get("scorer")] + ([td["qb"]] if td.get("qb") else [])
+    rows = []
+    for nm in names:
+        for cat, t in _stat_line(summary, nm or "")[:2]:
+            rows.append((f"<b>{H.escape(short_name(nm) if len(names) > 1 else nm)}</b>", H.escape(t)))
+    secs["line"] = _fx("TODAY'S LINE", rows[:3])
+    # 3) league players in this game
+    players = sleeper_players("nfl")
+    here = {sl_team(t["team"]["abbreviation"]) for t in teams_of(event)}
+    skip = {str(_sl_pid(n, abbr) or "") for n in names if n}
+    lst = []
+    for rid, x in live["rosters"].items():
+        for pid in x.get("starters") or []:
+            pl = players.get(pid) or {}
+            if (pl.get("team") or pid) in here and str(pid) not in skip:
+                nm = f"{pid} D/ST" if str(pid).isalpha() and str(pid).isupper() else (pl.get("full_name") or pid)
+                lst.append((float(x["pp"].get(pid) or 0), nm, x["manager"]))
+    lst.sort(reverse=True)
+    secs["league"] = _fx("LEAGUE PLAYERS IN THIS GAME",
+                         [(f"<b>{H.escape(short_name(nm) if ' ' in nm and 'D/ST' not in nm else nm)}</b> {pts:.1f}",
+                           H.escape(mg)) for pts, nm, mg in lst[:3]])
+    # 4) waiver watch (unrostered scorer)
+    if not owned and td.get("scorer") and not td.get("sub"):
+        pid = _sl_pid(td["scorer"], abbr)
+        rows = [("Unrostered", "<span class='g'>free agent</span>")]
+        rk = position_ranks("nfl").get(str(pid)) if pid else None
+        if rk:
+            pos, n = rk
+            note = ("worth a pick-up" if n <= (12 if pos in ("QB", "TE") else 24) else
+                    "deep-league flier" if n <= 40 else "watch, don't chase")
+            rows.append((f"<b>{pos}{n}</b> this season", f"<span class='g'>{note}</span>"))
+        try:
+            hit = _wb_cached(("trend",), 1800, lambda: fetch_url(f"{SLEEPER}/players/nfl/trending/add?lookback_hours=24&limit=200"))
+            adds = next((x["count"] for x in hit or [] if str(x.get("player_id")) == str(pid)), None)
+            if adds:
+                rows.append(("Sleeper adds (24h)", f"<b>{adds:,}</b>"))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            wk = int(live.get("week") or 0) + 1
+            evs = _wb_cached(("nextwk", wk), 6 * 3600, lambda: fetch(f"football/nfl/scoreboard?seasontype=2&week={wk}").get("events", []))
+            for e2 in evs:
+                ts = teams_of(e2)
+                if abbr in [t["team"]["abbreviation"] for t in ts]:
+                    other = next(t for t in ts if t["team"]["abbreviation"] != abbr)
+                    at = "vs" if other.get("homeAway") == "away" else "at"
+                    rows.append(("Next week", f"{at} <b>{other['team']['abbreviation']}</b> · "
+                                 f"{parse_time(e2['date']).astimezone(UK):%a %H:%M}"))
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        secs["waiver"] = _fx(f"WAIVER WATCH · {td['scorer'].upper()}", rows)
+    seed = int(re.sub(r"\D", "", str(play.get("id", "0")))[-3:] or 0)
+    mid = ["line", "league"] if seed % 2 == 0 else ["league", "line"]
+    order = ["game"] + (["waiver"] if "waiver" in secs else []) + mid
+    return "".join(secs.get(k) or "" for k in order)
+
+
+_nfl_td_html_fill = nfl_td_fantasy_html
+
+
+def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
+    h = _nfl_td_html_fill(event, play, summary, live, ol, base, *a, **k)
+    if not (CONFIG.get("nfl") or {}).get("td_fill", True):
+        return h
+    try:
+        td = td_parse(play)
+        owned = league_owner(boxscore_id(summary, td.get("scorer") or ""), td.get("scorer") or "")
+        extra = _fill_sections(event, play, summary, live, td, owned)
+        if not extra or "<div class='imp'>" not in h:
+            return h
+        i = h.find("<div class='imp'>")
+        j = _div_end(h, i)
+        imp = h[i:j]
+        if "WAIVER WATCH" in extra and imp.count("<div class='im'>") == 1 and "🆓" in imp:
+            h = h[:i] + extra + h[j:]                          # the waiver section says it (and more)
+        else:
+            h = h[:j] + extra + h[j:]
+        if "<div class='rcol'>" not in h:                  # older layout: keep the extras next to the impact panel
+            pass
+        h = h.replace("</style>", FILL_CSS + "</style>", 1).replace("<head>", "<head>" + FILL_JS, 1)
+        _last_td_html["h"] = h
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"touchdown extras skipped: {ex}")
+    return h
 
 
 if __name__ == "__main__":
