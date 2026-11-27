@@ -12648,5 +12648,148 @@ def recap_v2_html(sport, week, live, settings):
     return a, b
 
 
+
+# ---- half-time UPSET (Rick: "the half time post should be a bit more exciting if an upset is on the card"): the pre-game underdog
+#   (spread 2.5+) leads at the half → 🚨 UPSET WATCH (lead up to 7) / 🔥 UPSET ALERT (lead 8+, or a 7+ point underdog leading).
+#   Headline calls it, the scoreboard glows in the underdog's favour, and a banner in the spare space gives the spread, ESPN's
+#   win chance kick-off → now, and which managers are riding it. Animated (pulsing glow + siren). Config nfl.upset_alerts (default on).
+UPSET_CSS = """
+.sb5.ups{position:relative;box-shadow:0 0 0 3px #ff8a00,0 0 30px rgba(255,110,0,.55)!important;
+ background:linear-gradient(120deg,rgba(95,30,0,.85),rgba(14,10,18,.85))!important}
+.sb5.ups.u4{box-shadow:0 0 0 4px #ffd600,0 0 44px rgba(255,40,0,.85)!important;
+ background:radial-gradient(circle at 50% 0%,rgba(255,80,0,.5),rgba(110,0,0,.78) 60%,rgba(25,4,4,.9))!important}
+.sb5.ups .sc.dog{color:#ffd166!important;text-shadow:0 0 18px rgba(255,170,0,.9)}
+.sb5.ups .mid::after{content:'UPSET';display:block;margin-top:4px;font-size:12px;font-weight:900;letter-spacing:2px;color:#1a0800;
+ background:linear-gradient(90deg,#ff3d00,#ffb000);border-radius:6px;padding:2px 8px}
+.in>.upz{grid-column:1/-1}
+.upz{display:flex;align-items:center;gap:16px;margin-top:12px;padding:12px 18px;border-radius:14px;color:#fff;
+ background:linear-gradient(100deg,#7a1500,#c2410c 45%,#3b0a00);box-shadow:0 0 0 2px #ff8a00,0 0 26px rgba(255,100,0,.55)}
+.upz.u4{background:linear-gradient(100deg,#5c0000,#d40000 40%,#ff6a00 70%,#4a0000);box-shadow:0 0 0 3px #ffd600,0 0 40px rgba(255,40,0,.9)}
+.upz .upl{display:flex;align-items:center;gap:10px;flex:none}
+.upz .siren{font-size:38px;line-height:1;display:inline-block}
+.upz .upl b{font-size:30px;font-weight:900;letter-spacing:1.5px;line-height:1;white-space:nowrap;
+ background:linear-gradient(180deg,#fff,#ffd166);-webkit-background-clip:text;background-clip:text;color:transparent}
+.upz .upm{min-width:0;display:flex;flex-direction:column;gap:3px}
+.upz .up1{font-size:21px;font-weight:800;line-height:1.2}.upz .up1 b{color:#ffd166}
+.upz .up2{font-size:17px;font-weight:700;color:#ffe4cc;line-height:1.25}.upz .up2 b{color:#fff}
+"""
+ANIM_CSS += """
+@keyframes a_upg{0%,100%{box-shadow:0 0 0 2px #ff8a00,0 0 18px rgba(255,100,0,.4)}50%{box-shadow:0 0 0 2px #ffb000,0 0 48px rgba(255,140,0,1)}}
+@keyframes a_upg4{0%,100%{box-shadow:0 0 0 3px #ffd600,0 0 28px rgba(255,40,0,.7)}50%{box-shadow:0 0 0 3px #fff,0 0 70px rgba(255,90,0,1)}}
+@keyframes a_siren{0%,100%{transform:rotate(0) scale(1)}25%{transform:rotate(-14deg) scale(1.12)}75%{transform:rotate(14deg) scale(1.12)}}
+@keyframes a_upsc{0%,100%{text-shadow:0 0 10px rgba(255,170,0,.6)}50%{text-shadow:0 0 30px rgba(255,200,0,1)}}
+.upz{animation:a_upg 1s ease-in-out infinite}.upz.u4{animation:a_upg4 .6s ease-in-out infinite}
+.upz .siren{animation:a_siren .5s linear infinite}
+.sb5.ups .sc.dog{animation:a_upsc 1s ease-in-out infinite}
+"""
+
+
+def nfl_upset(event, summary):
+    """The pre-game underdog leading: dict (dog/fav teams, spread, lead, ESPN win chance kick-off → now, tier) or None."""
+    if not (CONFIG.get("nfl") or {}).get("upset_alerts", True):
+        return None
+    pc = (summary.get("pickcenter") or [{}])[0]
+    try:
+        spread = abs(float(pc.get("spread")))
+    except (TypeError, ValueError):
+        return None
+    away, home = teams_of(event)
+    hf = (pc.get("homeTeamOdds") or {}).get("favorite")
+    af = (pc.get("awayTeamOdds") or {}).get("favorite")
+    if hf is None and af is None:
+        m = re.match(r"\s*([A-Z]{2,4})\s*-", pc.get("details") or "")
+        if not m:
+            return None
+        hf = home["team"]["abbreviation"] == m.group(1)
+    elif hf is None:
+        hf = not af
+    if spread < 2.5:
+        return None
+    fav, dog = (home, away) if hf else (away, home)
+    fs, ds = int(num(fav.get("score"))), int(num(dog.get("score")))
+    if ds <= fs:
+        return None
+    wp = summary.get("winprobability") or []
+
+    def dogp(w):
+        v = float(w.get("homeWinPercentage") or 0) * 100
+        return v if dog is home else 100 - v
+    return {"dog": dog, "fav": fav, "spread": spread, "lead": ds - fs, "ds": ds, "fs": fs,
+            "wp0": dogp(wp[0]) if wp else None, "wp1": dogp(wp[-1]) if wp else None,
+            "tier": 4 if ds - fs >= 8 or spread >= 7 else 3}
+
+
+def _fmt_spread(v):
+    return f"{v:.1f}".rstrip("0").rstrip(".")
+
+
+def upset_banner(u, summary):
+    import html as H
+    dn, fn = u["dog"]["team"].get("name"), u["fav"]["team"].get("name")
+    riders = []
+    try:
+        for p in nfl_fantasy(summary):
+            if p.get("team") != u["dog"]["team"]["abbreviation"] or p["pts"] <= 0:
+                continue
+            o = league_owner(p.get("id"), p["name"])
+            if o and o.get("starting"):
+                riders.append(f"<b>{H.escape(o['manager'])}</b> ({H.escape(p['name'] if p.get('pos') == 'DEF' else (short_name(p['name']) or p['name']))} {fmt_pts(p['pts'])})")
+    except Exception as e:  # noqa: BLE001
+        log(f"upset riders skipped: {e}")
+    wp = (f"ESPN win chance <b>{u['wp0']:.0f}% → {u['wp1']:.0f}%</b>" if u["wp0"] is not None and u["wp1"] is not None else "")
+    ride = ("riding it: " + ", ".join(riders[:3])) if riders else ""
+    line2 = " · ".join(x for x in (wp, ride) if x)
+    return (f"<div class='upz u{u['tier']}'><div class='upl'><span class='siren'>{'🔥' if u['tier'] == 4 else '🚨'}</span>"
+            f"<b>UPSET {'ALERT' if u['tier'] == 4 else 'WATCH'}</b></div><div class='upm'>"
+            f"<div class='up1'>{H.escape(dn)} were <b>{_fmt_spread(u['spread'])}-point underdogs</b> — "
+            f"now <b>up {u['lead']}</b> on the {H.escape(fn)} at the half</div>"
+            + (f"<div class='up2'>{line2}</div>" if line2 else "") + "</div></div>")
+
+
+def nfl_half_upset_html(html_text, u, summary):
+    dog_ab = u["dog"]["team"]["abbreviation"].lower()
+    i = html_text.find("<div class='sb5 big'>")
+    if i < 0:
+        return html_text
+    j = _div_end(html_text, i)
+    sb = html_text[i:j].replace("<div class='sb5 big'>", f"<div class='sb5 big ups u{u['tier']}'>", 1)
+    # the underdog's score glows gold: the team block holding its logo
+    parts = re.split(r"(?=<div class='tm)", sb)
+    sb = "".join(re.sub(r"class='sc(?: lo)?'", "class='sc dog'", q, count=1) if f"/{dog_ab}.png" in q else q for q in parts)
+    out = html_text[:i] + sb + upset_banner(u, summary) + html_text[j:]
+    return out.replace("</style>", UPSET_CSS + "</style>", 1)
+
+
+_wants_animation_up = wants_animation
+
+
+def wants_animation(html_text):
+    return _wants_animation_up(html_text) or ("class='upz" in html_text and (CONFIG.get("animations") or {}).get("enabled", True))
+
+
+_post_prime_half_plain = post_prime_half
+
+
+def post_prime_half(event, summary, ctx):
+    try:
+        u = nfl_upset(event, summary)
+    except Exception as e:  # noqa: BLE001
+        log(f"upset check skipped: {e}")
+        u = None
+    if not u:
+        return _post_prime_half_plain(event, summary, ctx)
+    away, home = teams_of(event)
+    a, h = int(num(away.get("score"))), int(num(home.get("score")))
+    owned = [(p, o) for p in nfl_fantasy(summary) for o in [league_owner(p.get("id"), p["name"])] if o]
+    word = "🔥 UPSET ALERT" if u["tier"] == 4 else "🚨 UPSET WATCH"
+    title = (f"{word} · {u['dog']['team'].get('name')} (+{_fmt_spread(u['spread'])}) lead the "
+             f"{u['fav']['team'].get('name')} {u['ds']}\u2060–\u2060{u['fs']} at the half")
+    embed = {"author": AU_NFL(), "color": 0xFF5A00, "title": title}
+    if owned:
+        embed["description"] = f"{owned[0][0]['name']} leads the way with {fmt_pts(owned[0][0]['pts'])} for {owned[0][1]['manager']}"
+    content = f"⏸️ **HALF-TIME** · {word} · {away['team'].get('name')} {a}–{h} {home['team'].get('name')}"
+    html_text = nfl_half_upset_html(nfl_half_html(event, summary, ctx["live"], ctx["ol"], ctx["base"]), u, summary)
+    return _post_card(NFL_HOOK, html_text, content, embed, "half.png")
+
 if __name__ == "__main__":
     main()
