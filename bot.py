@@ -7644,7 +7644,7 @@ def wb_nfl_data(week, events, live=None, proj=None, people=None):
             gofteam[sl_team(t["team"]["abbreviation"])] = e
     sides = {}
     for rid, x in live["rosters"].items():
-        items, left, on = [], 0, 0
+        items, left, on, lp = [], 0, 0, []
         for p in x["starters"] or []:
             e = gofteam.get((players.get(p) or {}).get("team"))
             if e is None:                                   # bye week / no team: nothing to come
@@ -7653,9 +7653,12 @@ def wb_nfl_data(week, events, live=None, proj=None, people=None):
             if f <= 0.001:
                 continue
             left += 1
-            on += e["status"]["type"]["state"] == "in"
+            if e["status"]["type"]["state"] == "in":
+                on += 1
+                lp.append((p, float(x["pp"].get(p) or 0)))
             items.append((max(0.0, float(proj.get(p) or 0)), f))
         sides[rid] = _wb_side("nfl", float(x["points"]), items, left, on)
+        sides[rid]["lp"] = _wb_live_names("nfl", lp)
     st_ = [e["status"]["type"]["state"] for e in events]
     kicks = sorted(parse_time(e["date"]) for e in events if e["status"]["type"]["state"] == "pre")
     return {"sport": "nfl", "week": week, "pairs": live["pairs"], "sides": sides, "rosters": live["rosters"],
@@ -7714,6 +7717,7 @@ def wb_nba_data(week, events_today=None, live=None, rows=None, people=None, day0
     for rid, x in live["rosters"].items():
         proj = var = 0.0
         left = on = 0
+        lp = []
         for p in x["starters"] or []:
             pts = float(x["pp"].get(p) or 0)
             played = pts != 0 or any(p in by_day[d] for d in by_day if d < d0)
@@ -7726,6 +7730,7 @@ def wb_nba_data(week, events_today=None, live=None, rows=None, people=None, day0
                     mu = by_day[d0][p]
                     if f > 0:
                         on += 1
+                        lp.append((p, pts))
                         games.append((pts + mu * (1 - f), (3.0 + 0.22 * mu) * (1 - f) ** 0.5))
                         score = None                         # this game's score replaces any earlier one
                     else:
@@ -7742,7 +7747,7 @@ def wb_nba_data(week, events_today=None, live=None, rows=None, people=None, day0
             var += vv
             left += more
         sides[rid] = {"points": float(x["points"]), "proj": max(proj, float(x["points"])), "var": var,
-                      "left": left, "on": on}
+                      "left": left, "on": on, "lp": _wb_live_names("nba", lp)}
     st_ = [e["status"]["type"]["state"] for e in events_today]
     return {"sport": "nba", "week": week, "pairs": live["pairs"], "sides": sides, "rosters": live["rosters"],
             "people": people, "live": st_.count("in"), "days_left": len(days),
@@ -7758,6 +7763,78 @@ def _wb_state(data):
     if not any(abs(s["points"]) > 0.01 for s in data["sides"].values()):
         return "pre"
     return "mid"
+
+
+# ---- who is playing right now, on each manager's row: "● Hurts 12.4 · Lamb 8.7 +1" (as many as fit, never cut)
+_WB_SUFFIX = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v"}
+_WB_SUB_W = 204          # px for the sub line (the row text column is 210px at 1160px wide), measured
+_WB_CHAR = {" ": .27, ".": .27, "·": .3, "●": .62, "+": .6, "'": .22, "-": .33, "i": .27, "l": .27, "j": .28, "I": .29,
+            "f": .34, "t": .37, "r": .4, "m": .9, "w": .82, "M": .86, "W": .97}
+
+
+def _wb_text_w(t, px=22):
+    """Rough width of the board's sub-line text (Inter 700 at px), on the generous side."""
+    w = 0.0
+    for c in t:
+        w += _WB_CHAR.get(c, .62 if c.isdigit() else (.66 if c.isupper() else .58))
+    return w * px * 1.04
+
+
+def _wb_live_names(sport, lp):
+    """[(short name, live points)] for starters in a game right now, highest first."""
+    players = sleeper_players(sport)
+    out = []
+    for p, pts in sorted(lp, key=lambda x: -x[1]):
+        pl = players.get(p) or {}
+        if sport == "nfl" and str(p).isalpha() and str(p).isupper():
+            nm = f"{p} D"
+        else:
+            parts = [w for w in (pl.get("full_name") or pl.get("last_name") or str(p)).split() if w.lower() not in _WB_SUFFIX]
+            nm = pl.get("last_name") or (parts[-1] if parts else str(p))
+            nm = " ".join(w for w in nm.split() if w.lower() not in _WB_SUFFIX) or nm
+            first = (pl.get("first_name") or (parts[0] if parts else ""))[:1]
+            out.append([nm, round(pts, 1), first])
+            continue
+        out.append([nm, round(pts, 1), ""])
+    seen = {}
+    for x in out:
+        seen[x[0]] = seen.get(x[0], 0) + 1
+    return [(f"{x[2]}. {x[0]}" if seen[x[0]] > 1 and x[2] else x[0], x[1]) for x in out]
+
+
+def _wb_busy(data):
+    """Too many games at once to list names: NFL Sunday 18:00-21:00 UK, NBA 6+ games live."""
+    if data["sport"] == "nfl":
+        now = datetime.now(UK)
+        return now.weekday() == 6 and 18 <= now.hour < 21
+    return (data.get("live") or 0) >= 6
+
+
+def _wb_live_sub(data, s, base, small_name=False):
+    """Sub line with the live players (and their points) that fit; the compact '● N live' when busy or none fit."""
+    import html as H
+    compact = f"{base} · <span class='lv'>● {s['on']} live</span>"
+    lp = s.get("lp") or []
+    if not lp or _wb_busy(data):
+        return compact
+    room = _WB_SUB_W
+    shown = []
+    for i, (nm, pts) in enumerate(lp):
+        rest = len(lp) - i - 1
+        txt = "● " + " · ".join(f"{a} {b:.1f}" for a, b in shown + [(nm, pts)])
+        if _wb_text_w(txt + (f" +{rest}" if rest else "")) > room:
+            break
+        shown.append((nm, pts))
+    if not shown:
+        return compact
+    more = len(lp) - len(shown)
+    body = " · ".join(f"{H.escape(a)} <b>{b:.1f}</b>" for a, b in shown)
+    plain = "● " + " · ".join(f"{a} {b:.1f}" for a, b in shown) + (f" +{more}" if more else "")
+    out = f"<span class='lv'>● {body}{f' +{more}' if more else ''}</span>"
+    tail = re.sub(r"<[^>]+>", "", base)
+    if _wb_text_w(f"{tail} · {plain}") <= room:            # room for the "N left" count too
+        return f"{base} · {out}"
+    return out
 
 
 def wb_html(data, stamp=None):
@@ -7798,7 +7875,7 @@ def wb_html(data, stamp=None):
             else:
                 sub = f"<b>{s['left']}</b> {unit}"
                 if s["on"]:
-                    sub += f" · <span class='lv'>● {s['on']} live</span>"
+                    sub = _wb_live_sub(data, s, sub, len(name) > 14)
             pj = f"{s['proj']:.1f}" if sport == "nfl" or done else f"{s['proj']:.0f}"
             now_txt = "" if state == "pre" else f"<div class='wno'><i>now</i> {s['points']:.1f}</div>"
             if done:
