@@ -11747,5 +11747,246 @@ def _test_missed_kick(st):
     _log_plain(f"test missed kick {pid}: posted to #rick-only ({ok})")
 
 
+
+# ------------------------------------------------ crunch-time TURNOVERS: on downs, interceptions, lost fumbles in a
+#   one-score game with <= 2:00 left in Q4 (or in OT). Two moods, by who gets the ball:
+#   the team behind / level -> COMEBACK ON (bright, gold, pulsing); the team ahead -> GAME OVER-ish (dark, muted).
+#   Plays the game-changer post already covered are skipped (and these are marked so it won't post them later).
+_TO_SKIP = ("timeout", "end period", "end of", "two-minute", "penalty")
+TOD_CSS = """
+.sbx .mid .yd{font-size:42px!important;white-space:nowrap}
+.tox{margin-top:10px;display:flex;align-items:center;gap:14px;white-space:nowrap;padding:10px 16px;border-radius:14px;
+ font-size:20px;font-weight:800;color:#fff}
+.tox b{font-size:24px;font-weight:900}.tox .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;border-radius:7px;padding:3px 9px;flex:none}
+.pp5.to .gn b{font-size:40px!important}
+"""
+TOD_ON_CSS = """
+.bg{opacity:1!important;background:radial-gradient(circle at 50% 28%,rgba(255,214,0,.42),rgba(255,120,0,.22) 40%,rgba(10,14,26,.92) 80%)!important}
+.hl{border-left-color:#ffd600!important}
+.sbx .mid .yd{color:#ffd600!important;text-shadow:0 0 18px rgba(255,190,0,.95),0 0 44px rgba(255,120,0,.7)}
+.sbx .mid .st{background:#ffd600!important;color:#1b1305!important}
+.tox{background:linear-gradient(100deg,rgba(255,214,0,.3),rgba(255,120,0,.22));box-shadow:0 0 0 3px #ffd600,0 0 34px rgba(255,170,0,.75)}
+.tox b{color:#ffd600}.tox .gc{background:#ffd600;color:#1b1305}
+.pp5.to{box-shadow:0 0 0 3px #ffd600,0 0 30px rgba(255,190,0,.6)!important}
+"""
+TOD_OVER_CSS = """
+.bg{opacity:1!important;background:linear-gradient(180deg,rgba(20,22,30,.9),rgba(4,5,9,.98))!important;filter:saturate(.5)}
+.hl{border-left-color:#6b7280!important}
+.sbx .mid .yd{color:#e5e7eb!important;text-shadow:0 0 14px rgba(0,0,0,.9)}
+.sbx .mid .st{background:#374151!important;color:#e5e7eb!important}
+.tox{background:rgba(31,41,55,.85);box-shadow:0 0 0 2px #4b5563}
+.tox b{color:#e5e7eb}.tox .gc{background:#111827;color:#e5e7eb;box-shadow:inset 0 0 0 1.5px #6b7280}
+.pp5.to{box-shadow:0 0 0 2px #4b5563!important}.pp5.to .gn b{color:#e5e7eb!important}
+"""
+ANIM_CSS += """
+@keyframes a_tofade{0%,100%{opacity:1}50%{opacity:.7}}
+.toc.on .sbx .mid .yd{animation:a_mkshake .6s ease-in-out infinite}
+.toc.on .tox{animation:a_pulse 1s ease-in-out infinite}
+.toc.over .sbx .mid .yd{animation:a_tofade 2s ease-in-out infinite}
+"""
+_wants_animation_to = wants_animation
+
+
+def wants_animation(html_text):
+    return _wants_animation_to(html_text) or ("class='tox'" in html_text and (CONFIG.get("animations") or {}).get("enabled", True))
+
+
+def _secs_left(p):
+    ck = p.get("clock") or {}
+    if ck.get("value") is not None:
+        return float(ck["value"])
+    m = re.match(r"(\d+):(\d+)", ck.get("displayValue") or "")
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else 9999
+
+
+def crunch_turnovers(summary, event):
+    """[(play id, play, info)]: turnovers on downs / interceptions / lost fumbles, <= 2:00 left in Q4 or in OT,
+    one-score game. info: kind, offense (lost it), defense (got it), defender, passer."""
+    away, home = teams_of(event)
+    abbrs = [away["team"]["abbreviation"], home["team"]["abbreviation"]]
+    names = []
+    for t in (summary.get("boxscore") or {}).get("players") or []:
+        ab = (t.get("team") or {}).get("abbreviation", "")
+        for cat in t.get("statistics") or []:
+            for a in cat.get("athletes") or []:
+                if (a.get("athlete") or {}).get("displayName"):
+                    names.append((a["athlete"]["displayName"], ab))
+    dr = summary.get("drives") or {}
+    seen, out = set(), []
+    for dv in list(dr.get("previous") or []) + ([dr["current"]] if dr.get("current") else []):
+        if id(dv) in seen:
+            continue
+        seen.add(id(dv))
+        off = (dv.get("team") or {}).get("abbreviation", "")
+        if off not in abbrs:
+            continue
+        de = abbrs[1] if off == abbrs[0] else abbrs[0]
+        res = (dv.get("result") or dv.get("shortDisplayResult") or "").upper()
+        plays = [p for p in dv.get("plays") or [] if not any(k in ((p.get("type") or {}).get("text") or "").lower() for k in _TO_SKIP)]
+        hit = None
+        if res == "DOWNS" and plays:
+            hit = (plays[-1], "downs")
+        else:
+            for p in plays:
+                tt = (p.get("type") or {}).get("text") or ""
+                if "touchdown" in tt.lower():
+                    continue
+                if "Interception" in tt:
+                    hit = (p, "int")
+                elif "Fumble Recovery (Opponent)" in tt or ("fumble" in tt.lower() and "opponent" in tt.lower()):
+                    hit = (p, "fumble")
+        if not hit:
+            continue
+        p, kind = hit
+        q = (p.get("period") or {}).get("number", 0)
+        if not (q >= 5 or (q == 4 and _secs_left(p) <= 120)):
+            continue
+        a1, h1 = int(num(p.get("awayScore"))), int(num(p.get("homeScore")))
+        if abs(a1 - h1) > 8:
+            continue
+        text = p.get("text") or ""
+        who = None
+        if kind == "int":
+            m = re.search(rf"INTERCEPTED by ({_ABBR})", text)
+            who = m.group(1) if m else None
+        elif kind == "fumble":
+            m = re.search(rf"RECOVERED by [A-Z]{{2,3}}-({_ABBR})", text)
+            who = m.group(1) if m else None
+        else:
+            m = re.search(rf"sacked [^(]*\(({_ABBR})", text) or re.search(rf"\(({_ABBR})(?:[;,)])", text)
+            who = m.group(1) if m else None
+        qb = re.search(rf"({_ABBR}) (?:pass|sacked|scrambles)", text)
+        info = {"kind": kind, "off": off, "def": de, "sack": " sacked" in text,
+                "defender": _full_name(who, names, de) if who else None,
+                "passer": _full_name(qb.group(1), names, off) if qb else None}
+        out.append((str(p.get("id")), p, info))
+    return out
+
+
+def nfl_turnover_html(event, play, summary, live, ol, info):
+    import html as H
+    away, home = teams_of(event)
+    dt = away if away["team"]["abbreviation"] == info["def"] else home        # got the ball
+    ot = home if dt is away else away
+    dnick, onick = dt["team"].get("name") or info["def"], ot["team"].get("name") or info["off"]
+    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    mine, theirs = (a_s, h_s) if dt is away else (h_s, a_s)
+    q = (play.get("period") or {}).get("number", 0)
+    clk = (play.get("clock") or {}).get("displayValue", "")
+    sw = _win_swing(summary, play.get("id"), dt is home)
+    behind = theirs - mine
+    on = behind >= 0
+    need = ("needs a score to win" if behind == 0 else "needs a FG to win" if behind <= 2 else "needs a FG to tie"
+            if behind == 3 else "needs a TD to win" if behind <= 6 else "needs a TD to tie" if behind == 7 else "needs a TD + 2")
+    over = (not on) and (sw is None or sw[1] >= 97)
+    big = {"downs": "STOPPED ON 4TH!" if on else ("TURNED OVER" if over else "STOPPED ON 4TH!"),
+           "int": "INTERCEPTED!", "fumble": "FUMBLE! TURNOVER!"}[info["kind"]]
+    big = ("🔥 " if on else ("💀 " if over else "🛑 ")) + big
+    when = ("OT" if q > 4 else "Q4") + f" · {clk} LEFT"
+    sub = (f"{info['def']} BALL · {need.upper()}" if on else
+           ("THAT'S THE BALLGAME" if over else f"{info['def']} BALL · CAN RUN IT DOWN"))
+    sc = league_scoring("nfl")
+    rows = []
+    # D/ST that made the stop
+    od = league_owner(f"def:{sl_team(info['def'])}", "")
+    pts = (float(sc.get("int") or 0) if info["kind"] == "int" else float(sc.get("fum_rec") or 0) if info["kind"] == "fumble" else 0.0)
+    pts += float(sc.get("sack") or 0) if info.get("sack") else 0.0
+    bits = " · ".join(x for x in (("INT" if info["kind"] == "int" else "fumble rec" if info["kind"] == "fumble" else ""),
+                                   ("sack" if info.get("sack") else "")) if x)
+    if od:
+        rows.append(f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(od['manager'])}</b>"
+                    f"<span>{H.escape(dnick)} D/ST " + (f"<b class='u'>+{pts:g}</b> ({bits})" if pts else "gets the stop")
+                    + f"</span><span>{'⭐' if od['starting'] else ''}</span><span></span></div>")
+    if info.get("passer") and info["kind"] in ("int", "fumble"):
+        o = league_owner(boxscore_id(summary, info["passer"]), info["passer"])
+        lose = float(sc.get("pass_int" if info["kind"] == "int" else "fum_lost") or 0)
+        if o and lose:
+            rows.append(f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(o['manager'])}</b>"
+                        f"<span>{H.escape(short_name(info['passer']))} <b class='dn'>{lose:g}</b> "
+                        f"({'INT' if info['kind'] == 'int' else 'fumble lost'})</span><span></span><span></span></div>")
+    if not rows:
+        rows.append("<div class='im'><span class='ar'>·</span><b class='who5'>No league points</b>"
+                    "<span>change hands on this one</span><span></span><span></span></div>")
+    imp = f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>"
+    try:
+        imp += _fill_sections(event, dict(play, team={"abbreviation": info["def"]}), summary, live,
+                              {"scorer": info.get("defender") or "", "sub": "to"}, True)
+    except Exception:  # noqa: BLE001
+        pass
+    panel = ""
+    if info.get("defender"):
+        did = boxscore_id(summary, info["defender"])
+        verb = {"int": "picks it off", "fumble": "recovers the fumble"}.get(info["kind"], "makes the stop on 4th down")
+        panel = (f"<div class='pair one'><div class='pp5 to'><img src='{H.escape(nfl_headshot(did) or dt['team'].get('logo', ''))}'>"
+                 f"<div><div class='role'>DEFENCE · {info['def']}</div><div class='nm'>{H.escape(info['defender'])}</div>"
+                 + (f"<div class='gn'><b>+{pts:g}</b><span>{H.escape(verb)}</span></div>" if pts else
+                    f"<div class='gn'><b>STOP</b><span>{H.escape(verb.replace('makes the stop ', ''))}</span></div>")
+                 + f"<div class='ow3'>for the <b>{H.escape(dnick)} D/ST</b></div></div></div></div>")
+    strip = f"<div class='tox'><span class='gc'>{'COMEBACK ON' if on else ('GAME OVER' if over else 'BIG STOP')}</span>"
+    if sw and abs(sw[1] - sw[0]) >= 1:
+        strip += f"{H.escape(dnick)} win chance <b>{sw[0]:.0f}% → {sw[1]:.0f}%</b>"
+    else:
+        strip += f"<b>{H.escape(clk)}</b> left · {abs(behind)}-point game"
+    strip += "</div>"
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>TURNOVER · {'OT' if q > 4 else 'Q' + str(q)} {clk} · "
+            f"{away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div>"
+            f"<div class='pill'>{'COMEBACK ON' if on else ('GAME OVER' if over else 'BIG STOP')}</div></div>"
+            + score_hero(event, a_s, h_s, when, sub, hot=None, plus=None, big=big) + panel + strip + imp)
+    mood = "on" if on else "over"
+    css = V4_CSS + TD5_CSS + FG_CSS + SB_CSS + TOD_CSS + (TOD_ON_CSS if on else TOD_OVER_CSS) + FILL_CSS
+    html_text = _card(f"--a:{'#ffd600' if on else '#6b7280'};--h:#ffd166", body, extra_css=css)
+    return (html_text.replace("<div class='card'", f"<div class='card toc {mood}'", 1).replace("<head>", "<head>" + FILL_JS, 1),
+            on, over, need, dnick, onick, sw)
+
+
+def post_turnover(event, play, summary, ctx, info):
+    html_text, on, over, need, dnick, onick, sw = nfl_turnover_html(event, play, summary, ctx["live"], ctx["ol"], info)
+    clk = (play.get("clock") or {}).get("displayValue", "")
+    what = {"downs": "STOPPED ON 4TH", "int": "INTERCEPTED", "fumble": "FUMBLE"}[info["kind"]]
+    if on:
+        title = f"🔥 {what}! {dnick} get the ball back · {clk} left · {need}"
+    elif over:
+        title = (f"💀 {'Turned over on downs' if info['kind'] == 'downs' else what.title()} — that's the ballgame for the {onick}"
+                 if info["kind"] == "downs" else f"💀 {what.title()}! That's the ballgame for the {onick}")
+    else:
+        title = f"🛑 {what}! {dnick} take over · {clk} left — the {onick} need a stop"
+    desc = f"{dnick} win chance {sw[0]:.0f}% → {sw[1]:.0f}%" if sw else ""
+    embed = {"author": AU_NFL(), "color": 0xFFD600 if on else 0x374151, "img_title": title, "img_desc": desc,
+             "title": title, "description": desc}
+    return _post_card(NFL_HOOK, html_text, f"**{title}**", embed, "turnover.png")
+
+
+_nfl_prime_slot_to = nfl_prime_slot
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    active = _nfl_prime_slot_to(slot, st, getctx, force)
+    if not (CONFIG.get("nfl") or {}).get("turnover_alerts", True):
+        return active
+    for e in slot:
+        if e["status"]["type"]["state"] != "in":
+            continue
+        g = st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})
+        try:
+            summary = fetch(f"football/nfl/summary?event={e['id']}")
+            for key, p, info in crunch_turnovers(summary, e):
+                if key in g.setdefault("tod", []) or key in g.setdefault("gc", []):
+                    continue
+                wc = p.get("wallclock")
+                if wc and time.time() - _wallclock_ts(wc) > 600:
+                    g["tod"].append(key)
+                    continue
+                t0 = _wallclock_ts(wc) if wc else g.setdefault("tod_seen", {}).setdefault(key, time.time())
+                if not due(t0, "turnover"):
+                    continue
+                ctx = getctx()
+                if ctx and post_turnover(e, p, summary, ctx, info):
+                    g["tod"].append(key)
+                    g["gc"].append(key)                     # the game-changer post won't do it again
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"turnover check skipped: {ex}")
+    return active
+
+
 if __name__ == "__main__":
     main()
