@@ -12219,6 +12219,8 @@ def _find_post(hook, ch, near_t, prefix):
     for x in msgs or [] if code == 200 else []:
         if str(x.get("webhook_id")) != m.group(1):
             continue
+        if not x.get("attachments") and not x.get("components"):
+            x = _hook_message(hook, x["id"]) or x                 # components-v2 posts: the webhook endpoint has them
         names = [a.get("filename", "") for a in x.get("attachments") or []]
         for c in x.get("components") or []:
             for it in c.get("items") or []:
@@ -12231,36 +12233,39 @@ def _find_post(hook, ch, near_t, prefix):
     return best[1] if best else None
 
 
-_nfl_prime_slot_redofg = nfl_prime_slot
-
-
-def nfl_prime_slot(slot, st, getctx, force=False):
+def _redo_fg_posts(st):
+    """config nfl.redo_fg_posts: ["<play id>" or "<play id>:<message id>"]: rebuild that posted FG card in place, once
+    each (works for a finished game too: it just re-renders that play's card)."""
     global CAPTURE
-    active = _nfl_prime_slot_redofg(slot, st, getctx, force)
-    want = [str(x) for x in (CONFIG.get("nfl") or {}).get("redo_fg_posts") or []]
+    want = [str(x).strip() for x in (CONFIG.get("nfl") or {}).get("redo_fg_posts") or [] if str(x).strip()]
     done = st.setdefault("fg_redone", [])
-    for pid in want:
-        if pid in done:
+    for entry in want:
+        if entry in done or CAPTURE is not None or DRY_RUN:
             continue
-        e = next((x for x in slot if pid.startswith(str(x["id"]))), None)
-        if e is None:
-            continue
+        done.append(entry)                                  # once, whatever happens
+        pid, _, mid = entry.partition(":")
         try:
+            week = int(fetch_url(f"{SLEEPER}/state/nfl").get("week") or 0)
+            events = fetch(f"football/nfl/scoreboard?seasontype=2&week={week}").get("events", [])
+            e = next((x for x in events if pid.startswith(str(x["id"]))), None)
+            if e is None:
+                _log_plain(f"field goal {pid}: game not found this week, not rebuilt")
+                continue
             summary = fetch(f"football/nfl/summary?event={e['id']}")
             p = next((q for q in summary.get("scoringPlays") or [] if str(q.get("id")) == pid), None)
-            ctx = getctx()
+            ctx = nfl_ctx(st, events)
             if not p or not ctx:
+                _log_plain(f"field goal {pid}: play or league data missing, not rebuilt")
                 continue
-            done.append(pid)                                # once, whatever happens
-            mid = ((st.get("fg_posts") or {}).get(pid) or {}).get("msg")
+            mid = mid or ((st.get("fg_posts") or {}).get(pid) or {}).get("msg")
             if not mid:
                 ch = next((b.get("ch") for b in (st.get("weekly_boards") or {}).values()
                            if b.get("sport") == "nfl" and b.get("ch") and b.get("where") == "main"), None)
                 _, d = play_detail(summary, pid)
                 near = _wallclock_ts(d["wallclock"]) if (d or {}).get("wallclock") else time.time()
                 mid = _find_post(NFL_HOOK, ch, near, "fg")
-            if not mid:
-                _log_plain(f"field goal {pid}: posted message not found, not rebuilt")
+            if not mid or not _hook_message(NFL_HOOK, mid):
+                _log_plain(f"field goal {pid}: message {mid or '?'} not found as one of ours, not rebuilt")
                 continue
             keep_cap, keep_send = CAPTURE, dict(_SEND_AT)
             CAPTURE = []
@@ -12272,6 +12277,7 @@ def nfl_prime_slot(slot, st, getctx, force=False):
                 CAPTURE = keep_cap
                 _SEND_AT.update(keep_send)
             if not isinstance(got, dict) or not got.get("attachments"):
+                _log_plain(f"field goal {pid}: card not built, not rebuilt")
                 continue
             path = Path(got["attachments"][0].replace("file://", ""))
             if discord_edit(NFL_HOOK, mid, path.read_bytes(), path.name):
@@ -12280,7 +12286,18 @@ def nfl_prime_slot(slot, st, getctx, force=False):
                 _log_plain(f"field goal {pid}: post rebuilt in place (message {mid})")
         except Exception as ex:  # noqa: BLE001
             _log_plain(f"rebuild of field goal {pid} skipped: {ex}")
-    return active
+
+
+_run_nfl_redofg = run_nfl
+
+
+def run_nfl(st, date=None, force=False):
+    out = _run_nfl_redofg(st, date, force)
+    try:
+        _redo_fg_posts(st)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"field goal rebuilds skipped: {ex}")
+    return out
 
 
 def _post_fg_clutch_wo_redo(e, p, summary, ctx):
