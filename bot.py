@@ -8429,7 +8429,7 @@ def check_overturns(st):
                     _log_plain(f"touchdown {pid} overturned: post corrected")
             else:
                 now_scorer = td_parse(plays[pid]).get("scorer", "")
-                if now_scorer and r.get("scorer") and now_scorer != r["scorer"]:
+                if now_scorer and r.get("scorer") and not same_player_name(now_scorer, r["scorer"]):
                     ok = discord_edit(NFL_HOOK, r["msg"], None, r.get("file") or "td.png",
                                       content=f"✏️ **CORRECTED** · this touchdown is now credited to **{now_scorer}** (not {r['scorer']})")
                     if ok is not False:
@@ -11068,7 +11068,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
         if i >= 0:
             j = h.find(">", i)
             tag = h[i:j + 1]
-            h = h[:i] + tag.replace("class='pp5", "class='pp5 h4", 1) + \
+            h = h[:i] + tag.replace("class='pp5", "class='pp5 h4 dstc", 1) + \
                 f"<span class='hyr h4'>{emo} {label} · {H.escape(nick.upper())}</span>" + h[j + 1:]
             g0 = h.find("<div class='gn'>", i)                # the returner scores for the team's D/ST
             if g0 > 0:
@@ -12946,6 +12946,70 @@ def nfl_prime_slot(slot, st, getctx, force=False):
                 if ctx and post_safety(e, p, summary, ctx):
                     g["tds"].append(p["id"])
     return _nfl_prime_slot_sf(slot, st, getctx, force)
+
+
+# ---- team colours (Rick: "colour scheme kinda wrong for a steelers score surely"): ESPN gives some teams a black / white /
+#   grey main colour (Steelers 000000, Raiders 000000), which the cards' colour booster turns into a dull grey, so the other
+#   team's colour took over. Such teams use their second colour (Steelers gold) everywhere. The D/ST hype panel on a
+#   defensive / return TD uses the scoring team's colours instead of a fixed red.
+def _greyish(h):
+    import colorsys
+    try:
+        r, g, b = (x / 255 for x in hex_rgb(h))
+    except Exception:  # noqa: BLE001
+        return False
+    _, ll, ss = colorsys.rgb_to_hls(r, g, b)
+    return ss < 0.15 or ll < 0.1 or ll > 0.93
+
+
+def _fix_team_colours(d, depth=0):
+    if depth > 8:
+        return
+    if isinstance(d, dict):
+        c, alt = d.get("color"), d.get("alternateColor")
+        if isinstance(c, str) and isinstance(alt, str) and _greyish(c) and not _greyish(alt):
+            d["color"], d["alternateColor"] = alt, alt
+        for v in d.values():
+            if isinstance(v, (dict, list)):
+                _fix_team_colours(v, depth + 1)
+    elif isinstance(d, list):
+        for v in d:
+            if isinstance(v, (dict, list)):
+                _fix_team_colours(v, depth + 1)
+
+
+_fetch_colour_plain = fetch
+
+
+def fetch(path, tries=3):
+    d = _fetch_colour_plain(path, tries)
+    if isinstance(path, str) and path.startswith("football/"):
+        try:
+            _fix_team_colours(d)
+        except Exception:  # noqa: BLE001
+            pass
+    return d
+
+
+def same_player_name(a, b):
+    """'J. Ramsey' and 'Jalen Ramsey' are the same player: same surname, same first initial."""
+    import unicodedata
+    f = lambda n: re.sub(r"[^a-z ]", "", unicodedata.normalize("NFKD", str(n)).encode("ascii", "ignore").decode().lower()).split()  # noqa: E731
+    x, y = f(a), f(b)
+    if not x or not y:
+        return a == b
+    if x == y:
+        return True
+    sx = [w for w in x if w not in ("jr", "sr", "ii", "iii", "iv")]
+    sy = [w for w in y if w not in ("jr", "sr", "ii", "iii", "iv")]
+    return bool(sx and sy) and sx[-1] == sy[-1] and sx[0][0] == sy[0][0]
+
+
+HYPE_CSS += """
+.pp5.h4.dstc{background:radial-gradient(circle at 15% 0%,color-mix(in srgb,var(--a) 62%,transparent),rgba(14,12,8,.94) 64%)!important;
+ box-shadow:0 0 0 4px var(--a),0 0 40px color-mix(in srgb,var(--a) 70%,transparent)!important}
+.pp5.h4.dstc::after{opacity:.3}
+"""
 
 if __name__ == "__main__":
     main()
