@@ -11042,5 +11042,192 @@ def nfl_prime_slot(slot, st, getctx, force=False):
     return active
 
 
+
+# ------------------------------------------------ faster detection: ESPN's core plays feed
+#   Measured live: a scoring play shows up in the core feed ~22-47s after ESPN's wallclock, the scoreboard ~4-10s
+#   later and the summary (what the bot reads) ~13-17s after core. So every live NFL summary we fetch is topped up
+#   with the scoring plays the core feed already has: the scoring line (core "shortText" = the summary's own format),
+#   the score, the try and a drive-chart entry with the full text. Everything downstream (touchdowns, field goals,
+#   try edits) sees the play early. The core feed is polled at most every 4s per game (last 10-20 plays only); any
+#   failure backs off for a minute and the plain summary is used. Plays keep ESPN's ids in both feeds, so nothing is
+#   posted twice (and a posted touchdown is also matched by team + quarter + clock in case the id changes).
+#   A touchdown posted from the core feed is rebuilt once the summary has it (fresh box score), unless its try edit
+#   is still to come (that edit rebuilds it anyway).
+CORE = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/events/{e}/competitions/{e}/plays"
+_CORE = {}
+
+
+def _core_latest(ev):
+    """The last ~10-20 plays of a game from the core feed (cached 4s), or None."""
+    c = _CORE.setdefault(ev, {"t": 0.0, "count": 0, "items": None, "off": 0.0})
+    now = time.time()
+    if now < c["off"]:
+        return None
+    if now - c["t"] < 4 and c["items"] is not None:
+        return c["items"]
+    try:
+        base = CORE.format(e=ev)
+        if not c["count"]:
+            c["count"] = int(_fetch_index_plain_url(f"{base}?limit=1", 1).get("count") or 0)
+        page = max(1, math.ceil(c["count"] / 10))
+        d = _fetch_index_plain_url(f"{base}?limit=10&page={page}", 1)
+        if int(d.get("pageCount") or page) > page:               # new plays since: read the new last page
+            page = int(d["pageCount"])
+            d = _fetch_index_plain_url(f"{base}?limit=10&page={page}", 1)
+        items = list(d.get("items") or [])
+        if len(items) < 5 and page > 1:                          # nearly empty last page: the one before too
+            items = list(_fetch_index_plain_url(f"{base}?limit=10&page={page - 1}", 1).get("items") or []) + items
+        c.update(t=now, count=int(d.get("count") or c["count"]), items=items)
+        return items
+    except Exception as ex:  # noqa: BLE001
+        c["off"] = now + 60
+        _log_plain(f"core plays feed unavailable, using the summary only: {ex}")
+        return None
+
+
+def _fetch_index_plain_url(url, tries):
+    return fetch_url(url, tries)
+
+
+import math  # noqa: E402
+
+
+def _core_merge(d, ev):
+    comp = ((d.get("header") or {}).get("competitions") or [{}])[0]
+    if ((comp.get("status") or {}).get("type") or {}).get("state") != "in":
+        return d
+    items = _core_latest(ev)
+    if not items:
+        return d
+    teams = {str((c.get("team") or {}).get("id")): c["team"] for c in comp.get("competitors") or [] if c.get("team")}
+    sps = d.setdefault("scoringPlays", [])
+    have = {str(p.get("id")): p for p in sps}
+    dr = d.setdefault("drives", {})
+    pool = {str(p.get("id")): p for dv in list(dr.get("previous") or []) + ([dr["current"]] if dr.get("current") else [])
+            for p in dv.get("plays") or []}
+    injected = d.setdefault("_core_ids", [])
+    for q in items:
+        if not q.get("scoringPlay") or not q.get("shortText"):
+            continue
+        pid = str(q.get("id"))
+        tid = re.search(r"/teams/(\d+)", ((q.get("team") or {}).get("$ref") or ""))
+        tm = teams.get(tid.group(1)) if tid else None
+        if not tm:
+            continue
+        sp = have.get(pid)
+        if sp is None:
+            logo = next((x.get("href") for x in tm.get("logos") or [] if x.get("href")), "")
+            sp = {"id": pid, "type": q.get("type") or {}, "text": q["shortText"], "awayScore": q.get("awayScore"),
+                  "homeScore": q.get("homeScore"), "period": q.get("period") or {}, "clock": q.get("clock") or {},
+                  "team": {"id": tm.get("id"), "abbreviation": tm.get("abbreviation"), "displayName": tm.get("displayName"),
+                           "logo": logo},
+                  "scoringType": q.get("scoringType") or {}, "_core": True}
+            sps.append(sp)
+            have[pid] = sp
+            injected.append(pid)
+        elif (int(num(q.get("awayScore"))) + int(num(q.get("homeScore"))) >
+              int(num(sp.get("awayScore"))) + int(num(sp.get("homeScore")))):
+            sp.update(text=q["shortText"], awayScore=q.get("awayScore"), homeScore=q.get("homeScore"))   # try is in
+        dp = pool.get(pid)
+        if dp is None:
+            dp = {"id": pid, "type": q.get("type") or {}, "text": q.get("text") or "", "wallclock": q.get("wallclock"),
+                  "scoringPlay": True, "start": {}, "end": {}}
+            if q.get("pointAfterAttempt"):
+                dp["pointAfterAttempt"] = q["pointAfterAttempt"]
+            cur = dr.get("current") or {"plays": []}
+            cur.setdefault("plays", []).append(dp)
+            dr["current"] = cur
+            pool[pid] = dp
+            if "touchdown" in ((q.get("type") or {}).get("text") or "").lower():
+                _PLAYTXT[pid] = (dp["text"], _PLAYTXT.get(pid, ("", []))[1] or [])
+        elif q.get("pointAfterAttempt") and not ((dp.get("pointAfterAttempt") or {}).get("id")):
+            dp["pointAfterAttempt"] = q["pointAfterAttempt"]
+    return d
+
+
+_fetch_core_plain = fetch
+
+
+def fetch(path, tries=3):
+    d = _fetch_core_plain(path, tries)
+    m = re.fullmatch(r"football/nfl/summary\?event=(\d+)", path)
+    if m and (CONFIG.get("nfl") or {}).get("core_feed", True):
+        try:
+            d = _core_merge(d, m.group(1))
+            if d.get("_core_ids"):
+                _index_summary(d)
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"core feed merge skipped: {ex}")
+    return d
+
+
+_post_td_core = post_td_fantasy
+
+
+def post_td_fantasy(event, play, summary, ctx):
+    st = _NFL_ST.get("st")
+    key = f"{event['id']}|{(play.get('team') or {}).get('abbreviation')}|{(play.get('period') or {}).get('number')}|" \
+          f"{(play.get('clock') or {}).get('displayValue')}"
+    keys = st.setdefault("td_keys", {}) if st is not None else {}
+    if key in keys and keys[key] != str(play.get("id")):
+        _log_plain(f"touchdown {play.get('id')} is {keys[key]} under another id: not posted again")
+        return True
+    ok = _post_td_core(event, play, summary, ctx)
+    if ok and st is not None:
+        keys[key] = str(play.get("id"))
+        for k in list(keys)[:-200]:
+            keys.pop(k, None)
+        r = (st.get("td_posts") or {}).get(str(play.get("id")))
+        if r is not None and play.get("_core"):
+            r["core"] = True
+    return ok
+
+
+def _td_rebuild_post(e, pid, r, getctx, why):
+    """Rebuild a posted touchdown card from the current feed (with its try state) and edit it in place."""
+    summary = fetch(f"football/nfl/summary?event={e['id']}")
+    p = next((q for q in summary.get("scoringPlays") or [] if str(q.get("id")) == pid), None)
+    ctx = getctx()
+    if not p or not ctx:
+        return False
+    res = td_try(p, summary)
+    pl = p if res is not None else td_only_play(p, summary)
+    tag = res if res is not None else ({"label": "⏳ CONVERSION TO COME", "cls": "wait"}
+                                       if e["status"]["type"].get("state") == "in" else None)
+    img, name, html_text = _rebuild_td_image(e, pl, summary, ctx, tag)
+    if not img or r.get("done") or not discord_edit(NFL_HOOK, r["msg"], img, name):
+        return False
+    _gif_after_edit(NFL_HOOK, r["msg"])
+    if html_text:
+        _TD_HTML[pid] = html_text
+    if res is not None:
+        r["try"], r["try_result"] = "done", res["label"]
+    r["file"] = name
+    _log_plain(f"touchdown {pid}: post rebuilt in place ({why})")
+    return True
+
+
+_nfl_prime_slot_core = nfl_prime_slot
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    active = _nfl_prime_slot_core(slot, st, getctx, force)
+    for pid, r in list((st.get("td_posts") or {}).items()):
+        if not r.get("core") or r.get("done") or r.get("try") == "pending":
+            continue
+        e = next((x for x in slot if x["id"] == r.get("game")), None)
+        if e is None:
+            continue
+        try:
+            summary = fetch(f"football/nfl/summary?event={e['id']}")
+            if pid in (summary.get("_core_ids") or []):
+                continue                                    # the summary hasn't caught up yet
+            r["core"] = False
+            _td_rebuild_post(e, pid, r, getctx, "full details")
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"details refresh of touchdown {pid} skipped: {ex}")
+    return active
+
+
 if __name__ == "__main__":
     main()
