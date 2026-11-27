@@ -11304,6 +11304,7 @@ def nfl_prime_slot(slot, st, getctx, force=False):
 #   a small script in the card removes the lowest ones until nothing overflows (so the card never shrinks for them).
 FILL_CSS = """
 .lsx>.rcol{min-width:0}.lsx .rcol:has(.fx)>.imp{flex:0 0 auto!important}
+.fxm .lsx{align-items:start!important}.fxm .lsx>.lcol>*,.fxm .lsx>.rcol>*{flex:none!important}
 .lsx .rcol>.fx:last-child{flex:1}
 .fx{min-width:0;overflow:hidden;background:rgba(9,12,22,.62);border-radius:14px;padding:10px 16px 11px;box-shadow:inset 4px 0 0 var(--a)}
 .fx .fh{font-size:15px;font-weight:900;letter-spacing:1.6px;color:#c3cad8;margin-bottom:5px}
@@ -11317,9 +11318,12 @@ FILL_CSS = """
 .sbx .sc.hot{text-shadow:0 0 22px var(--hc,#ffd166),0 0 44px var(--hc,#ffd166)!important}
 """
 FILL_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const go=()=>{const c=document.querySelector('.card');"
-           "if(!c)return;const fx=[...document.querySelectorAll('.fx')];"
-           "while(fx.length&&(c.scrollHeight>c.clientHeight+1||[...document.querySelectorAll('.fx .fr')].some(r=>r.scrollWidth>r.clientWidth+1)))"
-           "{fx.pop().remove();}};(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(go);});</script>")
+           "if(!c)return;const fx=[...document.querySelectorAll('.fx')];if(!fx.length)return;c.classList.add('fxm');"
+           "const L=document.querySelector('.lsx>.lcol'),R=document.querySelector('.lsx>.rcol');"
+           "const tall=()=>c.scrollHeight>c.clientHeight+1&&(!L||!R||R.offsetHeight>L.offsetHeight+2);"
+           "const wide=()=>[...document.querySelectorAll('.fx .fr')].some(r=>r.scrollWidth>r.clientWidth+1);"
+           "while(fx.length&&(tall()||wide())){fx.pop().remove();}c.classList.remove('fxm');};"
+           "(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(go);});</script>")
 _NEXTWK = {}
 
 
@@ -11986,6 +11990,308 @@ def nfl_prime_slot(slot, st, getctx, force=False):
         except Exception as ex:  # noqa: BLE001
             _log_plain(f"turnover check skipped: {ex}")
     return active
+
+
+
+# ------------------------------------------------ WALK-OFF / LAST-SECOND WINNER tier: a go-ahead or tying FG / TD in the
+#   final 0:30 of Q4 or in OT (and a winner as time expires). Huge banner, blown-up score, confetti + shake / flash
+#   (animated), ESPN win-chance swing, "<team> need a miracle" framing, spare-space extras. Long kicks (55+) get
+#   "FROM 59!". The final whistle post then says how it was won.
+WO_CSS = """
+.bg{opacity:1!important;background:radial-gradient(circle at 50% 32%,rgba(255,214,0,.55),rgba(255,120,0,.28) 38%,rgba(10,14,26,.94) 78%)!important}
+.wob{position:relative;margin-top:10px;text-align:center;font-size:46px;font-weight:900;letter-spacing:2px;line-height:1.05;
+ padding:10px 16px 12px;border-radius:16px;color:#1b1305;white-space:nowrap;
+ background:linear-gradient(90deg,#ffd600,#fff3a8 50%,#ffd600);background-size:200% 100%;
+ box-shadow:0 0 0 4px #fff7c2,0 0 46px rgba(255,200,0,.95),0 0 90px rgba(255,120,0,.6)}
+.wob small{display:block;font-size:20px;letter-spacing:3px;margin-top:3px;color:#5a3a00}
+.wo .sbx .sc{font-size:118px!important;line-height:.95}
+.wo .sbx .sc.hot{color:#fff!important;text-shadow:0 0 26px #ffd600,0 0 60px #ff9a00!important}
+.wo .sbx .mid .st{background:#ff3d3d!important;color:#fff!important}
+.wo .hl{border-left-color:#ffd600!important}
+.wo .pp5{box-shadow:0 0 0 3px #ffd600,0 0 30px rgba(255,200,0,.65)!important}
+.wox{margin-top:10px;display:flex;align-items:center;gap:14px;white-space:nowrap;padding:10px 16px;border-radius:14px;
+ background:linear-gradient(100deg,rgba(255,214,0,.3),rgba(255,61,61,.25));box-shadow:0 0 0 3px #ffd600,0 0 30px rgba(255,170,0,.7);
+ font-size:20px;font-weight:800;color:#fff}
+.wox b{font-size:24px;font-weight:900;color:#ffd600}.wox .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;background:#ff3d3d;
+ color:#fff;border-radius:7px;padding:3px 9px;flex:none}
+.cft{position:absolute;inset:0;pointer-events:none;z-index:7;overflow:hidden;border-radius:inherit}
+.cft i{position:absolute;top:-14px;width:9px;height:15px;border-radius:2px;opacity:.95}
+"""
+ANIM_CSS += """
+@keyframes a_wobg{from{background-position:0 0}to{background-position:200% 0}}
+@keyframes a_woshake{0%,100%{transform:translate(0,0) rotate(0)}25%{transform:translate(-5px,1px) rotate(-1deg)}
+ 50%{transform:translate(5px,-1px) rotate(1deg)}75%{transform:translate(-3px,0) rotate(-.5deg)}}
+@keyframes a_cft{from{transform:translateY(0) rotate(0)}to{transform:translateY(700px) rotate(540deg)}}
+.wob{animation:a_wobg 1s linear infinite,a_woshake .5s ease-in-out infinite}
+.wox{animation:a_pulse 1s ease-in-out infinite}
+.cft i{animation:a_cft 1s linear infinite}
+"""
+
+
+def _confetti(n=34):
+    cols = ("#ffd600", "#ff3d3d", "#ffffff", "#7ee2a8", "#5b9bff", "#ff9a00")
+    r = _random.Random(7)
+    return "<div class='cft'>" + "".join(
+        f"<i style='left:{r.uniform(0, 100):.1f}%;background:{cols[i % len(cols)]};animation-delay:-{r.uniform(0, 1):.2f}s;"
+        f"top:{r.uniform(-20, 80):.0f}%;transform:rotate({r.randint(0, 180)}deg)'></i>" for i in range(n)) + "</div>"
+
+
+def _walkoff(event, play):
+    """('walk-off' | 'winner' | 'ties', mine, theirs) for a go-ahead / tying score in the last 0:30 of Q4 or in OT."""
+    q = (play.get("period") or {}).get("number", 0)
+    if not (q >= 5 or (q == 4 and _secs_left(play) <= 30)):
+        return None
+    away, home = teams_of(event)
+    abbr = (play.get("team") or {}).get("abbreviation", "")
+    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    mine, theirs = (a_s, h_s) if abbr == away["team"]["abbreviation"] else (h_s, a_s)
+    if "field goal" in ((play.get("type") or {}).get("text") or "").lower():
+        pts = 3
+    else:
+        pts = (a_s + h_s) - _pre_total(play, a_s, h_s, abbr, away)
+    before = mine - pts
+    if mine == theirs:
+        return "ties", mine, theirs
+    if mine > theirs and before <= theirs:                  # it put them in front
+        final = event["status"]["type"].get("state") == "post" or _secs_left(play) <= 0 or q >= 5
+        return ("walk-off" if final else "winner"), mine, theirs
+    return None
+
+
+def _wo_apply(h, event, play, summary, live, kind, yds, scorer, label):
+    import html as H
+    away, home = teams_of(event)
+    abbr = (play.get("team") or {}).get("abbreviation", "")
+    team = away if away["team"]["abbreviation"] == abbr else home
+    other = home if team is away else away
+    nick, onick = team["team"].get("name") or abbr, other["team"].get("name") or ""
+    clk = (play.get("clock") or {}).get("displayValue", "")
+    head = {"walk-off": "🚨 WALK-OFF!", "winner": "🚨 GAME-WINNER!", "ties": "🚨 TIED IT!"}[kind]
+    far = f" · FROM {yds}!" if yds and yds >= 55 else ""
+    sub = {"walk-off": f"{nick.upper()} WIN IT AS TIME EXPIRES", "winner": f"{onick.upper()} NEED A MIRACLE · {clk} LEFT",
+           "ties": f"ALL SQUARE · {clk} LEFT"}[kind]
+    banner = f"<div class='wob'>{head}{far}<small>{H.escape(label)}</small></div>"
+    sw = _win_swing(summary, play.get("id"), team is home)
+    strip = "<div class='wox'><span class='gc'>LAST-SECOND</span>"
+    strip += (f"{H.escape(nick)} win chance <b>{sw[0]:.0f}% → {sw[1]:.0f}%</b>" if sw and abs(sw[1] - sw[0]) >= 1
+              else f"<b>{H.escape(clk)}</b> left")
+    strip += "</div>"
+    i = h.find("<div class='sbx'>")
+    if i >= 0:
+        h = h[:i] + banner + h[i:]
+        h = re.sub(r"<div class=st>[^<]*</div>", f"<div class=st>{H.escape(sub)}</div>", h, count=1)
+    k = h.find("<div class='imp'>")
+    if k >= 0:
+        e2 = _div_end(h, k)
+        imp = h[k:e2]
+        if "🆓" in imp and imp.count("<div class='im'>") == 1:   # unrostered kicker: the extras say more
+            imp = ""
+        try:
+            imp += _fill_sections(event, play, summary, live, {"scorer": scorer, "sub": "wo"}, True)
+        except Exception:  # noqa: BLE001
+            pass
+        h = h[:k] + strip + imp + h[e2:]
+    else:
+        h = h.replace("</div></div><script>", strip + "</div></div><script>", 1)
+    h = h.replace("</style>", WO_CSS + FILL_CSS + "</style>", 1).replace("<head>", "<head>" + FILL_JS, 1)
+    h = h.replace("<div class='card'", "<div class='card wo'", 1)
+    j = h.find("<div class='in'>")
+    if j >= 0:
+        h = h[:j] + _confetti() + h[j:]
+    return h
+
+
+_nfl_td_html_wo = nfl_td_fantasy_html
+
+
+def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
+    h = _nfl_td_html_wo(event, play, summary, live, ol, base, *a, **k)
+    try:
+        wo = _walkoff(event, play)
+        if wo:
+            td = td_parse(play)
+            h = _wo_apply(h, event, play, summary, live, wo[0], td.get("yds"), td.get("scorer") or "",
+                          f"{(td.get('scorer') or '').upper()} · {_td_yards_label(td)}")
+            _last_td_html["h"] = h
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"walk-off treatment skipped: {ex}")
+    return h
+
+
+# kicker's line today in the extras
+_stat_line_plain = _stat_line
+
+
+def _stat_line(summary, name):
+    out = _stat_line_plain(summary, name)
+    for team in (summary.get("boxscore") or {}).get("players") or []:
+        for cat in team.get("statistics") or []:
+            if cat.get("name") != "kicking":
+                continue
+            for a in cat.get("athletes") or []:
+                if (a.get("athlete") or {}).get("displayName") == name:
+                    v = dict(zip(cat.get("keys") or [], a.get("stats") or []))
+                    out.append(("kicking", f"FG {v.get('fieldGoalsMade/fieldGoalAttempts', '')} · long {v.get('longFieldGoalMade', '')}"
+                                           f" · XP {v.get('extraPointsMade/extraPointAttempts', '')}"))
+    return out
+
+
+_nfl_fg_html_wo = nfl_fg_html
+
+
+def nfl_fg_html(event, play, summary, live, ol, base):
+    res = _nfl_fg_html_wo(event, play, summary, live, ol, base)
+    try:
+        wo = _walkoff(event, play)
+        if wo:
+            html_text, tag, kicker, yds, kt, mine, theirs = res
+            label = f"{kicker.upper()} · {yds}-YARD FIELD GOAL"
+            res = (_wo_apply(html_text, event, play, summary, live, wo[0], yds, kicker, label),) + tuple(res[1:])
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"walk-off treatment skipped: {ex}")
+    return res
+
+
+_post_fg_clutch_wo = post_fg_clutch
+
+
+def post_fg_clutch(event, play, summary, ctx):
+    wo = _walkoff(event, play)
+    st = _NFL_ST.get("st")
+    if wo:
+        m = re.match(r"^(.+?) (\d+) Yd Field Goal", play.get("text") or "")
+        kicker, yds = (m.group(1), int(m.group(2))) if m else ("The kicker", 0)
+        away, home = teams_of(event)
+        abbr = (play.get("team") or {}).get("abbreviation", "")
+        team = away if away["team"]["abbreviation"] == abbr else home
+        other = home if team is away else away
+        nick = team["team"].get("name") or abbr
+        clk = (play.get("clock") or {}).get("displayValue", "")
+        kind, mine, theirs = wo
+        title = {"walk-off": f"🚨 WALK-OFF! {kicker} from {yds} — the {nick} win it {mine}–{theirs}!",
+                 "winner": f"🚨 GAME-WINNER! {kicker} from {yds}{'!' if yds >= 55 else ''} — {nick} lead {mine}–{theirs} with {clk} left!",
+                 "ties": f"🚨 TIED IT! {kicker} from {yds} — all square at {mine} with {clk} left!"}[kind]
+        sw = _win_swing(summary, play.get("id"), team is home)
+        desc = (f"{other['team'].get('name')} need a miracle" if kind == "winner" else "") + \
+               (f" · {nick} win chance {sw[0]:.0f}% → {sw[1]:.0f}%" if sw else "")
+        _WO_EMBED.update(img_title=title, img_desc=desc.strip(" ·"))
+        if st is not None:
+            st.setdefault("walkoffs", {})[event["id"]] = {"t": time.time(), "teams": [nick, other["team"].get("name") or ""], "text": (
+                f"{nick} won it with a {yds}-yard {'walk-off ' if kind != 'ties' else ''}field goal from {kicker}" if kind != "ties"
+                else f"{kicker} tied it from {yds} with {clk} left")}
+    _LAST_MSG.clear()
+    try:
+        ok = _post_fg_clutch_wo(event, play, summary, ctx)
+    finally:
+        _WO_EMBED.clear()
+    if ok and st is not None and _LAST_MSG.get("id"):
+        st.setdefault("fg_posts", {})[str(play["id"])] = {"game": event["id"], "msg": str(_LAST_MSG["id"]), "t": time.time()}
+    return ok
+
+
+_WO_EMBED = {}
+_post_card_wo = _post_card
+
+
+def _post_card(hook, html_text, content, embed, name):
+    if _WO_EMBED and name.startswith("fg"):
+        embed = dict(embed, **_WO_EMBED)
+    st = _NFL_ST.get("st") or {}
+    if name.startswith("ft") and st.get("walkoffs"):             # the final whistle post says how it was won
+        w = next((x for x in st["walkoffs"].values() if time.time() - x.get("t", 0) < 1800 and not x.get("used")
+                  and all(n in html_text for n in x.get("teams") or ["?"])), None)
+        if w:
+            embed = dict(embed)
+            embed["img_desc"] = ("🚨 " + w["text"] + "!") + (f"\n{embed.get('img_desc', embed.get('description', ''))}"
+                                                           if embed.get("img_desc", embed.get("description")) else "")
+            w["used"] = True
+    return _post_card_wo(hook, html_text, content, embed, name)
+
+
+# ---- one-off: rebuild posted field-goal cards in place (config nfl.redo_fg_posts: [play ids]), once each
+def _find_post(hook, ch, near_t, prefix):
+    """Our webhook's message in the channel posted near near_t with an attachment named prefix* (bot token)."""
+    m = re.search(r"/webhooks/(\d+)/", hook or "")
+    if not (m and ch and BOT_TOKEN):
+        return None
+    code, msgs = discord_api("GET", f"/channels/{ch}/messages?limit=50")
+    best = None
+    for x in msgs or [] if code == 200 else []:
+        if str(x.get("webhook_id")) != m.group(1):
+            continue
+        names = [a.get("filename", "") for a in x.get("attachments") or []]
+        for c in x.get("components") or []:
+            for it in c.get("items") or []:
+                names.append(((it.get("media") or {}).get("url") or "").rsplit("/", 1)[-1].split("?")[0])
+        if not any(n.startswith(prefix) for n in names):
+            continue
+        t = datetime.fromisoformat(x["timestamp"].replace("Z", "+00:00")).timestamp()
+        if abs(t - near_t) < 900 and (best is None or abs(t - near_t) < best[0]):
+            best = (abs(t - near_t), str(x["id"]))
+    return best[1] if best else None
+
+
+_nfl_prime_slot_redofg = nfl_prime_slot
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    global CAPTURE
+    active = _nfl_prime_slot_redofg(slot, st, getctx, force)
+    want = [str(x) for x in (CONFIG.get("nfl") or {}).get("redo_fg_posts") or []]
+    done = st.setdefault("fg_redone", [])
+    for pid in want:
+        if pid in done:
+            continue
+        e = next((x for x in slot if pid.startswith(str(x["id"]))), None)
+        if e is None:
+            continue
+        try:
+            summary = fetch(f"football/nfl/summary?event={e['id']}")
+            p = next((q for q in summary.get("scoringPlays") or [] if str(q.get("id")) == pid), None)
+            ctx = getctx()
+            if not p or not ctx:
+                continue
+            done.append(pid)                                # once, whatever happens
+            mid = ((st.get("fg_posts") or {}).get(pid) or {}).get("msg")
+            if not mid:
+                ch = next((b.get("ch") for b in (st.get("weekly_boards") or {}).values()
+                           if b.get("sport") == "nfl" and b.get("ch") and b.get("where") == "main"), None)
+                _, d = play_detail(summary, pid)
+                near = _wallclock_ts(d["wallclock"]) if (d or {}).get("wallclock") else time.time()
+                mid = _find_post(NFL_HOOK, ch, near, "fg")
+            if not mid:
+                _log_plain(f"field goal {pid}: posted message not found, not rebuilt")
+                continue
+            keep_cap, keep_send = CAPTURE, dict(_SEND_AT)
+            CAPTURE = []
+            _GIF_LAST.clear()
+            try:
+                _post_fg_clutch_wo_redo(e, p, summary, ctx)
+                got = CAPTURE[-1] if CAPTURE else None
+            finally:
+                CAPTURE = keep_cap
+                _SEND_AT.update(keep_send)
+            if not isinstance(got, dict) or not got.get("attachments"):
+                continue
+            path = Path(got["attachments"][0].replace("file://", ""))
+            if discord_edit(NFL_HOOK, mid, path.read_bytes(), path.name):
+                _gif_after_edit(NFL_HOOK, mid)
+                st.setdefault("fg_posts", {})[pid] = {"game": e["id"], "msg": mid, "t": time.time()}
+                _log_plain(f"field goal {pid}: post rebuilt in place (message {mid})")
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"rebuild of field goal {pid} skipped: {ex}")
+    return active
+
+
+def _post_fg_clutch_wo_redo(e, p, summary, ctx):
+    """post_fg_clutch for a rebuild: same card and headline, without recording a new post."""
+    st = _NFL_ST.get("st")
+    keep = dict((st or {}).get("fg_posts") or {})
+    try:
+        return post_fg_clutch(e, p, summary, ctx)
+    finally:
+        if st is not None:
+            st["fg_posts"] = keep
 
 
 if __name__ == "__main__":
