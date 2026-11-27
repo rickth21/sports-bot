@@ -273,6 +273,22 @@ def flow():
     print("5c) overturned mid-build:", log)
     if [x[0] for x in log] != ["edit"]:
         problems.append("animation swapped in after an overturn edit")
+
+    log.clear()                                          # 5d) the try edit lands while the first animation builds:
+    bot._GIF_VER.clear()                                 #     that one is dropped, the try's own animation goes in
+    bot._gif_queue("sim", "78", "CHI 10–18 DET <div class='tryt wait'>⏳ CONVERSION TO COME</div>", "td.png")
+
+    def build(h, w=None):
+        if "TO COME" in h:
+            bot.discord_edit("sim", "78", b"CHI 10\xe2\x80\x9319 DET", "td.png")
+            bot._GIF_LAST.update(html="CHI 10–19 DET <div class='tryt ok'>✓ EXTRA POINT GOOD</div>", name="td.png")
+            bot._gif_after_edit("sim", "78")
+        return b"GIF89a" + h.encode()
+    bot.render_anim = build
+    drain()
+    print("5d) try lands mid-build:", log)
+    if [x[0] for x in log] != ["edit", "swap"] or log[1][2:4] != ("10-19", "✓ EXTRA POINT GOOD"):
+        problems.append("after a dropped animation the try's own animation was not swapped in")
     bot.discord_edit = fake_edit
     print("\nTRY FLOW OK" if not problems else "\nPROBLEMS:\n  " + "\n  ".join(problems))
     return not problems

@@ -8436,9 +8436,15 @@ def _td_drive_play(summary, pid):
     drives = summary.get("drives") or {}
     pool = [p for d in list(drives.get("previous") or []) + ([drives["current"]] if drives.get("current") else [])
             for p in d.get("plays") or []]
-    for i, p in enumerate(pool):
+    seen, uniq = set(), []
+    for p in pool:                                  # ESPN can list the drive in progress twice (previous + current)
+        if str(p.get("id")) not in seen:
+            seen.add(str(p.get("id")))
+            uniq.append(p)
+    for i, p in enumerate(uniq):
         if str(p.get("id")) == str(pid):
-            nxt = next((q.get("wallclock") for q in pool[i + 1:] if q.get("wallclock")), None)
+            mine = p.get("wallclock") or ""
+            nxt = next((q.get("wallclock") for q in uniq[i + 1:] if q.get("wallclock") and q["wallclock"] > mine), None)
             return p, nxt
     return None, None
 
@@ -8522,12 +8528,14 @@ def _try_moment(st, play, summary):
         if time.time() - seen[k] > 86400:
             seen.pop(k, None)
     t0 = seen[pid]
-    _, nxt = _td_drive_play(summary, pid)
-    if nxt:
-        try:
+    dp, nxt = _td_drive_play(summary, pid)
+    try:
+        if nxt:
             t0 = min(t0, _wallclock_ts(nxt))
-        except Exception:  # noqa: BLE001
-            pass
+        if (dp or {}).get("wallclock"):
+            t0 = max(t0, _wallclock_ts(dp["wallclock"]))     # never before the touchdown itself
+    except Exception:  # noqa: BLE001
+        pass
     return t0
 
 
@@ -10687,6 +10695,351 @@ def _gif_after_edit(hook, message_id):
     """After a try / give-up edit made with a rebuilt still card: queue its animated version."""
     if _GIF_LAST.get("html"):
         _gif_queue(hook, message_id, _GIF_LAST["html"], _GIF_LAST["name"])
+
+
+
+# ------------------------------------------------ where the seconds go: play -> seen in ESPN's feed -> card built -> sent
+_STAGE = {}
+_TICKS = []
+_td_ready_stage = td_ready
+
+
+def td_ready(summary, play, first_seen):
+    ok = _td_ready_stage(summary, play, first_seen)
+    if ok:
+        _STAGE.clear()
+        _STAGE.update(seen=first_seen, start=time.time())
+    return ok
+
+
+_post_card_stage = _post_card
+
+
+def _post_card(hook, html_text, content, embed, name):
+    _STAGE.setdefault("start", time.time())
+    _STAGE["built0"] = time.time()
+    return _post_card_stage(hook, html_text, content, embed, name)
+
+
+_render_card_stage = render_card
+
+
+def render_card(html_text, width=None):
+    png = _render_card_stage(html_text, width)
+    if "built0" in _STAGE and "built" not in _STAGE:
+        _STAGE["built"] = time.time()
+    return png
+
+
+_record_send_stage = _record_send
+
+
+def _record_send(ok):
+    t0, lab = _SEND_AT.get("t0"), _SEND_AT.get("label") or "post"
+    if ok and t0 and _STAGE.get("seen"):
+        now = time.time()
+        seen = _STAGE["seen"]
+        built = _STAGE.get("built") or now
+        gaps = [b - a for a, b in zip(_TICKS[-6:], _TICKS[-5:])]
+        every = f" · ESPN checked every {sum(gaps) / len(gaps):.0f}s" if gaps else ""
+        _log_plain(f"timing {lab}: play -> seen in ESPN feed {seen - t0:.1f}s · seen -> card built {built - seen:.1f}s · "
+                   f"built -> sent {now - built:.1f}s{every}")
+    _STAGE.clear()
+    return _record_send_stage(ok)
+
+
+_nfl_prime_slot_tick = nfl_prime_slot
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    if any(e["status"]["type"]["state"] == "in" for e in slot):
+        _TICKS.append(time.time())
+        del _TICKS[:-20]
+    return _nfl_prime_slot_tick(slot, st, getctx, force)
+
+
+
+# ------------------------------------------------ defensive / special-teams touchdowns: who really scored, and the D/ST
+#   ESPN's scoring-play line for these is odd ("Bryan Anger Punt Blk'd Kick Blocked by Ty Robinson"); the drive chart has
+#   the real story ("... BLOCKED by T.Robinson ... RECOVERED by PHI-K.Moore at DAL 3. K.Moore for 3 yards, TOUCHDOWN").
+#   Every NFL summary we fetch is indexed so td_parse can use it. The card: returner (blocker credited), the scoring
+#   team's D/ST owner in the fantasy impact (TD + block points, live D/ST total, win swing), MONSTER-style hype and the
+#   ESPN win-chance swing.
+_PLAYTXT = {}
+_RET_KINDS = (("blocked punt", "blocked_punt", "blocked"), ("blocked field goal", "blocked_fg", "blocked"),
+              ("blocked fg", "blocked_fg", "blocked"), ("punt return", "punt", "punt"),
+              ("kickoff return", "kick", "kick"), ("interception return", "int", "int"),
+              ("fumble return", "fumble", "fumble"), ("fumble recovery (opponent)", "fumble", "fumble"),
+              ("missed field goal return", "kick", "kick"))
+_DST_SUB = {"blocked_punt": ("BLOCKED PUNT TD", "⚡"), "blocked_fg": ("BLOCKED FG TD", "⚡"), "punt": ("PUNT RETURN TD", "⚡"),
+            "kick": ("KICK RETURN TD", "⚡"), "int": ("PICK-SIX", "🛡️"), "fumble": ("SCOOP AND SCORE", "🛡️")}
+_fetch_index_plain = fetch
+
+
+def _index_summary(d):
+    names = []
+    for t in (d.get("boxscore") or {}).get("players") or []:
+        ab = (t.get("team") or {}).get("abbreviation", "")
+        for cat in t.get("statistics") or []:
+            for a in cat.get("athletes") or []:
+                nm = (a.get("athlete") or {}).get("displayName")
+                if nm:
+                    names.append((nm, ab))
+    dr = d.get("drives") or {}
+    for dv in list(dr.get("previous") or []) + ([dr["current"]] if dr.get("current") else []):
+        for p in dv.get("plays") or []:
+            if "touchdown" in ((p.get("type") or {}).get("text") or "").lower():
+                _PLAYTXT[str(p.get("id"))] = (p.get("text") or "", names)
+    if len(_PLAYTXT) > 4000:
+        for k in list(_PLAYTXT)[:2000]:
+            _PLAYTXT.pop(k, None)
+
+
+def fetch(path, tries=3):
+    d = _fetch_index_plain(path, tries)
+    if path.startswith("football/nfl/summary"):
+        try:
+            _index_summary(d)
+        except Exception:  # noqa: BLE001
+            pass
+    return d
+
+
+_SFX = r"(?:\s(?:Jr|Sr|II|III|IV)\.?)?"
+_ABBR = r"[A-Z][A-Za-z]?\.\s?[A-Z][\w'\-]+" + _SFX
+
+
+def _full_name(short, names, team):
+    """'K.Moore' -> 'Kenny Moore II' using the game's box score (scoring team first)."""
+    m = re.match(r"([A-Z][A-Za-z]?)\.\s?([\w'\-]+)", short or "")
+    if not m:
+        return short
+    ini, last = m.group(1).lower(), m.group(2).lower()
+    best = []
+    for nm, ab in names:
+        parts = [w for w in nm.split() if w.lower().rstrip(".") not in ("jr", "sr", "ii", "iii", "iv")]
+        if len(parts) >= 2 and parts[-1].lower() == last and parts[0].lower().startswith(ini):
+            best.append((ab != team, nm))
+    best = sorted(set(best))
+    return best[0][1] if best else f"{m.group(1)}. {m.group(2)}"
+
+
+_td_parse_plain = td_parse
+
+
+def td_parse(play):
+    td = _td_parse_plain(play)
+    try:
+        tt = ((play.get("type") or {}).get("text") or "").lower()
+        hit = next(((sub, k) for key, sub, k in _RET_KINDS if key in tt), None)
+        if not hit:
+            return td
+        sub, kind = hit
+        info = _PLAYTXT.get(str(play.get("id")))
+        team = (play.get("team") or {}).get("abbreviation", "")
+        td.update(kind=kind, sub=sub)
+        raw = td.get("raw") or ""
+        b = re.search(r"Blocked by ([A-Z][\w'\-]+(?: [A-Z][\w'\-.]+)+?)(?:\s*\(|$)", raw)
+        if b:
+            td["blocker"] = b.group(1).strip()
+        if not info:
+            if td.get("scorer") and len(td["scorer"].split()) > 4:  # the odd ESPN line: never show it as a name
+                td["scorer"] = td.get("blocker") or "Special teams"
+            return td
+        text, names = info
+        m = re.search(rf"({_ABBR})(?: to [A-Z]{{2,3}} \d+)? for (-?\d+|no gain)(?: yards?)?,? TOUCHDOWN", text)
+        who = m.group(1) if m else None
+        if m:
+            td["yds"] = 0 if m.group(2) == "no gain" else int(m.group(2))
+        if not who:
+            r = re.search(rf"RECOVERED by [A-Z]{{2,3}}-({_ABBR})", text) or re.search(rf"INTERCEPTED by ({_ABBR})", text)
+            who = r.group(1) if r else None
+        if who:
+            td["scorer"] = _full_name(who, names, team)
+        bb = re.search(rf"BLOCKED by ({_ABBR})", text)
+        if bb and not td.get("blocker"):
+            td["blocker"] = _full_name(bb.group(1), names, team)
+        if td.get("blocker") == td.get("scorer"):
+            td.pop("blocker", None)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"return TD parse skipped: {ex}")
+    return td
+
+
+_td_headline_plain = _td_headline
+
+
+def _td_headline(td, nick):
+    sub = td.get("sub")
+    if not sub:
+        return _td_headline_plain(td, nick)
+    y = td.get("yds")
+    far = f" {y} yards" if y else ""
+    who, blk = td["scorer"], td.get("blocker")
+    if sub == "blocked_punt":
+        return (f"BLOCKED PUNT! {blk} blocks it, {who} takes it to the house — {nick}!" if blk
+                else f"BLOCKED PUNT! {who} takes it to the house — {nick}!")
+    if sub == "blocked_fg":
+        return (f"BLOCKED FIELD GOAL! {blk} gets a hand on it, {who} returns it{far} — {nick}!" if blk
+                else f"BLOCKED FIELD GOAL! {who} returns it{far} for the TD — {nick}!")
+    if sub == "punt":
+        return f"PUNT RETURN TD! {who} takes it{far} to the house — {nick}!"
+    if sub == "kick":
+        return f"KICK RETURN TD! {who} goes{far} all the way — {nick}!"
+    if sub == "int":
+        return f"PICK-SIX! {who} picks it off and takes it{far} to the house — {nick}!"
+    return f"SCOOP AND SCORE! {who} returns the fumble{far} for the TD — {nick}!"
+
+
+_td_yards_label_plain = _td_yards_label
+
+
+def _td_yards_label(td):
+    return _DST_SUB[td["sub"]][0] if td.get("sub") in _DST_SUB else _td_yards_label_plain(td)
+
+
+def _win_swing(summary, play_id, home_side):
+    """(win chance before, after) for the scoring side from ESPN's win probability, or None."""
+    wp = {str(w.get("playId")): float(w.get("homeWinPercentage") or 0) * 100 for w in summary.get("winprobability") or []}
+    prev = None
+    for p in _all_plays(summary):
+        w = wp.get(str(p.get("id")))
+        if str(p.get("id")) == str(play_id) and w is not None and prev is not None:
+            return (prev, w) if home_side else (100 - prev, 100 - w)
+        if w is not None:
+            prev = w
+    return None
+
+
+DST_CSS = """
+.dstw{margin-top:10px;display:flex;align-items:center;gap:14px;white-space:nowrap;padding:10px 16px;border-radius:14px;
+ background:linear-gradient(100deg,rgba(255,214,0,.28),rgba(255,61,61,.22));box-shadow:0 0 0 3px #ffd600,0 0 34px rgba(255,140,0,.75);
+ font-size:20px;font-weight:800;color:#fff}
+.dstw b{font-size:24px;font-weight:900;color:#ffd600}.dstw .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;background:#ff3d3d;
+ color:#fff;border-radius:7px;padding:3px 9px;flex:none}
+.pp5 .blk{font-size:20px;color:#ffe08a;font-weight:800;margin-top:3px}.pp5 .blk b{color:#fff}
+"""
+ANIM_CSS += ".dstw{animation:a_pulse 1s ease-in-out infinite}"
+_nfl_td_html_dst = nfl_td_fantasy_html
+
+
+def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
+    st = _NFL_ST.get("st") or {}
+    prev_win = dict(st.get("nfl_td_win") or {})
+    h = _nfl_td_html_dst(event, play, summary, live, ol, base, *a, **k)
+    td = td_parse(play)
+    if not td.get("sub"):
+        return h
+    try:
+        import html as H
+        away, home = teams_of(event)
+        abbr = (play.get("team") or {}).get("abbreviation", "")
+        team = away if away["team"]["abbreviation"] == abbr else home
+        nick = team["team"].get("name") or abbr
+        label, emo = _DST_SUB[td["sub"]]
+        # D/ST owner instead of "unrostered — available on waivers"
+        sc = league_scoring("nfl")
+        st_td = td["kind"] in ("punt", "kick", "blocked")
+        pts_td = float(sc.get("def_st_td" if st_td else "def_td") or sc.get("def_td") or 6)
+        extra = {"blocked": ("block", float(sc.get("blk_kick") or 0)), "int": ("INT", float(sc.get("int") or 0)),
+                 "fumble": ("fumble rec", float(sc.get("fum_rec") or 0))}.get(td["kind"])
+        gain = pts_td + (extra[1] if extra else 0)
+        bits = f"TD +{pts_td:g}" + (f" · {extra[0]} +{extra[1]:g}" if extra and extra[1] else "")
+        o = league_owner(f"def:{sl_team(abbr)}", "")
+        dn = next((x for x in nfl_defenses(summary, event) if x["team"] == abbr), None)
+        row = ""
+        if o:
+            rid = next((r for r, x in live["rosters"].items() if x["manager"] == o["manager"]), None)
+            win = ""
+            if rid is not None and rid in ol:
+                pw = prev_win.get(str(rid))
+                d = ol[rid]["win"] - pw if pw is not None else 0
+                win = (f"win <b>{ol[rid]['win']:.0f}%</b>"
+                       + (f" <span class='{'u' if d > 0 else 'dn'}'>{'▲' if d > 0 else '▼'}{abs(d):.0f}</span>" if abs(d) >= 1 else ""))
+            row = (f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(o['manager'])}</b>"
+                   f"<span>{H.escape(nick)} D/ST <b class='u'>+{gain:g}</b> ({bits})"
+                   + (f" → now <b>{fmt_pts(dn['pts'])}</b> pts" if dn else "") + f"</span>"
+                   f"<span>{win or ('starting' if o['starting'] else 'bench')}</span><span></span></div>")
+        h = re.sub(r"<div class='im'><span class='ar'>🆓</span>.*?</span><span></span><span></span></div>", row, h, count=1,
+                   flags=re.S) if "🆓" in h else h.replace("<div class='ih'>FANTASY IMPACT</div>",
+                                                         "<div class='ih'>FANTASY IMPACT</div>" + row, 1)
+        # scorer panel: MONSTER-style hype, blocker credited
+        i = h.find("<div class='pp5")
+        if i >= 0:
+            j = h.find(">", i)
+            tag = h[i:j + 1]
+            h = h[:i] + tag.replace("class='pp5", "class='pp5 h4", 1) + \
+                f"<span class='hyr h4'>{emo} {label} · {H.escape(nick.upper())}</span>" + h[j + 1:]
+            g0 = h.find("<div class='gn'>", i)                # the returner scores for the team's D/ST
+            if g0 > 0:
+                g1 = _div_end(h, g0)
+                h = h[:g0] + (f"<div class='gn'><b>+{gain:g}</b><span>for the <em>{H.escape(nick)} D/ST</em></span></div>") + h[g1:]
+            w0 = h.find("<div class='ow3'>", i)
+            if w0 > 0:
+                w1 = _div_end(h, w0)
+                own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
+                       else f"<b>{H.escape(nick)} D/ST</b> unrostered")
+                h = h[:w0] + f"<div class='ow3'>{own}</div>" + h[w1:]
+            if td.get("blocker"):
+                k2 = h.find("<div class='gn'>", i)
+                if k2 > 0:
+                    h = h[:k2] + f"<div class='blk'>🖐️ blocked by <b>{H.escape(td['blocker'])}</b></div>" + h[k2:]
+        # game-changer strip: ESPN win chance swing
+        sw = _win_swing(summary, play.get("id"), team is home)
+        strip = f"<div class='dstw'><span class='gc'>GAME-CHANGER</span>"
+        if sw and abs(sw[1] - sw[0]) >= 1:
+            strip += f"{H.escape(nick)} win chance <b>{sw[0]:.0f}% → {sw[1]:.0f}%</b>"
+        else:
+            strip += f"{emo} <b>{label}</b> · {H.escape(nick)} special teams strike"
+        strip += "</div>"
+        k3 = h.find("<div class='imp'>")
+        h = (h[:k3] + strip + h[k3:]) if k3 >= 0 else h.replace("</div></div></body>", strip + "</div></div></body>", 1)
+        h = h.replace("</style>", HYPE_CSS + DST_CSS + "</style>", 1)
+        _last_td_html["h"] = h
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"D/ST touchdown extras skipped: {ex}")
+    return h
+
+
+# ---- one-off: rebuild posted touchdowns in place (config nfl.redo_td_posts: [play ids]), once each, with the try state
+_nfl_prime_slot_redo = nfl_prime_slot
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    active = _nfl_prime_slot_redo(slot, st, getctx, force)
+    want = [str(x) for x in (CONFIG.get("nfl") or {}).get("redo_td_posts") or []]
+    done = st.setdefault("td_redone", [])
+    posts = st.get("td_posts") or {}
+    for pid in want:
+        r = posts.get(pid)
+        if pid in done or not r or r.get("done"):
+            continue
+        e = next((x for x in slot if x["id"] == r.get("game")), None)
+        if e is None:
+            continue
+        try:
+            summary = fetch(f"football/nfl/summary?event={e['id']}")
+            p = next((q for q in summary.get("scoringPlays") or [] if str(q.get("id")) == pid), None)
+            ctx = getctx()
+            if not p or not ctx:
+                continue
+            res = td_try(p, summary)
+            pl = p if res is not None else td_only_play(p, summary)
+            tag = res if res is not None else ({"label": "⏳ CONVERSION TO COME", "cls": "wait"}
+                                               if e["status"]["type"].get("state") == "in" else None)
+            img, name, html_text = _rebuild_td_image(e, pl, summary, ctx, tag)
+            if img and discord_edit(NFL_HOOK, r["msg"], img, name):
+                _gif_after_edit(NFL_HOOK, r["msg"])
+                if html_text:
+                    _TD_HTML[pid] = html_text
+                if res is not None:
+                    r["try"], r["try_result"] = "done", res["label"]
+                r["file"] = name
+                done.append(pid)
+                _log_plain(f"touchdown {pid}: post rebuilt in place")
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"rebuild of touchdown {pid} skipped: {ex}")
+    return active
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@
     },
     "season_high_min": 20,
     "hype": [30, 40],
+    "redo_td_posts": ["4018730803336"],
     "weekly_board": {
       "note": "One matchups board per week (points now, projected final, win %, players left), edited every 5 min while games are live. Posted 00:00 UK on the day of the week's first game (normally Friday), pinned until Tuesday 12:00 UK. Pinning needs DISCORD_BOT_TOKEN on the server.",
       "enabled": true,
