@@ -9672,13 +9672,18 @@ def meter_html(win_a, size=""):
 #   Starters in gold; bench players in this game as muted outlined chips after them. Bench chips never add a line:
 #   as many as fit, then "+N bench" (a small script in the card does the fitting).
 BENCH_FIT_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const go=()=>{"
+                # names and chips never spill into the playoff column: shrink a size at a time until they fit (no "...")
+                "document.querySelectorAll('.wnr .wnm').forEach(n=>{let f=parseFloat(getComputedStyle(n).fontSize);"
+                "while(n.scrollWidth>n.clientWidth+1&&f>14){f-=1;n.style.fontSize=f+'px';}});"
+                "document.querySelectorAll('.wnr .wch2 span').forEach(c=>{const w=c.parentElement.clientWidth;"
+                "let f=parseFloat(getComputedStyle(c).fontSize);while(c.offsetWidth>w&&f>12){f-=1;c.style.fontSize=f+'px';}});"
                 "document.querySelectorAll('.wch2').forEach(w=>{const bn=[...w.querySelectorAll('span.bn')];if(!bn.length)return;"
                 "const st=[...w.querySelectorAll('span:not(.bn)')];bn.forEach(b=>b.style.display='none');"
                 "const base=st.length?w.offsetHeight:(bn[0].style.display='',w.offsetHeight);bn[0].style.display='none';"
                 "let n=bn.length,more=null;const put=()=>{if(more)more.remove();more=null;if(n<bn.length){more=document.createElement('span');"
                 "more.className='bn';more.textContent='+'+(bn.length-n)+' bench';w.appendChild(more);}};"
                 "let k=0;for(;k<bn.length;k++){bn[k].style.display='';n=k+1;put();if(w.offsetHeight>base+1){bn[k].style.display='none';n=k;put();"
-                "if(w.offsetHeight>base+1&&more){more.textContent='+'+(bn.length-n);}break;}}"
+                "if(w.offsetHeight>base+1&&more){more.textContent='+'+(bn.length-n);}if(w.offsetHeight>base+1&&more){more.remove();}break;}}"
                 "bn.slice(n).forEach(b=>b.remove());});};"
                 "(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(go);});</script>")
 WHO_CSS = """
@@ -9687,13 +9692,13 @@ body,.card{width:1100px!important}
 .top .pill{font-size:20px!important;padding:5px 12px!important}
 .hl{margin:10px 0 0!important;padding:10px 18px!important}.hl .h1{font-size:28px!important}.hl .h2{font-size:21px!important}
 .wn{display:grid;grid-template-columns:1fr 1fr;gap:12px 14px;margin-top:12px}
-.wnt{position:relative;background:rgba(255,255,255,.065);border-radius:14px;padding:4px 14px}
+.wnt{position:relative;background:rgba(255,255,255,.065);border-radius:14px;padding:4px 14px;display:flex;flex-direction:column}
 .wnt.cold{opacity:.62}
-.wnr{display:grid;grid-template-columns:44px minmax(0,1fr) auto 92px;gap:10px;align-items:center;padding:7px 0;min-height:70px}
+.wnr{display:grid;grid-template-columns:40px minmax(0,1fr) auto 98px;gap:8px;align-items:center;padding:7px 0;min-height:70px;flex:1 1 auto}
 .wnr+.wnr{border-top:1px solid rgba(255,255,255,.08)}
-.wnr .rk{font-size:22px;font-weight:900;color:#ffd166;text-align:center}
+.wnr .rk{font-size:21px;font-weight:900;color:#ffd166;text-align:center;font-variant-numeric:tabular-nums;letter-spacing:-.5px}
 .wnr .wnm.s{font-size:19px;overflow:visible;text-overflow:clip}
-.wnr .wnm{font-size:24px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:none;letter-spacing:0}
+.wnr .wnm{font-size:24px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:clip;text-transform:none;letter-spacing:0}
 .wnr .wch2{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px}
 .wnr .wch2 span{background:#f5c542;color:#1b1f2a;font-weight:900;font-size:17px;border-radius:7px;padding:1px 8px;white-space:nowrap}
 .wnr .wch2 span small{font-size:14px;font-weight:800;opacity:.75;margin-left:5px}
@@ -9701,9 +9706,10 @@ body,.card{width:1100px!important}
 .wnr .wch2 span.bn{background:transparent;color:#c3cad8;box-shadow:inset 0 0 0 1.5px #6b7385;font-weight:800}
 .wnr .wch2 span.bn i{font-style:normal;font-size:12px;font-weight:900;letter-spacing:.8px;color:#8b95a8;margin-right:5px}
 .wnr .wch2 span.bn small{opacity:.9}
-.wnr .po{text-align:right;font-size:18px;font-weight:800;color:#cfd5e1;white-space:nowrap;line-height:1.25}
+.wnr .po{text-align:right;font-size:18px;font-weight:800;color:#cfd5e1;white-space:nowrap;line-height:1.3}
+.wnr .po .wl{font-size:16px}
 .wnr .po b{color:#fff;font-size:21px}.wnr .po .g{color:#7ee2a8}.wnr .po .r{color:#ff9a9e}.wnr .po .out{color:#7d879b;font-style:italic}
-.wnr .wp{height:52px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:900;
+.wnr .wp{height:52px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:900;letter-spacing:-.5px;
  background:rgba(255,255,255,.08);color:#8b95a8;font-variant-numeric:tabular-nums}
 .wnr.fav .wp{background:linear-gradient(180deg,#4be38e,#1faa59);color:#062312}
 .wnt .tg{position:absolute;top:-11px;right:14px;font-size:14px;font-weight:900;letter-spacing:1.2px;padding:2px 9px;border-radius:6px;
@@ -9751,7 +9757,7 @@ def nfl_preview_fantasy_html(events, live, ol, title, show_teams=None):
                 po = "<div class='po'><span class='out'>out of the race</span></div>"
             else:
                 po = (f"<div class='po'>playoffs <b>{o['po']:.0f}%</b>"
-                      + (f"<br>win <span class='g'>{_pct(o['po_w'])}</span> · lose <span class='r'>{_pct(o['po_l'])}</span>"
+                      + (f"<br><span class='wl'>win <span class='g'>{_pct(o['po_w'])}</span> · lose <span class='r'>{_pct(o['po_l'])}</span></span>"
                          if o["po_w"] is not None and o["po_l"] is not None and abs(o["po_w"] - o["po_l"]) >= 3 else "")
                       + "</div>")
             rows.append(f"<div class='wnr{' fav' if w >= 50 else ''}'><div class='rk'>#{pe.get('rank', '–')}</div>"
