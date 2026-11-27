@@ -11482,5 +11482,227 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
     return h
 
 
+
+# ------------------------------------------------ MISSED / BLOCKED kicks in crunch time (one-score game, last 5:00 of
+#   Q4 or any time in OT): missed or blocked field goals and extra points, and a failed 2-pt try that would have tied it
+#   or taken the lead. Dramatic red card (flash + shake when animated), still first then GIF like every big moment.
+MISS_CSS = """
+.bg{opacity:1!important;background:radial-gradient(circle at 50% 30%,rgba(255,40,40,.42),rgba(60,0,8,.78) 55%,rgba(8,4,8,.96) 100%)!important}
+.hl{border-left-color:#ff3d3d!important}
+.sbx .mid .yd{color:#ff5a5a!important;text-shadow:0 0 18px rgba(255,40,40,.9),0 0 40px rgba(255,0,0,.6)}
+.sbx .mid .st{background:#ff3d3d!important;color:#fff!important}
+.mkx{margin-top:10px;display:flex;align-items:center;gap:14px;white-space:nowrap;padding:10px 16px;border-radius:14px;
+ background:linear-gradient(100deg,rgba(255,61,61,.32),rgba(120,0,0,.4));box-shadow:0 0 0 3px #ff3d3d,0 0 34px rgba(255,40,40,.7);
+ font-size:20px;font-weight:800;color:#fff}
+.mkx b{font-size:24px;font-weight:900;color:#ffd166}.mkx .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;background:#ff3d3d;
+ color:#fff;border-radius:7px;padding:3px 9px;flex:none}
+.pp5.mk{box-shadow:0 0 0 3px #ff3d3d,0 0 30px rgba(255,40,40,.65)!important;background:linear-gradient(120deg,rgba(70,6,12,.9),rgba(9,12,22,.75))!important}
+.pp5.mk .gn b{color:#ff6b6b!important}
+"""
+ANIM_CSS += """
+@keyframes a_mkshake{0%,100%{transform:translateX(0)}20%{transform:translateX(-6px)}40%{transform:translateX(6px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}
+@keyframes a_mkflash{0%,100%{opacity:1}50%{opacity:.55}}
+.mkc .sbx .mid .yd{animation:a_mkshake .5s ease-in-out infinite}
+.mkx{animation:a_pulse 1s ease-in-out infinite}
+.mkc .bg{animation:a_mkflash 1s ease-in-out infinite}
+"""
+_wants_animation_mk = wants_animation
+
+
+def wants_animation(html_text):
+    return _wants_animation_mk(html_text) or ("class='mkx'" in html_text and (CONFIG.get("animations") or {}).get("enabled", True))
+
+
+def _miss_drive_team(summary, pid):
+    dr = summary.get("drives") or {}
+    for dv in list(dr.get("previous") or []) + ([dr["current"]] if dr.get("current") else []):
+        if any(str(p.get("id")) == str(pid) for p in dv.get("plays") or []):
+            return (dv.get("team") or {}).get("abbreviation")
+    return None
+
+
+def missed_kicks(summary, event):
+    """[(key, play, info)] for crunch-time missed / blocked kicks (and decisive failed 2-pt tries) in this game."""
+    out = []
+    away, home = teams_of(event)
+    names = []
+    for t in (summary.get("boxscore") or {}).get("players") or []:
+        ab = (t.get("team") or {}).get("abbreviation", "")
+        for cat in t.get("statistics") or []:
+            for a in cat.get("athletes") or []:
+                if (a.get("athlete") or {}).get("displayName"):
+                    names.append((a["athlete"]["displayName"], ab))
+    for p in _all_plays(summary):
+        q = (p.get("period") or {}).get("number", 0)
+        ck = p.get("clock") or {}
+        mm = re.match(r"(\d+):(\d+)", ck.get("displayValue") or "")
+        secs = float(ck["value"]) if ck.get("value") is not None else (int(mm.group(1)) * 60 + int(mm.group(2)) if mm else 9999)
+        if not (q >= 5 or (q == 4 and secs <= 300)):
+            continue
+        tt = ((p.get("type") or {}).get("text") or "").lower()
+        text = p.get("text") or ""
+        a1, h1 = int(num(p.get("awayScore"))), int(num(p.get("homeScore")))
+        team = _miss_drive_team(summary, p.get("id")) or ""
+        info = None
+        if "field goal" in tt and ("missed" in tt or "blocked" in tt or "no good" in text.lower()):
+            m = re.search(rf"({_ABBR}) (\d+) yard field goal", text)
+            blk = re.search(rf"BLOCKED by ({_ABBR})", text)
+            why = re.search(r"No Good, ([A-Za-z ]+?)(?:,|\.|$)", text)
+            info = {"kind": "fg", "yds": int(m.group(2)) if m else None, "kicker": m.group(1) if m else "",
+                    "blocked": bool(blk) or "blocked" in tt, "blocker": blk.group(1) if blk else None,
+                    "why": why.group(1).strip().lower() if why else "", "team": team, "before": (a1, h1)}
+            key = str(p.get("id"))
+        elif "touchdown" in tt:
+            pa = (p.get("pointAfterAttempt") or {})
+            pat = (pa.get("text") or "").lower()
+            if "extra point" in pat and ("miss" in pat or "block" in pat or "no good" in pat):
+                m = re.search(rf"({_ABBR}) extra point is (?:No Good|BLOCKED)", text)
+                blk = re.search(rf"extra point is BLOCKED[^.]*?by ({_ABBR})", text) or re.search(rf"BLOCKED by ({_ABBR})", text)
+                why = re.search(r"extra point is No Good, ([A-Za-z ]+?)(?:,|\.|$)", text)
+                info = {"kind": "xp", "yds": None, "kicker": m.group(1) if m else "", "blocked": "block" in pat,
+                        "blocker": blk.group(1) if blk else None, "why": why.group(1).strip().lower() if why else "",
+                        "team": team, "before": (a1, h1)}
+            elif "two point" in pat and not pa.get("value"):
+                mine, theirs = (a1, h1) if team == away["team"]["abbreviation"] else (h1, a1)
+                if -2 <= mine - theirs <= 0:                       # the try would have tied it or taken the lead
+                    info = {"kind": "2pt", "yds": None, "kicker": "", "blocked": False, "blocker": None, "why": "",
+                            "team": team, "before": (a1, h1)}
+            key = f"{p.get('id')}-pat"
+        if not info:
+            continue
+        if abs(a1 - h1) > 8:
+            continue
+        for k in ("kicker", "blocker"):
+            if info.get(k):
+                info[k] = _full_name(info[k], names, team if k == "kicker" else "")
+        out.append((key, p, info))
+    return out
+
+
+def nfl_miss_html(event, play, summary, live, ol, info):
+    import html as H
+    away, home = teams_of(event)
+    abbr = info["team"]
+    kt = away if away["team"]["abbreviation"] == abbr else home
+    other = home if kt is away else away
+    nick = kt["team"].get("name") or abbr
+    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    q = (play.get("period") or {}).get("number", 0)
+    clk = (play.get("clock") or {}).get("displayValue", "")
+    when = ("OT" if q > 4 else "Q4") + f" · {clk} LEFT"
+    diff = abs(a_s - h_s)
+    state = "STILL TIED" if diff == 0 else "STILL A ONE-SCORE GAME"
+    word = "BLOCKED" if info["blocked"] else ("NO GOOD" if info["kind"] == "2pt" else "MISSED")
+    icon = "🚫" if info["blocked"] else "❌"
+    big = {"fg": f"{icon} {word} {info['yds']}-YD FG" if info.get("yds") else f"{icon} {word} FG",
+           "xp": f"{icon} {word} EXTRA POINT", "2pt": "❌ 2-PT TRY FAILS"}[info["kind"]]
+    sc = league_scoring("nfl")
+    proj = nfl_projections(live["week"])
+    rows = []
+    panel = ""
+    if info["kind"] in ("fg", "xp") and info["kicker"]:
+        kicker = info["kicker"]
+        k = next((x for x in nfl_kickers(summary) if name_key(x["name"]) == name_key(kicker)), None)
+        kid = k["id"] if k else boxscore_id(summary, kicker)
+        o = league_owner(kid, kicker)
+        lost = kicker_fpts(info["yds"] or 30) if info["kind"] == "fg" else float(sc.get("xpm") or 1)
+        pen = float(sc.get("fgmiss" if info["kind"] == "fg" else "xpmiss") or 0)
+        now = k["pts"] if k else None
+        own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
+               else "<b>Unrostered</b> — free agent")
+        why = f" · {H.escape(info['why'])}" if info.get("why") else ""
+        panel = (f"<div class='pair one'><div class='pp5 mk'><img src='{H.escape(nfl_headshot(kid) or kt['team'].get('logo', ''))}'"
+                 f"{pid_attr(_sl_pid(kicker, abbr))}><div><div class='role'>KICKER · {abbr}</div><div class='nm'>{H.escape(kicker)}</div>"
+                 f"<div class='gn'><b>{(f'+{pen:g}' if pen > 0 else f'{pen:g}')}</b><span>no +{lost:g}{why}</span></div>"
+                 + (f"<div class='pjn'>now <b>{fmt_pts(now)}</b> pts</div>" if now is not None else "")
+                 + f"<div class='ow3'>{own}</div></div></div></div>")
+        if o:
+            rid = next((r for r, x in live["rosters"].items() if x["manager"] == o["manager"]), None)
+            if rid in ol:
+                rows.append(f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(o['manager'])}</b>"
+                            f"<span>misses out on <b class='dn'>+{lost:g}</b> from {H.escape(short_name(kicker))}</span>"
+                            f"<span>win <b>{ol[rid]['win']:.0f}%</b></span><span></span></div>")
+    if info["blocked"]:
+        od = league_owner(f"def:{sl_team(other['team']['abbreviation'])}", "")
+        b = float(sc.get("blk_kick") or 0)
+        if od and b:
+            rows.append(f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(od['manager'])}</b>"
+                        f"<span>{H.escape(other['team'].get('name') or '')} D/ST <b class='u'>+{b:g}</b> for the block"
+                        + (f" ({H.escape(info['blocker'])})" if info.get("blocker") else "") + "</span><span></span><span></span></div>")
+    sw = _win_swing(summary, play.get("id"), kt is home)
+    strip = "<div class='mkx'><span class='gc'>CRUNCH TIME</span>"
+    if sw and abs(sw[1] - sw[0]) >= 1:
+        strip += f"{H.escape(nick)} win chance <b>{sw[0]:.0f}% → {sw[1]:.0f}%</b>"
+    else:
+        strip += f"<b>{H.escape(clk)}</b> left · {diff}-point game"
+    strip += "</div>"
+    if not rows:
+        rows.append("<div class='im'><span class='ar'>·</span><b class='who5'>No league points</b>"
+                    "<span>change hands on this one</span><span></span><span></span></div>")
+    imp = f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>"
+    try:                                                  # spare space: game state + league players (dropped if no room)
+        imp += _fill_sections(event, play, summary, live, {"scorer": info.get("kicker") or "", "sub": "kick"}, True)
+    except Exception:  # noqa: BLE001
+        pass
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>{word} KICK · {'OT' if q > 4 else 'Q' + str(q)} {clk} · "
+            f"{away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div><div class='pill'>{state}</div></div>"
+            + score_hero(event, a_s, h_s, when, state, hot=None, plus=None, big=big)
+            + (panel or "") + strip + imp)
+    return _card("--a:#ff3d3d;--h:#ffd166", body, extra_css=V4_CSS + TD5_CSS + FG_CSS + SB_CSS + MISS_CSS + FILL_CSS).replace(
+        "<div class='card'", "<div class='card mkc'", 1).replace("<head>", "<head>" + FILL_JS, 1)
+
+
+def post_missed_kick(event, play, summary, ctx, info):
+    away, home = teams_of(event)
+    kt = away if away["team"]["abbreviation"] == info["team"] else home
+    nick = kt["team"].get("name") or info["team"]
+    clk = (play.get("clock") or {}).get("displayValue", "")
+    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    diff = abs(a_s - h_s)
+    k = info.get("kicker") or nick
+    yd = f" {info['yds']}-yarder" if info.get("yds") else ""
+    if info["kind"] == "2pt":
+        title = f"❌ NO GOOD! The {nick} two-point try fails — still {'tied' if not diff else f'a {diff}-point game'}!"
+    elif info["blocked"]:
+        title = f"🚫 BLOCKED! {k}'s{yd or ' extra point'} is blocked" + (f" by {info['blocker']}" if info.get("blocker") else "") + "!"
+    else:
+        title = f"❌ MISSED! {k}'s{yd or ' extra point'} is no good" + (f" — {info['why']}!" if info.get("why") else "!")
+    desc = (f"Still tied" if not diff else f"Still a one-score game") + f" · {clk} left" + (" in OT" if (play.get("period") or {}).get("number", 0) > 4 else "")
+    embed = {"author": AU_NFL(), "color": 0xFF3D3D, "img_title": title, "img_desc": desc, "title": title, "description": desc}
+    html_text = nfl_miss_html(event, play, summary, ctx["live"], ctx["ol"], info)
+    return _post_card(NFL_HOOK, html_text, f"❌ **{title}**", embed, "miss.png")
+
+
+_nfl_prime_slot_miss = nfl_prime_slot
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    active = _nfl_prime_slot_miss(slot, st, getctx, force)
+    if not (CONFIG.get("nfl") or {}).get("missed_kicks", True):
+        return active
+    for e in slot:
+        if e["status"]["type"]["state"] != "in":
+            continue
+        g = st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})
+        try:
+            summary = fetch(f"football/nfl/summary?event={e['id']}")
+            for key, p, info in missed_kicks(summary, e):
+                if key in g.setdefault("mk", []):
+                    continue
+                wc = p.get("wallclock")
+                if wc and time.time() - _wallclock_ts(wc) > 600:
+                    g["mk"].append(key)                     # old (restart): don't post late
+                    continue
+                t0 = _wallclock_ts(wc) if wc else g.setdefault("mk_seen", {}).setdefault(key, time.time())
+                if not due(t0, "missed kick"):
+                    continue
+                ctx = getctx()
+                if ctx and post_missed_kick(e, p, summary, ctx, info):
+                    g["mk"].append(key)
+        except Exception as ex:  # noqa: BLE001
+            _log_plain(f"missed-kick check skipped: {ex}")
+    return active
+
+
 if __name__ == "__main__":
     main()
