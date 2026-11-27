@@ -671,7 +671,8 @@ def commentary(td, detail_text, down_text, nick, lead_txt, seed):
     elif td["kind"] == "int":
         line = f"PICKED OFF! {td['scorer']} jumps the route and takes it {yds} yards the other way for six!"
     elif td["kind"] in ("fumble",):
-        line = f"Ball's out! {td['scorer']} scoops it up and rumbles {yds} yards to the end zone!"
+        line = (f"Ball's out! It squirts loose in the end zone and {td['scorer']} falls on it — touchdown!" if not td.get("yds")
+                else f"Ball's out! {td['scorer']} scoops it up and rumbles {yds} yards to the end zone!")
     elif td["kind"] in ("punt", "kick", "blocked"):
         line = f"{td['scorer']} takes it back {yds} yards — special teams touchdown!"
     if not line:
@@ -2818,9 +2819,7 @@ def nfl_prime_slot(slot, st, getctx, force=False):
         if stype["state"] == "in":
             active = True
             summary = fetch(f"football/nfl/summary?event={e['id']}")
-            plays = [p for p in summary.get("scoringPlays", [])
-                     if p.get("type", {}).get("abbreviation") == "TD"
-                     or "touchdown" in (p.get("type", {}).get("text", "").lower())]
+            plays = [p for p in summary.get("scoringPlays", []) if is_td_play(p, summary)]
             for i, p in enumerate(plays):
                 if p["id"] in g["tds"]:
                     continue
@@ -4134,7 +4133,7 @@ def nfl_prime_slot(slot, st, getctx, force=False):
             if e["status"]["type"]["state"] == "post":
                 # game just ended (walk-off): post any touchdown from the last few minutes before full-time
                 for p in summary.get("scoringPlays", []):
-                    if p["id"] in g["tds"] or (p.get("type") or {}).get("abbreviation") != "TD":
+                    if p["id"] in g["tds"] or not is_td_play(p, summary):
                         continue
                     _, d = play_detail(summary, p.get("id"))
                     wc = (d or {}).get("wallclock")
@@ -10847,6 +10846,7 @@ _RET_KINDS = (("blocked punt", "blocked_punt", "blocked"), ("blocked field goal"
               ("blocked fg", "blocked_fg", "blocked"), ("punt return", "punt", "punt"),
               ("kickoff return", "kick", "kick"), ("interception return", "int", "int"),
               ("fumble return", "fumble", "fumble"), ("fumble recovery (opponent)", "fumble", "fumble"),
+              ("opp fumble recovery", "fumble", "fumble"), ("interception", "int", "int"),
               ("missed field goal return", "kick", "kick"))
 _DST_SUB = {"blocked_punt": ("BLOCKED PUNT TD", "⚡"), "blocked_fg": ("BLOCKED FG TD", "⚡"), "punt": ("PUNT RETURN TD", "⚡"),
             "kick": ("KICK RETURN TD", "⚡"), "int": ("PICK-SIX", "🛡️"), "fumble": ("SCOOP AND SCORE", "🛡️")}
@@ -10904,6 +10904,22 @@ def _full_name(short, names, team):
 _td_parse_plain = td_parse
 
 
+def is_td_play(p, summary):
+    """A touchdown, whatever ESPN calls it: its label says so, or the play added 6+ points (defensive / return TDs
+    come as "Sack Opp Fumble Recovery", "Interception Return" …). Field goals, safeties and tries never count."""
+    ty = p.get("type") or {}
+    ab, tt = ty.get("abbreviation") or "", (ty.get("text") or "").lower()
+    if ab == "TD" or "touchdown" in tt:
+        return True
+    if ab in ("FG", "SF", "PAT", "XP", "2PT", "D2P") or "field goal" in tt or "safety" in tt:
+        return False
+    sp = summary.get("scoringPlays") or []
+    i = next((k for k, q in enumerate(sp) if q.get("id") == p.get("id")), None)
+    tot = lambda q: int(num(q.get("awayScore"))) + int(num(q.get("homeScore")))  # noqa: E731
+    before = tot(sp[i - 1]) if i else 0
+    return i is not None and tot(p) - before >= 6
+
+
 def td_parse(play):
     td = _td_parse_plain(play)
     try:
@@ -10919,6 +10935,10 @@ def td_parse(play):
         b = re.search(r"Blocked by ([A-Z][\w'\-]+(?: [A-Z][\w'\-.]+)+?)(?:\s*\(|$)", raw)
         if b:
             td["blocker"] = b.group(1).strip()
+        if re.search(r"in (the )?end zone", raw, re.I):
+            td["endzone"] = True
+        if td.get("scorer"):  # "T.J. Watt Fumble Recovery in End Zone" -> "T.J. Watt"
+            td["scorer"] = re.sub(r"\s+(?:Fumble|Recovery|Interception|Return|in End Zone|for \d+).*$", "", td["scorer"], flags=re.I).strip() or td["scorer"]
         if not info:
             if td.get("scorer") and len(td["scorer"].split()) > 4:  # the odd ESPN line: never show it as a name
                 td["scorer"] = td.get("blocker") or "Special teams"
@@ -10965,6 +10985,8 @@ def _td_headline(td, nick):
         return f"KICK RETURN TD! {who} goes{far} all the way — {nick}!"
     if sub == "int":
         return f"PICK-SIX! {who} picks it off and takes it{far} to the house — {nick}!"
+    if td.get("endzone") and not y:
+        return f"DEFENSIVE TOUCHDOWN! {who} falls on the fumble in the end zone — {nick}!"
     return f"SCOOP AND SCORE! {who} returns the fumble{far} for the TD — {nick}!"
 
 
@@ -10989,10 +11011,10 @@ def _win_swing(summary, play_id, home_side):
 
 
 DST_CSS = """
-.dstw{margin-top:10px;display:flex;align-items:center;gap:14px;white-space:nowrap;padding:10px 16px;border-radius:14px;
+.dstw{margin-top:10px;display:flex;align-items:center;gap:10px;white-space:nowrap;padding:10px 14px;border-radius:14px;min-width:0;overflow:hidden;
  background:linear-gradient(100deg,rgba(255,214,0,.28),rgba(255,61,61,.22));box-shadow:0 0 0 3px #ffd600,0 0 34px rgba(255,140,0,.75);
  font-size:20px;font-weight:800;color:#fff}
-.dstw b{font-size:24px;font-weight:900;color:#ffd600}.dstw .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;background:#ff3d3d;
+.dstw{font-size:18px!important}.dstw b{font-size:22px;font-weight:900;color:#ffd600}.dstw .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;background:#ff3d3d;
  color:#fff;border-radius:7px;padding:3px 9px;flex:none}
 .pp5 .blk{font-size:20px;color:#ffe08a;font-weight:800;margin-top:3px}.pp5 .blk b{color:#fff}
 """
@@ -12790,6 +12812,140 @@ def post_prime_half(event, summary, ctx):
     content = f"⏸️ **HALF-TIME** · {word} · {away['team'].get('name')} {a}–{h} {home['team'].get('name')}"
     html_text = nfl_half_upset_html(nfl_half_html(event, summary, ctx["live"], ctx["ol"], ctx["base"]), u, summary)
     return _post_card(NFL_HOOK, html_text, content, embed, "half.png")
+
+
+# ---- SAFETY (Rick: "a safety should show"): its own card, same look as the field-goal card. The defence that got it
+#   (+2 and its owner), who was caught in his own end zone, and the fantasy impact: the scoring D/ST's owner, and the other
+#   D/ST losing points-allowed points. Posted for prime-time games like touchdowns. Config nfl.safety_posts (default on).
+SAFETY_CSS = """
+.sfw{margin-top:10px;display:flex;align-items:center;gap:14px;padding:10px 16px;border-radius:14px;white-space:nowrap;
+ background:linear-gradient(100deg,rgba(255,214,0,.25),rgba(255,61,61,.2));box-shadow:0 0 0 3px #ffd600,0 0 30px rgba(255,140,0,.7);
+ font-size:20px;font-weight:800;color:#fff}
+.sfw b{font-size:24px;font-weight:900;color:#ffd600}.sfw .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;background:#ff3d3d;
+ color:#fff;border-radius:7px;padding:3px 9px;flex:none}
+"""
+ANIM_CSS += ".sfw{animation:a_pulse 1s ease-in-out infinite}"
+
+
+def _safety_victim(text):
+    m = re.match(r"^\s*([A-Z][\w.'\-]+(?: [A-Z][\w.'\-]+)+?)\s+(?:Rush|Pass|Kneel|Punt|sacked|Sacked|Run|Scramble|Fumble)", text or "")
+    if m:
+        return m.group(1)
+    m = re.search(r"([A-Z][\w.'\-]+(?: [A-Z][\w.'\-]+)+?) sacked", text or "")
+    return m.group(1) if m else None
+
+
+def nfl_safety_html(event, play, summary, live, ol, base):
+    import html as H
+    away, home = teams_of(event)
+    abbr = (play.get("team") or {}).get("abbreviation", "")
+    st_team = away if away["team"]["abbreviation"] == abbr else home
+    other = home if st_team is away else away
+    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
+    q = (play.get("period") or {}).get("number", 0)
+    clock = (play.get("clock") or {}).get("displayValue", "")
+    mine, theirs = (a_s, h_s) if st_team is away else (h_s, a_s)
+    nick, onick = st_team["team"].get("name") or abbr, other["team"].get("name") or ""
+    victim = _safety_victim(play.get("text") or "")
+    sc = league_scoring("nfl")
+    safe = float(sc.get("safe") or 2)
+    tag = "TIES IT" if mine == theirs else "GO-AHEAD" if mine > theirs and mine - 2 <= theirs else f"LEAD NOW {mine - theirs}" if mine > theirs else f"WITHIN {theirs - mine}"
+    defs = {x["team"]: x for x in nfl_defenses(summary, event)}
+    dn = defs.get(abbr)
+    o = league_owner(f"def:{sl_team(abbr)}", "")
+    own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o else "<b>Unrostered</b> — free agent")
+    now_txt = f"<span>now <em>{fmt_pts(dn['pts'])}</em> pts</span>" if dn else ""
+    panel = (f"<div class='pair one'><div class='pp5 hot'><img src='{H.escape(st_team['team'].get('logo', ''))}'><div>"
+             f"<div class='role'>DEFENCE · {abbr}</div><div class='nm'>{H.escape(nick)} D/ST</div>"
+             f"<div class='gn'><b>+{safe:g}</b>{now_txt}</div>"
+             + (f"<div class='blk'>caught <b>{H.escape(victim)}</b> in his own end zone</div>" if victim else "")
+             + f"<div class='ow3'>{own}</div></div></div></div>")
+    rows = []
+    if o:
+        rid = next((r for r, x in live["rosters"].items() if x["manager"] == o["manager"]), None)
+        opp = next((b if a == rid else a for a, b in live["pairs"] if rid in (a, b)), None) if rid else None
+        if opp:
+            proj = nfl_projections(live["week"])
+            pa, pb = _proj_total(rid, live, ol, event, proj), _proj_total(opp, live, ol, event, proj)
+            rows.append(f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(o['manager'])}</b>"
+                        f"<span>{H.escape(nick)} D/ST <b class='u'>+{safe:g}</b> · projected <b class='{'u' if pa >= pb else 'dn'}'>{pa:.1f}</b> – {pb:.1f} vs "
+                        f"{H.escape(live['rosters'][opp]['manager'])}</span><span>win <b>{ol[rid]['win']:.0f}%</b></span><span></span></div>")
+    od = league_owner(f"def:{sl_team(other['team']['abbreviation'])}", "")
+    if od:
+        def tier(n):
+            for lo, hi, key in ((0, 0, "pts_allow_0"), (1, 6, "pts_allow_1_6"), (7, 13, "pts_allow_7_13"), (14, 20, "pts_allow_14_20"),
+                                (21, 27, "pts_allow_21_27"), (28, 34, "pts_allow_28_34"), (35, 999, "pts_allow_35p")):
+                if lo <= n <= hi:
+                    return float(sc.get(key) or 0)
+            return 0.0
+        d = tier(mine) - tier(mine - 2)
+        if abs(d) >= 0.05:
+            odn = defs.get(other["team"]["abbreviation"])
+            odn_txt = f" → now <b>{fmt_pts(odn['pts'])}</b> pts" if odn else ""
+            rows.append(f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(od['manager'])}</b>"
+                        f"<span>{H.escape(onick)} D/ST loses <b class='dn'>{abs(d):g}</b>{odn_txt} "
+                        f"({mine} allowed)</span><span>{'starting' if od['starting'] else 'bench'}</span><span></span></div>")
+    if victim:
+        vo = league_owner(boxscore_id(summary, victim), victim)
+        if vo:
+            rows.append(f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(vo['manager'])}</b>"
+                        f"<span>{H.escape(victim)} tackled in his own end zone. Awkward.</span><span>{'starting' if vo['starting'] else 'bench'}</span><span></span></div>")
+    imp = f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>" if rows else ""
+    wow = f"<div class='sfw'><span class='gc'>SAFETY</span>Two points for the {H.escape(nick)} defence — <b>{a_s}–{h_s}</b></div>"
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>SAFETY · {'OT' if q > 4 else 'Q' + str(q)} {clock} · "
+            f"{away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div><div class='pill'>{tag}</div></div>"
+            + score_hero(event, a_s, h_s, f"{'OT' if q > 4 else 'Q' + str(q)} · {clock}", tag, hot=abbr, plus=2, big="SAFETY")
+            + wow + f"{panel}{imp}")
+    t = st_team["team"]
+    ca = vivid(t.get("color") or "1faa59")
+    ch = vivid(t.get("alternateColor") or t.get("color") or "5b7bd5", min_l=0.5)
+    co = vivid(other["team"].get("color") or "5b7bd5")
+    bg = (f".bg{{opacity:1!important;background:linear-gradient(120deg,{ca}d9 0%,{ca}73 38%,rgba(13,18,32,0) 78%),"
+          f"linear-gradient(300deg,{co}38 0%,rgba(13,18,32,0) 22%)!important}}.hl{{border-left-color:{ch}!important}}")
+    html_text = _card(f"--a:{ca};--h:{ch}", body, extra_css=V4_CSS + TD5_CSS + FG_CSS + SB_CSS + DST_CSS + SAFETY_CSS + bg)
+    return html_text, nick, victim, a_s, h_s
+
+
+def post_safety(event, play, summary, ctx):
+    html_text, nick, victim, a_s, h_s = nfl_safety_html(event, play, summary, ctx["live"], ctx["ol"], ctx["base"])
+    away, home = teams_of(event)
+    title = (f"SAFETY! {victim} is caught in his own end zone — two points for the {nick}!" if victim
+             else f"SAFETY! Two points for the {nick} defence!")
+    embed = {"author": AU_NFL(), "color": 0xFFD600, "title": title}
+    return _post_card(NFL_HOOK, html_text, f"🏈 SAFETY · {away['team'].get('name')} {a_s}–{h_s} {home['team'].get('name')}", embed, "safety.png")
+
+
+def _is_safety(p):
+    ty = p.get("type") or {}
+    return ty.get("abbreviation") == "SF" or "safety" in (ty.get("text") or "").lower()
+
+
+_nfl_prime_slot_sf = nfl_prime_slot
+
+
+def nfl_prime_slot(slot, st, getctx, force=False):
+    """+ a post for every safety (in-game, or just after the final whistle)."""
+    if (CONFIG.get("nfl") or {}).get("safety_posts", True):
+        for e in slot:
+            if e["status"]["type"]["state"] not in ("in", "post"):
+                continue
+            g = st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})
+            if g.get("final") and e["status"]["type"]["state"] == "post":
+                continue
+            try:
+                summary = fetch(f"football/nfl/summary?event={e['id']}")
+            except Exception as ex:  # noqa: BLE001
+                log(f"safety check skipped: {ex}")
+                continue
+            for p in summary.get("scoringPlays", []):
+                if p["id"] in g["tds"] or not _is_safety(p):
+                    continue
+                if not td_ready(summary, p, g.setdefault("seen", {}).setdefault(p["id"], time.time())):
+                    continue
+                ctx = getctx()
+                if ctx and post_safety(e, p, summary, ctx):
+                    g["tds"].append(p["id"])
+    return _nfl_prime_slot_sf(slot, st, getctx, force)
 
 if __name__ == "__main__":
     main()
