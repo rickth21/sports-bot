@@ -13037,6 +13037,8 @@ body,.card{width:1100px!important}
 .ms .p{font-size:15px;font-weight:700;color:#cfd5e1;white-space:nowrap}.ms .p b{color:#fff;font-size:17px}
 .ms .p i{font-style:normal;color:#8b95a8}
 .ms.fav .n{color:#7ee2a8}
+.rc{font-style:normal;font-size:14px;font-weight:800;color:#aab3c5;margin-left:8px;padding:1px 7px;border-radius:6px;background:rgba(255,255,255,.08);letter-spacing:.3px}
+.ms .n .rc{font-size:13px}
 .mw{text-align:center;font-size:12px;font-weight:800;color:#8b95a8;line-height:1.2}
 .mw b{display:block;font-size:20px;color:#fff;font-weight:900}
 .mbar{grid-column:1/-1;height:7px;border-radius:4px;background:#3a4152;overflow:hidden;display:flex}
@@ -13075,6 +13077,12 @@ def nfl_night_html(events, ctx, day_events):
     sides = d.get("sides") or {}
     ppl = _wb_people("nfl")
     man = lambda r: live["rosters"][r]["manager"]  # noqa: E731
+
+    def rec(r):  # season record before this week ("8-3", "7-3-1")
+        p_ = ppl.get(r) or {}
+        if "w" not in p_:
+            return ""
+        return f"{p_['w']}-{p_['l']}" + (f"-{p_['t']}" if p_.get("t") else "")
     done = sum(1 for e in events if e["status"]["type"]["state"] == "post")
     left_games = len(events) - done
     nxt = min((parse_time(e["date"]) for e in events if e["status"]["type"]["state"] == "pre"), default=None)
@@ -13099,7 +13107,7 @@ def nfl_night_html(events, ctx, day_events):
         for r, w, right in ((a, wa, False), (b, 100 - wa, True)):
             sd = sides.get(str(r)) or sides.get(r) or {}
             bw = (base.get(r) or {}).get("win")
-            cols.append(f"<div class='ms{' r' if right else ''}{' fav' if w >= 50 else ''}'><div class='n'>{H.escape(man(r))}</div>"
+            cols.append(f"<div class='ms{' r' if right else ''}{' fav' if w >= 50 else ''}'><div class='n'>{H.escape(man(r))}<em class='rc'>{rec(r)}</em></div>"
                         f"<div class='p'><b>{sd.get('points', 0):.1f}</b> <i>→ proj {sd.get('proj', 0):.0f}</i></div>"
                         f"<div class='p'>win <b>{w:.0f}%</b>{delta(w, bw)} <i>· {sd.get('left', 0)} left</i></div></div>")
         mus.append(f"<div class='mu'>{cols[0]}<div class='mw'>vs<b>{max(wa, 100 - wa):.0f}%</b></div>{cols[1]}"
@@ -13116,7 +13124,7 @@ def nfl_night_html(events, ctx, day_events):
               ("locked in" if o["po"] >= 99.5 else "out" if o["po"] < 0.5 else ""))
         rk = (ppl.get(r) or {}).get("rank", "–")
         prs.append(f"<div class='pr{' cut' if i == spots else ''}{' out' if o['po'] < 0.5 else ''}'><span class='k'>#{rk}</span>"
-                   f"<span class='n'>{H.escape(man(r))}</span><span class='po'>{o['po']:.0f}%</span>"
+                   f"<span class='n'>{H.escape(man(r))}<em class='rc'>{rec(r)}</em></span><span class='po'>{o['po']:.0f}%</span>"
                    f"<span>{delta(o['po'], bp)}</span><span class='wl'>{wl}</span></div>")
 
     # star + dud of the night (rostered starters in today's games)
