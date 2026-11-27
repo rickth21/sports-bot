@@ -4568,7 +4568,7 @@ def score_hero(event, a_s, h_s, clock_txt, sub="", hot=None, plus=None, big=None
         disc = f"<div class='disc'><img src='{H.escape(tm['team'].get('logo', ''))}'></div>"
         txt = (f"<div style='text-align:{'right' if right else 'left'}'><div class='nm'>"
                f"{H.escape(tm['team'].get('name') or ab)}</div><div class='sc {cls}' style='--hc:{hc}'>{sc}</div>{chip}</div>")
-        return f"<div class='tm{' r' if right else ''}'>{(txt + disc) if right else (disc + txt)}</div>"
+        return f"<div class='tm{' r' if right else ''}' style='--tc:{hc}'>{(txt + disc) if right else (disc + txt)}</div>"
     return (f"<div class='sbx'>{side(away, a_s, h_s, False)}<div class='mid'><div class='clk'>{H.escape(clock_txt)}</div>"
             f"{f'<div class=yd>{H.escape(big)}</div>' if big else ''}"
             f"{f'<div class=st>{H.escape(sub)}</div>' if sub else ''}</div>{side(home, h_s, a_s, True)}</div>")
@@ -12309,6 +12309,94 @@ def _post_fg_clutch_wo_redo(e, p, summary, ctx):
     finally:
         if st is not None:
             st["fg_posts"] = keep
+
+
+
+# ------------------------------------------------ prettier moment cards + tension that escalates late in tight games
+#   Applied to every in-game moment card (touchdown, field goal, game-changer, missed kick, turnover...) at render time.
+#   Style: both teams' colours glowing behind their side of the scoreboard, a faint texture, panels with a soft top light
+#   and hairline border, livelier key numbers. Tension, read from the card's own "Q4 3:27 · PHI 30–38 DAL" line:
+#   one-score game in Q4 -> CRUNCH TIME accent; last 5:00 -> stronger glow + pulsing clock; last 2:00 / OT -> red
+#   alert framing. Blowouts (and earlier quarters) stay calm. Config "card_style": "classic" turns it off.
+PRETTY_CSS = """
+.bg::after{content:'';position:absolute;inset:0;pointer-events:none;opacity:.6;
+ background:repeating-linear-gradient(135deg,rgba(255,255,255,.022) 0 2px,transparent 2px 7px),
+ radial-gradient(circle at 50% -10%,rgba(255,255,255,.12),transparent 55%)}
+.sbx{position:relative;box-shadow:inset 0 0 0 1px rgba(255,255,255,.10),inset 0 1px 0 rgba(255,255,255,.12),
+ 0 10px 30px rgba(0,0,0,.4)!important}
+.sbx .sc{text-shadow:0 3px 0 rgba(0,0,0,.28),0 0 22px rgba(255,255,255,.18)}
+.sbx .mid .yd{letter-spacing:.5px;text-shadow:0 2px 12px rgba(0,0,0,.5)}
+.pp5,.imp,.fx,.cv,.hl{background-image:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,0) 50%)!important}
+.imp,.fx,.cv,.hl{box-shadow:inset 0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.1),0 8px 22px rgba(0,0,0,.3)}
+.fx{box-shadow:inset 4px 0 0 var(--a),inset 0 0 0 1px rgba(255,255,255,.09),0 8px 22px rgba(0,0,0,.3)}
+.pp5:not(.hot):not(.h3):not(.h4):not(.mk):not(.to){box-shadow:inset 0 0 0 1px rgba(255,255,255,.10),inset 0 1px 0 rgba(255,255,255,.12),
+ 0 0 0 2px color-mix(in srgb,var(--a) 55%,transparent),0 8px 22px rgba(0,0,0,.3)}
+.pp5 .gn b{text-shadow:0 0 18px rgba(126,226,168,.6)}
+.pp5 .nm{letter-spacing:.3px;text-shadow:0 2px 10px rgba(0,0,0,.4)}
+.imp .ih,.fx .fh{color:#dde3ee!important}
+.imp .im b.u,.fx .u{text-shadow:0 0 10px rgba(126,226,168,.5)}
+.tnx{display:inline-block;margin-left:10px;padding:2px 9px;border-radius:6px;font-size:15px;font-weight:900;letter-spacing:1.4px;
+ vertical-align:middle}
+.tn1 .tnx{background:#ff9a00;color:#1b1000}
+.tn1 .sbx{box-shadow:inset 0 0 0 2px rgba(255,154,0,.75),0 0 24px rgba(255,140,0,.35),0 10px 30px rgba(0,0,0,.4)!important}
+.tn2 .tnx{background:#ff6a00;color:#fff}
+.tn2 .sbx{box-shadow:inset 0 0 0 3px #ff8a00,0 0 34px rgba(255,120,0,.7)!important}
+.tn2 .sbx .clk{color:#ffb347!important;text-shadow:0 0 14px rgba(255,140,0,.85)}
+.tn3 .tnx{background:#ff2d2d;color:#fff}
+.tn3{box-shadow:inset 0 0 0 4px #ff2d2d,inset 0 0 60px rgba(255,0,0,.35)!important}
+.tn3 .sbx{box-shadow:inset 0 0 0 3px #ff2d2d,0 0 40px rgba(255,30,30,.8)!important}
+.tn3 .sbx .clk{color:#ff6b6b!important;text-shadow:0 0 16px rgba(255,40,40,.95)}
+"""
+ANIM_CSS += """
+@keyframes a_tnclk{0%,100%{opacity:1}50%{opacity:.45}}
+@keyframes a_tnred{0%,100%{box-shadow:inset 0 0 0 4px #ff2d2d,inset 0 0 60px rgba(255,0,0,.35)}
+ 50%{box-shadow:inset 0 0 0 6px #ff5a5a,inset 0 0 110px rgba(255,0,0,.55)}}
+.tn2 .sbx .clk,.tn3 .sbx .clk{animation:a_tnclk 1s ease-in-out infinite}
+.tn3{animation:a_tnred 1s ease-in-out infinite}
+"""
+
+
+def _tension(html_text):
+    """0 calm, 1 crunch time, 2 last 5:00, 3 last 2:00 / OT (one-score game only)."""
+    m = re.search(r"·\s*(Q(\d)|OT)\s*(\d+):(\d+)\s*·\s*[A-Z]{2,3}\s*(\d+)–(\d+)\s*[A-Z]{2,3}", html_text)
+    if not m:
+        return 0
+    q = 5 if m.group(1) == "OT" else int(m.group(2))
+    secs = int(m.group(3)) * 60 + int(m.group(4))
+    if abs(int(m.group(5)) - int(m.group(6))) > 8 or q < 4:
+        return 0
+    if q >= 5 or secs <= 120:
+        return 3
+    return 2 if secs <= 300 else 1
+
+
+_inline_ready_plain = _inline_ready
+
+
+def _inline_ready(html_text):
+    h = _inline_ready_plain(html_text)
+    if CONFIG.get("card_style", "pretty") != "pretty" or "class='lsx'" not in h:
+        return h
+    try:
+        css = PRETTY_CSS
+        i = h.find("<div class='sbx'>")
+        tcs = re.findall(r"--tc:(#[0-9a-fA-F]{6})", h[i:i + 4000]) if i >= 0 else []
+        if len(tcs) >= 2:                                       # both teams' colours across the scoreboard
+            ca, cb = tcs[0], tcs[1]
+            css += (f".sbx{{background:linear-gradient(90deg,{ca}66 0%,{ca}22 30%,rgba(9,12,22,.78) 46%,"
+                    f"rgba(9,12,22,.78) 54%,{cb}22 70%,{cb}66 100%),rgba(9,12,22,.7)!important}}"
+                    f".hl{{background:linear-gradient(90deg,{ca}26,rgba(9,12,22,.55) 40%,rgba(9,12,22,.55) 60%,{cb}26)!important}}")
+        t = 0 if "class='card wo" in h else _tension(h)        # the walk-off tier has its own treatment
+        if t:
+            label = {1: "CRUNCH TIME", 2: "FINAL 5:00", 3: "🚨 2-MIN DRILL"}[t]
+            h = h.replace("<div class='card", f"<div class='card tn{t}", 1)
+            if "class='mkx'" not in h and "class='tox'" not in h:   # those cards say it in their own big label
+                h = re.sub(r"(<div class='clk'>[^<]*)(</div>)", lambda mm: mm.group(1) + f"<span class='tnx'>{label}</span>" + mm.group(2),
+                           h, count=1)
+        return h.replace("</style>", css + "</style>", 1)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"card style skipped: {ex}")
+        return h
 
 
 if __name__ == "__main__":
