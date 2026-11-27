@@ -3846,7 +3846,10 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
     a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
     q = play.get("period", {}).get("number", 0)
     st = _NFL_ST.get("st") or {}
-    prev_win = st.get("nfl_td_win") or {}
+    snap = st.get("nfl_td_win") or {}
+    # the win-chance swing compares with the last snapshot only if it's recent (another game's posts in between,
+    # or a stale snapshot, would otherwise show a swing that has nothing to do with this play)
+    prev_win = snap.get("w", {}) if isinstance(snap.get("w"), dict) and time.time() - snap.get("t", 0) < 900 else {}
 
     def panel(role, name, gain_):
         pid = boxscore_id(summary, name)
@@ -3887,7 +3890,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
         me = ol[rid]
         pw = prev_win.get(str(rid))
         sw = ""
-        if pw is not None and abs(me["win"] - pw) >= 1:
+        if pw is not None and me["win"] - pw >= 1:             # their player just scored: only an upward swing
             d = me["win"] - pw
             sw = f" <span class='{'u' if d > 0 else 'dn'}'>{'▲' if d > 0 else '▼'}{abs(d):.0f}</span>"
         on = H.escape(live["rosters"][opp]["manager"])
@@ -3941,7 +3944,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
                        f"<span>is unrostered — available on waivers</span><span></span><span></span></div>")
     rows = [r for r in rows if r]
     mus = [f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>"] if rows else []
-    st["nfl_td_win"] = {str(r): v["win"] for r, v in ol.items()}
+    st["nfl_td_win"] = {"t": time.time(), "w": {str(r): v["win"] for r, v in ol.items()}}
 
     body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>TOUCHDOWN · {'OT' if q > 4 else 'Q' + str(q)} "
             f"{play.get('clock', {}).get('displayValue', '')} · {away['team']['abbreviation']} {a_s}–{h_s} "
@@ -10993,7 +10996,8 @@ _nfl_td_html_dst = nfl_td_fantasy_html
 
 def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
     st = _NFL_ST.get("st") or {}
-    prev_win = dict(st.get("nfl_td_win") or {})
+    snap = st.get("nfl_td_win") or {}
+    prev_win = dict(snap.get("w") or {}) if isinstance(snap.get("w"), dict) and time.time() - snap.get("t", 0) < 900 else {}
     h = _nfl_td_html_dst(event, play, summary, live, ol, base, *a, **k)
     td = td_parse(play)
     if not td.get("sub"):
@@ -11023,7 +11027,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
                 pw = prev_win.get(str(rid))
                 d = ol[rid]["win"] - pw if pw is not None else 0
                 win = (f"win <b>{ol[rid]['win']:.0f}%</b>"
-                       + (f" <span class='{'u' if d > 0 else 'dn'}'>{'▲' if d > 0 else '▼'}{abs(d):.0f}</span>" if abs(d) >= 1 else ""))
+                       + (f" <span class='u'>▲{d:.0f}</span>" if d >= 1 else ""))
             row = (f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(o['manager'])}</b>"
                    f"<span>{H.escape(nick)} D/ST <b class='u'>+{gain:g}</b> ({bits})"
                    + (f" → now <b>{fmt_pts(dn['pts'])}</b> pts" if dn else "") + f"</span>"
