@@ -11704,5 +11704,48 @@ def nfl_prime_slot(slot, st, getctx, force=False):
     return active
 
 
+
+# ---- one-off preview: config nfl.test_missed_kick = "<play id>" posts that missed kick once to #rick-only through the
+#      real path (still first, then the GIF swap), ignoring the age limit. Done once (state "test_mk_done"), then ignored.
+_run_nfl_testmk = run_nfl
+
+
+def run_nfl(st, date=None, force=False):
+    out = _run_nfl_testmk(st, date, force)
+    try:
+        _test_missed_kick(st)
+    except Exception as ex:  # noqa: BLE001
+        _log_plain(f"test missed kick skipped: {ex}")
+    return out
+
+
+def _test_missed_kick(st):
+    global NFL_HOOK
+    pid = str((CONFIG.get("nfl") or {}).get("test_missed_kick") or "").strip()
+    done = st.setdefault("test_mk_done", [])
+    if not pid or pid in done or not ALERT_HOOK or CAPTURE is not None or DRY_RUN:
+        return
+    done.append(pid)                                    # once, whatever happens
+    week = int(fetch_url(f"{SLEEPER}/state/nfl").get("week") or 0)
+    events = fetch(f"football/nfl/scoreboard?seasontype=2&week={week}").get("events", [])
+    e = next((x for x in events if pid.startswith(str(x["id"]))), None)
+    if e is None:
+        _log_plain(f"test missed kick {pid}: game not found this week")
+        return
+    summary = fetch(f"football/nfl/summary?event={e['id']}")
+    hit = next(((k, p, i) for k, p, i in missed_kicks(summary, e) if k in (pid, pid + "-pat")), None)
+    ctx = nfl_ctx(st, events)
+    if not hit or not ctx:
+        _log_plain(f"test missed kick {pid}: not a crunch-time missed kick (or no league data)")
+        return
+    keep = NFL_HOOK
+    NFL_HOOK = ALERT_HOOK
+    try:
+        ok = post_missed_kick(e, hit[1], summary, ctx, hit[2])
+    finally:
+        NFL_HOOK = keep
+    _log_plain(f"test missed kick {pid}: posted to #rick-only ({ok})")
+
+
 if __name__ == "__main__":
     main()
