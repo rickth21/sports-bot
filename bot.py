@@ -8075,30 +8075,62 @@ def _wb_adopt(st, sport, b):
     old.pop(k, None)
 
 
+def _wb_next_start(sport, b, data):
+    """Unix time of the next kick-off / tip-off of this board's week (the board starts updating then), or None."""
+    if sport == "nfl":
+        k = data.get("next_kick")
+        return int(k.timestamp()) if k else None
+    now = datetime.now(ET)
+    for i in range(7):
+        d = (now - timedelta(hours=6) + timedelta(days=i)).strftime("%Y%m%d")
+        evs = (_wb_nba_today()[1] if i == 0 else
+               _wb_cached(("nbaday", d), 6 * 3600, lambda d=d: fetch(f"basketball/nba/scoreboard?dates={d}").get("events", [])))
+        ts = sorted(parse_time(e["date"]).timestamp() for e in evs if e["status"]["type"]["state"] == "pre")
+        ts = [t for t in ts if t < b.get("end", 9e12)]
+        if ts:
+            return int(ts[0])
+    return None
+
+
+def _wb_line(b, data, last, live_next=None):
+    """One text line on the board: when it was drawn and when it will next change (Discord shows both live)."""
+    state = _wb_state(data)
+    lt = int(last)
+    if state == "final":
+        return f"✅ Final · last updated <t:{lt}:R>"
+    nxt = int(live_next or last + 300) if state == "live" else _wb_next_start(b["sport"], b, data)
+    if not nxt or nxt <= time.time():
+        return f"🕒 Last updated <t:{lt}:R>"
+    return f"🕒 Last updated <t:{lt}:R> · Next update <t:{nxt}:R> (<t:{nxt}:t>)"
+
+
 def _wb_publish(st, b, pend):
     sport = b["sport"]
     if b.get("msg"):
         if CONFIG.get("paused"):
             return
-        r = discord_edit(_wb_hook(b), b["msg"], pend["png"])
+        r = discord_edit(_wb_hook(b), b["msg"], pend["png"], "live.png", content=pend.get("line"))
         if r is None:                                       # someone deleted it: post a new one next time
             _log_plain(f"{sport} weekly board message is gone: posting a fresh one")
             b["msg"] = None
             b["pin"] = {"state": "none"}
         elif r:
-            b.update(final=pend["final"], sig=pend["sig"], shown=time.time(), layout=pend.get("layout"))
+            b.update(final=pend["final"], sig=pend["sig"], shown=time.time(), layout=pend.get("layout"),
+                     line=pend.get("line"), drawn=pend["t"])
         return
     _LAST_MSG.clear()
     routed = _wb_routed_to_alert()
     if sport == "nba":
         _POSTER["name"] = (CONFIG.get("nba") or {}).get("bot_name") or "Donald 🏀"
     try:
-        ok = discord(NFL_HOOK if sport == "nfl" else NBA_HOOK, [], "live", files={"live.png": pend["png"]})
+        ok = discord(NFL_HOOK if sport == "nfl" else NBA_HOOK, [], "live", content=pend.get("line"),
+                     files={"live.png": pend["png"]})
     finally:
         _POSTER.clear()
     if ok and _LAST_MSG.get("id"):
         b.update(msg=str(_LAST_MSG["id"]), ch=str(_LAST_MSG.get("channel_id") or ""), where="alert" if routed else "main",
-                 posted=time.time(), final=pend["final"], sig=pend["sig"], shown=time.time(), layout=pend.get("layout"))
+                 posted=time.time(), final=pend["final"], sig=pend["sig"], shown=time.time(), layout=pend.get("layout"),
+                 line=pend.get("line"), drawn=pend["t"])
         b["pin"] = {"state": "none"}
         _log_plain(f"{sport} weekly board posted for week {b['week']}")
     elif ok and CAPTURE is not None:
@@ -8178,11 +8210,17 @@ def maybe_live_board(st):
             b["was_live"] = state == "live"
             sig = _wb_sig(data)
             if b.get("msg") and sig == b.get("sig") and not ended and not relayout:
-                continue                                    # nothing moved: leave the message as it is
+                # nothing moved: keep the image; while live, only the "next update" time moves on (text-only edit)
+                line = _wb_line(b, data, b.get("drawn") or b.get("shown") or now, now + 300)
+                if state == "live" and line != b.get("line") and not CONFIG.get("paused"):
+                    if discord_edit(_wb_hook(b), b["msg"], None, "live.png", content=line):
+                        b["line"] = line
+                continue
             png = render_card(wb_html(data))
             if png:
                 _WB_PENDING[key] = {"png": png, "t": now, "show": max(now + delay, b["start"]),
-                                    "final": state == "final", "sig": sig, "layout": _code_version()}
+                                    "final": state == "final", "sig": sig, "layout": _code_version(),
+                                    "line": _wb_line(b, data, now, now + 300)}
                 w = _WB_PENDING[key]["show"]
                 if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
                     _NEXT_WAKE["t"] = w

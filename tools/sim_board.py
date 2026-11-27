@@ -135,6 +135,7 @@ def lifecycle():
     discord_msgs = {}          # id -> {"pinned": bool}
     notices = []               # system "pinned a message" lines in the channel
     nxt = {"id": 1000}
+    lines = []                 # (post/edit, with image, text line) for every board message write
 
     def fake_post(hook, embed, label="", content=None, files=None):
         nxt["id"] += 1
@@ -142,6 +143,7 @@ def lifecycle():
         bot._LAST_MSG.update(id=str(nxt["id"]), channel_id="42")
         discord_msgs[str(nxt["id"])] = {"pinned": False, "edits": 0, "hook": hook}
         log.append((clock.t, "post", str(nxt["id"]), hook))
+        lines.append(("post", bool(files), content))
         return True
 
     def fake_edit(hook, mid, png=None, name="live.png", content=None):
@@ -149,6 +151,7 @@ def lifecycle():
             return None
         discord_msgs[mid]["edits"] += 1
         log.append((clock.t, "edit", mid))
+        lines.append(("edit", png is not None, content))
         return True
 
     def fake_api(method, path, body=None):
@@ -285,6 +288,12 @@ def lifecycle():
     nfl_unpin = [x[0] for x in log if x[1] == "unpin" and nfl_post and x[2] == nfl_post[2]]
     if not nfl_unpin or not (at(8, 12) <= nfl_unpin[0] <= at(8, 12) + 400):
         problems.append("NFL board not unpinned Tuesday 12:00")
+    if any(not (c or "").startswith(("🕒 Last updated <t:", "✅ Final · last updated <t:")) for _, _, c in lines):
+        problems.append(f"a board write without the last/next update line: {[x for x in lines if not x[2]][:3]}")
+    if any("\n" in (c or "") or "@" in (c or "") for _, _, c in lines):
+        problems.append("update line is not one line / has a mention")
+    print("update lines:", len(lines), "writes,", sum(1 for k, img, _ in lines if k == "edit" and not img), "text-only;",
+          "e.g.", next((c for _, _, c in lines if c and "Next" in c), None), "|", next((c for _, _, c in lines if c and "Final" in c), None))
     nba_posts = [x for x in log if x[1] == "post" and x[3] == "nba-hook"]
     print("NBA posts:", [(fmt(x[0]), x[2]) for x in nba_posts])
     if len(nba_posts) != 1 or not (at(7, 12) <= nba_posts[0][0] <= at(7, 12) + 5):
