@@ -13011,5 +13011,231 @@ HYPE_CSS += """
 .pp5.h4.dstc::after{opacity:.3}
 """
 
+
+# ---- NIGHT'S OVER (Rick: "when the final game of the day has been played … a new post to just sit there which can provide
+#   info about the gameweek and whats happened so far and the play off outlook and how things have changed, can change or
+#   will change … pretty graphic, as wide as the others … informative and useful and fun" · "5mins after the final score
+#   post of the day"). Fires once per NFL game day: the day's last game has had its final-score post, nothing is live and
+#   the next kick-off is 4h+ away -> 5 min later, one wide card:
+#     matchups so far (score, projected final, win chance and how it moved since the week began, players left)
+#     playoff race (every team: chance now, change this week, what a win / a loss does)
+#     star + dud of the night, the biggest thing still on the line, and what's left to play.
+#   Config nfl.night_posts (default on).
+NIGHT_CSS = """
+body,.card{width:1100px!important}
+.top{font-size:20px!important;letter-spacing:1.5px!important}.top img{width:32px!important;height:32px!important}
+.top .pill{font-size:18px!important;padding:5px 12px!important}
+.hl{margin:10px 0 0!important;padding:10px 18px!important}.hl .h1{font-size:28px!important}.hl .h2{font-size:20px!important}
+.ng{display:grid;grid-template-columns:1.18fr 1fr;gap:14px;margin-top:12px}
+.nb{background:rgba(255,255,255,.06);border-radius:14px;padding:10px 14px;display:flex;flex-direction:column}
+.nh{font-size:13px;letter-spacing:1.6px;font-weight:900;color:#aab3c5;margin-bottom:6px;display:flex;justify-content:space-between}
+.nh em{font-style:normal;color:#7d879b;letter-spacing:.6px;font-weight:700}
+.mu{display:grid;grid-template-columns:1fr 64px 1fr;align-items:center;gap:8px;padding:7px 0}
+.mu+.mu{border-top:1px solid rgba(255,255,255,.07)}
+.ms{display:flex;flex-direction:column;gap:2px;min-width:0}.ms.r{align-items:flex-end;text-align:right}
+.ms .n{font-size:18px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.ms .p{font-size:15px;font-weight:700;color:#cfd5e1;white-space:nowrap}.ms .p b{color:#fff;font-size:17px}
+.ms .p i{font-style:normal;color:#8b95a8}
+.ms.fav .n{color:#7ee2a8}
+.mw{text-align:center;font-size:12px;font-weight:800;color:#8b95a8;line-height:1.2}
+.mw b{display:block;font-size:20px;color:#fff;font-weight:900}
+.mbar{grid-column:1/-1;height:7px;border-radius:4px;background:#3a4152;overflow:hidden;display:flex}
+.mbar i{display:block;height:100%}
+.dl{font-size:13px;font-weight:900;padding:0 5px;border-radius:5px;margin-left:5px}
+.dl.u{color:#062312;background:#4be38e}.dl.d{color:#fff;background:#e5484d}.dl.z{color:#c3cad8;background:rgba(255,255,255,.1)}
+.pr{display:grid;grid-template-columns:32px minmax(0,1fr) 54px 50px 140px;align-items:center;gap:5px;padding:4px 0;font-size:16px;flex:1}
+.pr+.pr{border-top:1px solid rgba(255,255,255,.06)}
+.pr .k{color:#ffd166;font-weight:900;text-align:center}
+.pr .n{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pr .po{font-weight:900;font-size:19px;text-align:right;font-variant-numeric:tabular-nums}
+.pr .wl{font-size:13px;overflow:hidden;color:#aab3c5;font-weight:700;white-space:nowrap;text-align:right}.pr .wl b{color:#7ee2a8}.pr .wl s{text-decoration:none;color:#ff9a9e}
+.pr.cut{border-top:2px dashed rgba(255,209,102,.55)!important}
+.pr.out{opacity:.55}
+.nt{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
+.ntl{background:rgba(255,255,255,.06);border-radius:14px;padding:10px 14px;min-width:0;text-align:left!important;letter-spacing:0!important}
+.ntl *{text-align:left!important;letter-spacing:0;text-transform:none}
+.ntl small{display:block;font-size:12px;letter-spacing:1.4px!important;text-transform:uppercase!important;font-weight:900;color:#aab3c5}
+.ntl b{display:block;font-size:19px;font-weight:900;margin-top:3px;line-height:1.2}
+.ntl span{display:block;font-size:15px;color:#cfd5e1;font-weight:600;margin-top:2px;line-height:1.3}
+.ntl.star{box-shadow:inset 0 0 0 2px #ffd166}.ntl.dud{box-shadow:inset 0 0 0 2px #e5484d}.ntl.line{box-shadow:inset 0 0 0 2px #7aa7ff}
+.nf{margin-top:10px;font-size:15px;color:#aab3c5;font-weight:700;text-align:center}.nf b{color:#fff}
+"""
+
+
+def _night_day_key(ts):
+    """The NFL game day a kick-off belongs to: UK date, with anything before 06:00 counted as the night before."""
+    return (datetime.fromtimestamp(ts, timezone.utc).astimezone(UK) - timedelta(hours=6)).strftime("%Y-%m-%d")
+
+
+def nfl_night_html(events, ctx, day_events):
+    import html as H
+    live, ol, base = ctx["live"], ctx["ol"], ctx["base"]
+    week = live["week"]
+    d = wb_nfl_data(week, events, live=live) or {}
+    sides = d.get("sides") or {}
+    ppl = _wb_people("nfl")
+    man = lambda r: live["rosters"][r]["manager"]  # noqa: E731
+    done = sum(1 for e in events if e["status"]["type"]["state"] == "post")
+    left_games = len(events) - done
+    nxt = min((parse_time(e["date"]) for e in events if e["status"]["type"]["state"] == "pre"), default=None)
+    nxt_txt = f"next {nxt.astimezone(UK):%a %H:%M} UK" if nxt else "week done"
+    day = parse_time(day_events[-1]["date"]).astimezone(UK) - timedelta(hours=6)
+    dayname = f"{day:%A}"
+
+    def delta(now, then, unit="%"):
+        if then is None:
+            return ""
+        dv = now - then
+        if abs(dv) < 0.5:
+            return "<span class='dl z'>–</span>"
+        return f"<span class='dl {'u' if dv > 0 else 'd'}'>{'▲' if dv > 0 else '▼'}{abs(dv):.0f}</span>"
+
+    # matchups: biggest swing since the week began first
+    pairs = sorted(live["pairs"], key=lambda ab: -abs(ol[ab[0]]["win"] - (base.get(ab[0]) or {}).get("win", ol[ab[0]]["win"])))
+    mus = []
+    for a, b in pairs:
+        wa = ol[a]["win"]
+        cols = []
+        for r, w, right in ((a, wa, False), (b, 100 - wa, True)):
+            sd = sides.get(str(r)) or sides.get(r) or {}
+            bw = (base.get(r) or {}).get("win")
+            cols.append(f"<div class='ms{' r' if right else ''}{' fav' if w >= 50 else ''}'><div class='n'>{H.escape(man(r))}</div>"
+                        f"<div class='p'><b>{sd.get('points', 0):.1f}</b> <i>→ proj {sd.get('proj', 0):.0f}</i></div>"
+                        f"<div class='p'>win <b>{w:.0f}%</b>{delta(w, bw)} <i>· {sd.get('left', 0)} left</i></div></div>")
+        mus.append(f"<div class='mu'>{cols[0]}<div class='mw'>vs<b>{max(wa, 100 - wa):.0f}%</b></div>{cols[1]}"
+                   f"<div class='mbar'><i style='width:{wa:.1f}%;background:#4be38e'></i><i style='flex:1;background:#e5484d'></i></div></div>")
+
+    # playoff race: best chance first, the cut line drawn where the teams in a playoff place end
+    order = sorted(ol, key=lambda r: (-ol[r]["po"], (ppl.get(r) or {}).get("rank", 99)))
+    spots = int((CONFIG.get("nfl") or {}).get("playoff_teams") or 6)
+    prs = []
+    for i, r in enumerate(order):
+        o, bp = ol[r], (base.get(r) or {}).get("po")
+        wl = (f"win <b>{_pct(o['po_w'])}</b> · lose <s>{_pct(o['po_l'])}</s>"
+              if o.get("po_w") is not None and o.get("po_l") is not None and abs(o["po_w"] - o["po_l"]) >= 3 else
+              ("locked in" if o["po"] >= 99.5 else "out" if o["po"] < 0.5 else ""))
+        rk = (ppl.get(r) or {}).get("rank", "–")
+        prs.append(f"<div class='pr{' cut' if i == spots else ''}{' out' if o['po'] < 0.5 else ''}'><span class='k'>#{rk}</span>"
+                   f"<span class='n'>{H.escape(man(r))}</span><span class='po'>{o['po']:.0f}%</span>"
+                   f"<span>{delta(o['po'], bp)}</span><span class='wl'>{wl}</span></div>")
+
+    # star + dud of the night (rostered starters in today's games)
+    proj = nfl_projections(week)
+    got = []
+    for e in day_events:
+        try:
+            sm = fetch(f"football/nfl/summary?event={e['id']}")
+            for pl in nfl_fantasy(sm):
+                o = league_owner(pl.get("id"), pl["name"])
+                if o and o.get("starting"):
+                    pj = proj.get(str(_sl_pid(pl["name"], pl.get("team", "")) or ""), 0.0)
+                    if pl.get("pos") == "DEF":
+                        pj = proj.get(sl_team(pl.get("team", "")), pj)
+                    got.append((pl, o, pj))
+        except Exception as ex:  # noqa: BLE001
+            log(f"night card players skipped: {ex}")
+    star = max(got, key=lambda x: x[0]["pts"], default=None)
+    duds = [x for x in got if x[2] >= 8]
+    dud = min(duds, key=lambda x: x[0]["pts"] - x[2], default=None)
+    tiles = []
+    if star:
+        p_, o_, pj = star
+        tiles.append(f"<div class='ntl star'><small>⭐ STAR OF THE NIGHT</small><b>{H.escape(p_['name'])} · {fmt_pts(p_['pts'])}</b>"
+                     f"<span>for {H.escape(o_['manager'])}{f' (proj {pj:.1f})' if pj else ''}</span></div>")
+    if dud and dud[0]["pts"] < dud[2]:
+        p_, o_, pj = dud
+        tiles.append(f"<div class='ntl dud'><small>💀 DUD OF THE NIGHT</small><b>{H.escape(p_['name'])} · {fmt_pts(p_['pts'])}</b>"
+                     f"<span>projected {pj:.1f}. {H.escape(o_['manager'])} would like a word.</span></div>")
+    # the most still on the line
+    swing = max((r for r in ol if ol[r].get("po_w") is not None and ol[r].get("po_l") is not None),
+                key=lambda r: ol[r]["po_w"] - ol[r]["po_l"], default=None)
+    if swing is not None:
+        o = ol[swing]
+        tiles.append(f"<div class='ntl line'><small>🔥 MOST ON THE LINE</small><b>{H.escape(man(swing))}</b>"
+                     f"<span>playoffs {o['po_w']:.0f}% with a win, {o['po_l']:.0f}% with a loss</span></div>")
+    close = min(live["pairs"], key=lambda ab: abs(ol[ab[0]]["win"] - 50))
+    if len(tiles) < 3:
+        tiles.append(f"<div class='ntl line'><small>⚖️ CLOSEST MATCHUP</small><b>{H.escape(man(close[0]))} v {H.escape(man(close[1]))}</b>"
+                     f"<span>{ol[close[0]]['win']:.0f}% – {100 - ol[close[0]]['win']:.0f}% with {left_games} games to go</span></div>")
+    # headline: the night in one line
+    big = max(ol, key=lambda r: abs(ol[r]["po"] - ((base.get(r) or {}).get("po", ol[r]["po"]))))
+    bd = ol[big]["po"] - (base.get(big) or {}).get("po", ol[big]["po"])
+    h1 = f"That's {dayname} done · week {week}"
+    h2 = (f"Biggest mover: <b>{H.escape(man(big))}</b> {'up' if bd > 0 else 'down'} {abs(bd):.0f} points in the playoff race this week"
+          if abs(bd) >= 2 else f"{done} of {len(events)} games played · {left_games} to come")
+    most_left = max(live["rosters"], key=lambda r: (sides.get(str(r)) or sides.get(r) or {}).get("left", 0))
+    ml = (sides.get(str(most_left)) or sides.get(most_left) or {}).get("left", 0)
+    foot = (f"<b>{done}</b> of {len(events)} games played · <b>{left_games}</b> to come · {nxt_txt}"
+            + (f" · most players left: <b>{H.escape(man(most_left))}</b> ({ml})" if ml else ""))
+    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL · WEEK {week} · {dayname.upper()} DONE</div>"
+            f"<div class='pill'>🌙 NIGHT'S OVER</div></div>"
+            f"<div class='hl'><div class='h1'>{H.escape(h1)}</div><div class='h2'>{h2}</div></div>"
+            f"<div class='ng'><div class='nb'><div class='nh'>MATCHUPS SO FAR<em>win chance · ▲▼ since the week began</em></div>{''.join(mus)}</div>"
+            f"<div class='nb'><div class='nh'>PLAYOFF RACE<em>chance now · this week</em></div>{''.join(prs)}</div></div>"
+            f"<div class='nt'>{''.join(tiles[:3])}</div><div class='nf'>{foot}</div>")
+    return _card("--a:#5b7bd5;--h:#d50a0a", body, extra_css=NIGHT_CSS, width=1100)
+
+
+def post_nfl_night(events, ctx, day_events):
+    html_text = nfl_night_html(events, ctx, day_events)
+    png = render_card(html_text)
+    if not png:
+        return False
+    return discord(NFL_HOOK, [], "night.png", files={"night.png": png}) is True
+
+
+def nfl_night_check(st, force=False):
+    if not (CONFIG.get("nfl") or {}).get("night_posts", True) or SILENT:
+        return
+    try:
+        events = fetch("football/nfl/scoreboard").get("events", [])
+    except Exception as ex:  # noqa: BLE001
+        log(f"night post check skipped: {ex}")
+        return
+    if not events or any(e["status"]["type"]["state"] == "in" for e in events):
+        return
+    played = [e for e in events if e["status"]["type"]["state"] == "post"]
+    if not played:
+        return
+    last = max(played, key=lambda e: parse_time(e["date"]))
+    key = _night_day_key(parse_time(last["date"]).timestamp())
+    nights = st.setdefault("nfl_night", {})
+    if nights.get(key) == "posted":
+        return
+    nxt = [parse_time(e["date"]) for e in events if e["status"]["type"]["state"] == "pre"]
+    if nxt and min(nxt) - now_utc() < timedelta(hours=4):
+        return                                                    # more football soon: not the end of the day yet
+    day_events = sorted([e for e in played if _night_day_key(parse_time(e["date"]).timestamp()) == key], key=lambda e: e["date"])
+    # the day's final-score posts: wait until they've gone, then 5 more minutes
+    gs = [st["nfl"].get(e["id"]) or {} for e in day_events]
+    if not force and not all(g.get("final") for g in gs):
+        return
+    if (now_utc() - parse_time(last["date"])) > timedelta(hours=14):
+        nights[key] = "posted"                                    # long gone (bot was down): don't post a stale one
+        return
+    seen = nights.setdefault(key + ":seen", time.time())
+    if not force and time.time() - seen < 300:
+        return
+    ctx = nfl_ctx(st, events)
+    if not ctx:
+        return
+    if post_nfl_night(events, ctx, day_events):
+        nights[key] = "posted"
+        log(f"NIGHT'S OVER posted for {key}")
+    for k in list(nights)[:-30]:
+        nights.pop(k, None)
+
+
+_run_nfl_night = run_nfl
+
+
+def run_nfl(st, date=None, force=False):
+    active = _run_nfl_night(st, date, force)
+    try:
+        nfl_night_check(st)
+    except Exception as ex:  # noqa: BLE001
+        log(f"night post error: {ex}")
+    return active
+
 if __name__ == "__main__":
     main()
