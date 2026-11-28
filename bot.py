@@ -6542,7 +6542,7 @@ def prev_season_best(sport, row, event=None):
             if event is not None and str(gid) == str(event.get("id")):
                 continue
             n = lambda k: num(str(s_.get(k, "0")).split("-")[0])  # noqa: E731
-            pts, reb, ast, stl, blk, tov, tpm = (n("points") or n("PTS"), n("rebounds") or n("REB"), n("assists") or n("AST"),
+            pts, reb, ast, stl, blk, tov, tpm = (n("points") or n("PTS"), n("totalRebounds") or n("rebounds") or n("REB"), n("assists") or n("AST"),
                                                  n("steals") or n("STL"), n("blocks") or n("BLK"),
                                                  n("turnovers") or n("TO"), n("threePointFieldGoalsMade-threePointFieldGoalsAttempted") or n("3PT"))
             doubles = sum(1 for x in (pts, reb, ast, stl, blk) if x >= 10)
@@ -13244,6 +13244,251 @@ def run_nfl(st, date=None, force=False):
     except Exception as ex:  # noqa: BLE001
         log(f"night post error: {ex}")
     return active
+
+# ------------------------------------------------ NBA Lock-In: each player counts ONE game a week (Sleeper Lock-In mode)
+# Rick: "i've already locked in Poeltl's other score, so his new score doesn't count". Sleeper's public matchup data
+# already counts the locked game (players_points = the locked score, not tonight's), so a starter whose counted score
+# matches an EARLIER game this week, and not tonight's, is locked: show it on the card and leave tonight out of the totals.
+
+_NBA_LIVE_C = {"t": 0, "v": None}
+_NBA_GL_C = {}
+_LK_HEAD = {}
+
+
+def _nba_live_cached():
+    """{sleeper pid: set of counted scores} this week. Sleeper's public servers don't always agree on a fresh lock-in
+    (some reads still show tonight's score), so read a few times: an earlier game only ever shows up when it's locked."""
+    if time.time() - _NBA_LIVE_C["t"] > 60:
+        out = {}
+        try:
+            lid = str(CONFIG["nba"].get("sleeper_league_id") or "").strip()
+            week = fetch_url(f"{SLEEPER}/state/nba").get("week")
+            for i in range(20):
+                for m in fetch_url(f"{SLEEPER}/league/{lid}/matchups/{week}?r={int(time.time() * 1000) + i}") or []:
+                    for pid, v in (m.get("players_points") or {}).items():
+                        if v is not None:
+                            out.setdefault(pid, set()).add(round(float(v), 1))
+            seen = _lock_seen()
+            if seen.get("week") != week:
+                seen.clear()
+                seen.update(week=week, pts={})
+            for pid, vs in seen["pts"].items():       # a lock seen once stays (they can't be undone)
+                out.setdefault(pid, set()).update(vs)
+            _NBA_LIVE_C["week"] = week
+        except Exception as e:  # noqa: BLE001
+            _log_plain(f"lock-in check: Sleeper unavailable: {e}")
+        _NBA_LIVE_C["v"], _NBA_LIVE_C["t"] = out, time.time()
+    return _NBA_LIVE_C["v"]
+
+
+_LOCK_FILE = Path(__file__).with_name("nba_locks.json")
+_LOCK_MEM = {}
+
+
+def _lock_seen():
+    if not _LOCK_MEM:
+        try:
+            _LOCK_MEM.update(json.loads(_LOCK_FILE.read_text()))
+        except Exception:  # noqa: BLE001
+            _LOCK_MEM.update(week=None, pts={})
+    return _LOCK_MEM
+
+
+def _lock_remember(pid, pts):
+    m = _lock_seen()
+    if m.get("week") != _NBA_LIVE_C.get("week"):
+        m.clear()
+        m.update(week=_NBA_LIVE_C.get("week"), pts={})
+    if pts not in m["pts"].get(pid, []):
+        m["pts"].setdefault(pid, []).append(pts)
+        try:
+            _LOCK_FILE.write_text(json.dumps(m))
+        except Exception as e:  # noqa: BLE001
+            _log_plain(f"lock-in memory not saved: {e}")
+
+
+def _nba_fp_stats(s):
+    """Fantasy points for one ESPN game-log line, in the league's scoring."""
+    sc = league_scoring("nba")
+    v = lambda k: float(sc.get(k) or 0)  # noqa: E731
+    n = lambda *ks: next((num(str(s[k]).split("-")[0]) for k in ks if s.get(k) not in (None, "", "--")), 0.0)  # noqa: E731
+    pts, reb, ast = n("points", "PTS"), n("totalRebounds", "rebounds", "REB"), n("assists", "AST")
+    stl, blk, tov = n("steals", "STL"), n("blocks", "BLK"), n("turnovers", "TO")
+    tpm = n("threePointFieldGoalsMade-threePointFieldGoalsAttempted", "3PT")
+    d = sum(1 for x in (pts, reb, ast, stl, blk) if x >= 10)
+    fp = pts * v("pts") + reb * v("reb") + ast * v("ast") + stl * v("stl") + blk * v("blk") + tov * v("to") + tpm * v("tpm")
+    fp += (v("dd") if d >= 2 else 0) + (v("td") if d >= 3 else 0) + (v("qd") if d >= 4 else 0)
+    fp += (v("bonus_pt_40p") if pts >= 40 else 0) + (v("bonus_pt_50p") if pts >= 50 else 0)
+    fp += (v("bonus_reb_20p") if reb >= 20 else 0) + (v("bonus_ast_15p") if ast >= 15 else 0)
+    return round(fp, 1)
+
+
+def _nba_recent_games(eid):
+    """[(tip-off datetime UTC, event id, fpts)] for the player's regular-season games (ESPN game log, cached 10 min)."""
+    c = _NBA_GL_C.get(eid)
+    if c and time.time() - c[0] < 600:
+        return c[1]
+    out = []
+    try:
+        g = fetch_url(f"https://site.web.api.espn.com/apis/common/v3/sports/basketball/nba/athletes/{eid}/gamelog")
+        names, evs = g.get("names") or [], g.get("events") or {}
+        st = next((x for x in g.get("seasonTypes") or [] if "Regular" in (x.get("displayName") or "")), None)
+        for cat in (st or {}).get("categories") or []:
+            for ev in cat.get("events") or []:
+                gd = (evs.get(ev["eventId"]) or {}).get("gameDate")
+                if gd:
+                    t = datetime.fromisoformat(gd.replace("Z", "+00:00")).astimezone(timezone.utc)
+                    out.append((t, str(ev["eventId"]), _nba_fp_stats(dict(zip(names, ev.get("stats") or [])))))
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"lock-in check: game log unavailable for {eid}: {e}")
+    _NBA_GL_C[eid] = (time.time(), out)
+    return out
+
+
+def _nba_sleeper_pid(row):
+    """Sleeper id for an ESPN box-score row (Sleeper's NBA list has no ESPN ids): name + team, then a unique rostered name."""
+    ix, nk = _player_index("nba"), name_key(row.get("name", ""))
+    pid = ix["espn"].get(str(row.get("eid") or ""))
+    tm = NBA_ESPN_TO_SLEEPER.get(row.get("team") or "", row.get("team") or "")
+    pid = pid or ix["name_team"].get((nk, tm))
+    if not pid:
+        owned = [c for c in ix["name"].get(nk, []) if c in roster_pid_index("nba")]
+        pid = owned[0] if len(owned) == 1 else None
+    return pid
+
+
+def nba_lock_of(row, event=None):
+    """(locked fpts, 'Mon') when this player's counted score this week is an earlier game, else None."""
+    try:
+        if not row.get("owner") or not row.get("eid"):
+            return None
+        pid = _nba_sleeper_pid(row)
+        vals = [v for v in (_nba_live_cached() or {}).get(pid, ()) if abs(v - float(row.get("fp") or 0)) > 0.5] if pid else []
+        if not vals:
+            return None
+        tip = parse_time(event["date"]) if event and event.get("date") else datetime.now(timezone.utc)
+        for t, gid, fp in sorted(_nba_recent_games(str(row["eid"])), reverse=True):
+            if event and gid == str(event.get("id")):
+                continue
+            pp = next((v for v in vals if abs(fp - v) <= 0.15), None)
+            if pp is not None and tip - timedelta(days=7) < t < tip - timedelta(hours=2):
+                _lock_remember(pid, float(pp))
+                return float(pp), t.astimezone(ZoneInfo("America/New_York")).strftime("%a")
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"lock-in check skipped for {row.get('name')}: {e}")
+    return None
+
+
+def _nba_lock_rows(summary, event):
+    rows = nba_league_rows(summary)
+    for r in rows:
+        if r.get("owner") and r.get("starting"):
+            r["lock"] = nba_lock_of(r, event)
+            if r["lock"]:
+                _LK_HEAD[r["name"]] = r["lock"]
+    return rows
+
+
+NBA_LOCK_CSS = """
+.bd.lk{background:#7c3aed!important;color:#fff!important;box-shadow:0 0 12px rgba(124,58,237,.55)}
+.pr2:has(.bd.lk){box-shadow:inset 5px 0 0 #7c3aed!important}
+.pr2.lkd .fp{background:#241d33!important;color:#94a3b8!important;box-shadow:inset 0 0 0 2px #7c3aed!important;filter:none!important}
+.pr2.lkd .fp small{color:#94a3b8!important}
+.pr2.lkd .fp i.lk{color:#e9d5ff!important;font-style:normal;font-size:.72em!important;line-height:1.15;white-space:normal}
+.tpr .ow5 em.lk{background:#7c3aed!important;color:#fff!important}
+.tpr:has(em.lk){box-shadow:inset 4px 0 0 #7c3aed}
+.tpr.lkd .fp5{opacity:.5;text-decoration:line-through}
+"""
+
+
+def _lock_mark(h, rows, name_tag, row_cls):
+    import html as H
+    for r in rows:
+        lk = r.get("lock")
+        if not lk:
+            continue
+        i = h.find(f"{name_tag}{H.escape(r['name'])}")
+        s = h.rfind(f"<div class='{row_cls}", 0, i) if i >= 0 else -1
+        if s < 0:
+            continue
+        e = _div_end(h, s)
+        blk = h[s:e]
+        tag = "🔒 LOCKED"
+        nb = blk.replace(f"<div class='{row_cls}", f"<div class='{row_cls} lkd", 1)
+        nb = nb.replace("<span class='bd st'>STARTING</span>", f"<span class='bd lk'>{tag}</span>", 1)
+        nb = nb.replace("<em class='s'>STARTING</em>", f"<em class='lk'>{tag}</em>", 1)
+        nb = re.sub(r"<i class='(?:up|dn)'>[^<]*</i>", f"<i class='lk'>{lk[1]}'s {fmt_pts(lk[0])} counts</i>", nb, count=1)
+        nb = re.sub(r"(<span class='pj5[^']*'>)", rf"\1<b class='lk'>{lk[1]}'s {fmt_pts(lk[0])} counts</b> ", nb, count=1)
+        h = h[:s] + nb + h[e:]
+    return h
+
+
+def _lock_totals(h, rows_list):
+    """'N league players · X fpts from starters' → only the points that count, + how many were locked."""
+    out, pos = [], 0
+    pat = re.compile(r"((?:<b>)?\d+(?:</b>)? league players · (?:<b>)?)([\d.,]+)((?:</b>)? fpts from starters)")
+    k = 0
+    for m in pat.finditer(h):
+        rows = rows_list[k] if k < len(rows_list) else []
+        k += 1
+        locked = [r for r in rows if r.get("lock")]
+        if not locked:
+            continue
+        cnt = sum(r["fp"] for r in rows if r.get("owner") and r.get("starting") and not r.get("lock"))
+        out.append((m.start(), m.end(), f"{m.group(1)}{fmt_pts(cnt)}{m.group(3).replace('fpts from starters', 'fpts count')}"
+                                        f" · 🔒 {len(locked)} locked in"))
+    for s, e, t in reversed(out):
+        h = h[:s] + t + h[e:]
+    return h
+
+
+_nba_game_html_nolock = nba_game_fantasy_html
+
+
+def nba_game_fantasy_html(event, summary, live, max_rows=7):
+    h = _nba_game_html_nolock(event, summary, live, max_rows)
+    try:
+        rows = _nba_lock_rows(summary, event)
+        if any(r.get("lock") for r in rows):
+            h = _lock_totals(_lock_mark(h, rows, "<div class='nm2'>", "pr2"), [rows])
+            h = h.replace("</style>", NBA_LOCK_CSS + "</style>", 1)
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"lock-in marks skipped: {e}")
+    return h
+
+
+_nba_batch_html_nolock = nba_batch_html
+
+
+def nba_batch_html(mode, events, summaries, live, title):
+    h = _nba_batch_html_nolock(mode, events, summaries, live, title)
+    try:
+        rl = [(_nba_lock_rows(s, e) if s else []) for e, s in zip(events, summaries)]
+        if any(r.get("lock") for rows in rl for r in rows):
+            for rows in rl:
+                h = _lock_mark(h, rows, "<span class='nm5'>", "tpr")
+            h = _lock_totals(h, [[r for r in rows if r.get("owner")] for rows in rl if any(r.get("owner") for r in rows)])
+            h = h.replace("</style>", NBA_LOCK_CSS + "</style>", 1)
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"lock-in marks skipped: {e}")
+    return h
+
+
+_post_card_nolock = _post_card
+
+
+def _post_card(hook, html_text, content, embed, name):
+    """A headline naming a locked-in player says tonight doesn't count."""
+    try:
+        for nm, (pts, day) in list(_LK_HEAD.items()):
+            for k in ("img_title", "title"):
+                t = embed.get(k)
+                if t and nm in t and "LOCKED" not in t:
+                    embed[k] = f"{t} · 🔒 doesn't count (locked {fmt_pts(pts)} {day})"
+    finally:
+        _LK_HEAD.clear()
+    return _post_card_nolock(hook, html_text, content, embed, name)
+
 
 if __name__ == "__main__":
     main()
