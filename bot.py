@@ -13256,28 +13256,28 @@ _LK_HEAD = {}
 
 
 def _nba_live_cached():
-    """{sleeper pid: set of counted scores} this week. Sleeper's public servers don't always agree on a fresh lock-in
-    (some reads still show tonight's score), so read a few times: an earlier game only ever shows up when it's locked."""
+    """Several reads of this week's counted scores [{sleeper pid: pts}]. Sleeper's public servers don't agree: some lag
+    (even from before tonight's game), some show a fresh lock-in late, so the lock check looks at each read on its own."""
     if time.time() - _NBA_LIVE_C["t"] > 60:
-        out = {}
+        reads = []
         try:
             lid = str(CONFIG["nba"].get("sleeper_league_id") or "").strip()
             week = fetch_url(f"{SLEEPER}/state/nba").get("week")
             for i in range(20):
+                rd = {}
                 for m in fetch_url(f"{SLEEPER}/league/{lid}/matchups/{week}?r={int(time.time() * 1000) + i}") or []:
                     for pid, v in (m.get("players_points") or {}).items():
                         if v is not None:
-                            out.setdefault(pid, set()).add(round(float(v), 1))
+                            rd[pid] = round(float(v), 1)
+                reads.append(rd)
             seen = _lock_seen()
             if seen.get("week") != week:
                 seen.clear()
                 seen.update(week=week, pts={})
-            for pid, vs in seen["pts"].items():       # a lock seen once stays (they can't be undone)
-                out.setdefault(pid, set()).update(vs)
             _NBA_LIVE_C["week"] = week
         except Exception as e:  # noqa: BLE001
             _log_plain(f"lock-in check: Sleeper unavailable: {e}")
-        _NBA_LIVE_C["v"], _NBA_LIVE_C["t"] = out, time.time()
+        _NBA_LIVE_C["v"], _NBA_LIVE_C["t"] = reads, time.time()
     return _NBA_LIVE_C["v"]
 
 
@@ -13357,20 +13357,52 @@ def _nba_sleeper_pid(row):
     return pid
 
 
-def nba_lock_of(row, event=None):
-    """(locked fpts, 'Mon') when this player's counted score this week is an earlier game, else None."""
+def nba_lock_of(row, event=None, game_rows=()):
+    """Locked-in score for this row: config nba.manual_locks {"week": N, "players": {"Name": [pts, "Mon"]}} always;
+    automatic detection from Sleeper's public data only with nba.lock_detect (off: those numbers proved unreliable)."""
+    cfg = CONFIG["nba"]
+    man = cfg.get("manual_locks") or {}
+    if man.get("players", {}).get(row.get("name")):
+        try:
+            week = _NBA_LIVE_C.get("week") or fetch_url(f"{SLEEPER}/state/nba").get("week")
+            _NBA_LIVE_C["week"] = week
+            if int(man.get("week") or -1) == int(week):
+                pts, day = man["players"][row["name"]]
+                return float(pts), str(day)
+        except Exception as e:  # noqa: BLE001
+            _log_plain(f"manual lock check skipped: {e}")
+    if not cfg.get("lock_detect", False):
+        return None
+    return _nba_lock_auto(row, event, game_rows)
+
+
+def _nba_lock_auto(row, event=None, game_rows=()):
+    """(locked fpts, 'Mon') when this player's counted score this week is an earlier game, else None.
+    Only reads that are up to date for THIS game count (another league player in it already shows tonight's final
+    score); a lagging read still shows everyone's score from before tonight and would look like a lock."""
     try:
         if not row.get("owner") or not row.get("eid"):
             return None
         pid = _nba_sleeper_pid(row)
-        vals = [v for v in (_nba_live_cached() or {}).get(pid, ()) if abs(v - float(row.get("fp") or 0)) > 0.5] if pid else []
+        if not pid:
+            return None
+        fp = float(row.get("fp") or 0)
+        others = [(p2, float(r2.get("fp") or 0)) for r2 in game_rows if r2 is not row and r2.get("owner")
+                  for p2 in [_nba_sleeper_pid(r2)] if p2 and p2 != pid]
+        vals = set(_lock_seen().get("pts", {}).get(pid, []))
+        for rd in _nba_live_cached() or []:
+            v = rd.get(pid)
+            if v is None or abs(v - fp) <= 0.5:
+                continue
+            if any(abs(rd.get(p2, -999) - f2) <= 0.15 for p2, f2 in others if f2 >= 1):
+                vals.add(v)
         if not vals:
             return None
         tip = parse_time(event["date"]) if event and event.get("date") else datetime.now(timezone.utc)
-        for t, gid, fp in sorted(_nba_recent_games(str(row["eid"])), reverse=True):
+        for t, gid, gfp in sorted(_nba_recent_games(str(row["eid"])), reverse=True):
             if event and gid == str(event.get("id")):
                 continue
-            pp = next((v for v in vals if abs(fp - v) <= 0.15), None)
+            pp = next((v for v in vals if abs(gfp - v) <= 0.15), None)
             if pp is not None and tip - timedelta(days=7) < t < tip - timedelta(hours=2):
                 _lock_remember(pid, float(pp))
                 return float(pp), t.astimezone(ZoneInfo("America/New_York")).strftime("%a")
@@ -13383,7 +13415,7 @@ def _nba_lock_rows(summary, event):
     rows = nba_league_rows(summary)
     for r in rows:
         if r.get("owner") and r.get("starting"):
-            r["lock"] = nba_lock_of(r, event)
+            r["lock"] = nba_lock_of(r, event, rows)
             if r["lock"]:
                 _LK_HEAD[r["name"]] = r["lock"]
     return rows

@@ -59,10 +59,17 @@
       "mention_role_id": ""
     },
     "season_high_min": 20,
-    "hype": [30, 40],
-    "redo_td_posts": ["4018730803336"],
+    "hype": [
+      30,
+      40
+    ],
+    "redo_td_posts": [
+      "4018730803336"
+    ],
     "test_missed_kick": "4018730804208",
-    "redo_fg_posts": ["4018730804781:1575685305435164702"],
+    "redo_fg_posts": [
+      "4018730804781:1575685305435164702"
+    ],
     "weekly_board": {
       "note": "One matchups board per week (points now, projected final, win %, players left), edited every 5 min while games are live. Posted 00:00 UK on the day of the week's first game (normally Friday), pinned until Tuesday 12:00 UK. Pinning needs DISCORD_BOT_TOKEN on the server.",
       "enabled": true,
@@ -111,12 +118,26 @@
       "mention_role_id": ""
     },
     "season_high_min": 40,
-    "hype": [55, 70],
+    "hype": [
+      55,
+      70
+    ],
     "weekly_board": {
       "note": "Weekly matchups board, posted + pinned Monday 12:00 UK and replaced the next Monday 12:00 UK.",
       "enabled": true,
       "pin": true,
       "idle_refresh_min": 0
+    },
+    "lock_detect": false,
+    "manual_locks": {
+      "note": "Sleeper Lock-In: players whose locked score counts this week, e.g. {\"Jakob Poeltl\": [36.5, \"Mon\"]}",
+      "week": 6,
+      "players": {
+        "Jakob Poeltl": [
+          36.5,
+          "Mon"
+        ]
+      }
     }
   },
   "spoiler_delay_seconds": 15,
