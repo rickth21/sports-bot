@@ -14,8 +14,6 @@ What it posts
   NBA  full-time per game (grouped only when another game is in its final minute), half-time for grouped
        tip-offs, weekly recap.
   Both leagues: every trade, with grades and a verdict (NFL trades ping @NFLfantasy).
-  Weekly matchups board (one per league per week, pinned, edited every 5 min while games are live):
-       NFL 00:00 UK on the day of the first game (normally Friday) -> Tuesday 12:00; NBA Monday 12:00 -> Monday 12:00.
 
 How this file is organised
   It grew in layers. A later section may wrap an earlier function: it saves the old one
@@ -44,7 +42,6 @@ Usage:
   python3 bot.py --preview-nba 20261124
   python3 tools/check.py                  run before every upload
   python3 tools/golden.py ...             before/after check for clean-ups (see the file)
-  python3 tools/sim_board.py cards DIR    weekly matchups board mock-ups (sim_board.py lifecycle: pin/unpin dry run)
 """
 import json
 import os
@@ -178,92 +175,57 @@ def discord(hook, embed, label="", content=None, files=None):
         payload["content"] = content
         roles = re.findall(r"<@&(\d+)>", content)
         payload["allowed_mentions"] = {"parse": [], "roles": roles}
-    variants = []
-    if files and not embeds and _v2_on():
-        variants.append((_v2_payload(payload, files), True))          # newer layout: shown bigger in the channel
-    variants.append((payload, False))
+    if files:
+        boundary = "----sportsbot" + str(int(time.time() * 1000))
+        parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
+                 f"Content-Type: application/json\r\n\r\n".encode() + json.dumps(payload).encode() + b"\r\n"]
+        for i, (name, data) in enumerate(files.items()):
+            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[{i}]\"; filename=\"{name}\"\r\n"
+                         f"Content-Type: {'image/gif' if name.endswith('.gif') else 'image/png'}\r\n\r\n".encode() + data + b"\r\n")
+        body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+        ctype = f"multipart/form-data; boundary={boundary}"
+    else:
+        body, ctype = json.dumps(payload).encode(), "application/json"
     timed = hook != globals().get("ALERT_HOOK")          # health alerts never wait for a game's send slot
     if timed:
         _wait_for_send_slot()
-    for pl, v2 in variants:
-        body, ctype = _post_body(pl, files)
-        url = hook + ("&" if "?" in hook else "?") + "wait=true" + ("&with_components=true" if v2 else "")
-        for _ in range(5):
-            _t_up = time.time()
-            req = urllib.request.Request(url, data=body, method="POST",
-                                         headers={"Content-Type": ctype, "User-Agent": "DiscordBot (sports-bot, 1.0)"})
-            try:
-                with urllib.request.urlopen(req, timeout=20) as resp:
-                    try:
-                        m = json.loads(resp.read().decode() or "{}")
-                        _LAST_MSG.clear()
-                        _LAST_MSG.update({"id": m.get("id"), "channel_id": m.get("channel_id"), "v2": v2,
-                                          "att": [(a.get("id"), a.get("filename")) for a in m.get("attachments") or []]})
-                    except Exception:  # noqa: BLE001
-                        pass
-                    _POSTLOG.append({"t": round(time.time()), "kind": kind,
-                                     "where": "nfl" if hook == NFL_HOOK else ("nba" if hook == NBA_HOOK else "alert")})
-                    del _POSTLOG[:-600]
-                    if timed:
-                        _UPLOAD_SECS.append(time.time() - _t_up)
-                        del _UPLOAD_SECS[:-10]
-                        _record_send(True)
-                    time.sleep(1)
-                    return True
-            except urllib.error.HTTPError as e:
-                if e.code == 429:
-                    try:
-                        wait = float(json.loads(e.read().decode()).get("retry_after", 2))
-                    except Exception:  # noqa: BLE001
-                        wait = 2
-                    time.sleep(wait + 0.5)
-                    continue
-                msg = e.read().decode()[:300]
-                if v2 and e.code == 400:                  # newer layout refused: send it the classic way
-                    _log_plain(f"Discord refused the new layout ({msg[:120]}): posting the classic way")
-                    break
-                log(f"Discord rejected post ({e.code}): {msg}")
-                return 400 <= e.code < 500   # bad payload: don't retry forever
-            except Exception as e:  # noqa: BLE001
-                log(f"Discord post failed: {e}")
-                return False
-        else:
+    for _ in range(5):
+        _t_up = time.time()
+        req = urllib.request.Request(
+            hook + ("&" if "?" in hook else "?") + "wait=true", data=body, method="POST",
+            headers={"Content-Type": ctype,
+                     "User-Agent": "DiscordBot (sports-bot, 1.0)"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                try:
+                    m = json.loads(resp.read().decode() or "{}")
+                    _LAST_MSG.clear()
+                    _LAST_MSG.update({"id": m.get("id"), "channel_id": m.get("channel_id")})
+                except Exception:  # noqa: BLE001
+                    pass
+                _POSTLOG.append({"t": round(time.time()), "kind": kind,
+                                 "where": "nfl" if hook == NFL_HOOK else ("nba" if hook == NBA_HOOK else "alert")})
+                del _POSTLOG[:-600]
+                if timed:
+                    _UPLOAD_SECS.append(time.time() - _t_up)
+                    del _UPLOAD_SECS[:-10]
+                    _record_send(True)
+                time.sleep(1)
+                return True
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                try:
+                    wait = float(json.loads(e.read().decode()).get("retry_after", 2))
+                except Exception:  # noqa: BLE001
+                    wait = 2
+                time.sleep(wait + 0.5)
+                continue
+            log(f"Discord rejected post ({e.code}): {e.read().decode()[:300]}")
+            return 400 <= e.code < 500   # bad payload: don't retry forever
+        except Exception as e:  # noqa: BLE001
+            log(f"Discord post failed: {e}")
             return False
     return False
-
-
-V2_FLAG = 1 << 15                     # IS_COMPONENTS_V2: Discord's newer message layout (bigger images)
-
-
-def _v2_on():
-    return CONFIG.get("discord_layout", "v2") == "v2"
-
-
-def _v2_components(name, text=None):
-    comps = [{"type": 10, "content": str(text)[:3900]}] if text else []
-    return comps + [{"type": 12, "items": [{"media": {"url": f"attachment://{name}"}}]}]
-
-
-def _v2_payload(payload, files):
-    """The same post in the components-v2 layout: optional text, then the image in a media gallery."""
-    out = {k: v for k, v in payload.items() if k not in ("content", "embeds")}
-    out["flags"] = (payload.get("flags") or 0) | V2_FLAG
-    out["components"] = _v2_components(next(iter(files)), payload.get("content"))
-    out["attachments"] = [{"id": i, "filename": n} for i, n in enumerate(files)]
-    out.setdefault("allowed_mentions", {"parse": []})
-    return out
-
-
-def _post_body(payload, files):
-    if not files:
-        return json.dumps(payload).encode(), "application/json"
-    boundary = "----sportsbot" + str(int(time.time() * 1000))
-    parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"
-             f"Content-Type: application/json\r\n\r\n".encode() + json.dumps(payload).encode() + b"\r\n"]
-    for i, (name, data) in enumerate(files.items()):
-        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[{i}]\"; filename=\"{name}\"\r\n"
-                     f"Content-Type: {'image/gif' if name.endswith('.gif') else 'image/png'}\r\n\r\n".encode() + data + b"\r\n")
-    return b"".join(parts) + f"--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
 
 
 # -------------------------------------------------------------------- state
@@ -671,8 +633,7 @@ def commentary(td, detail_text, down_text, nick, lead_txt, seed):
     elif td["kind"] == "int":
         line = f"PICKED OFF! {td['scorer']} jumps the route and takes it {yds} yards the other way for six!"
     elif td["kind"] in ("fumble",):
-        line = (f"Ball's out! It squirts loose in the end zone and {td['scorer']} falls on it — touchdown!" if not td.get("yds")
-                else f"Ball's out! {td['scorer']} scoops it up and rumbles {yds} yards to the end zone!")
+        line = f"Ball's out! {td['scorer']} scoops it up and rumbles {yds} yards to the end zone!"
     elif td["kind"] in ("punt", "kick", "blocked"):
         line = f"{td['scorer']} takes it back {yds} yards — special teams touchdown!"
     if not line:
@@ -1137,14 +1098,6 @@ def _page(body, css_vars, height):
 
 def nfl_headshot(pid):
     return f"https://a.espncdn.com/i/headshots/nfl/players/full/{pid}.png" if pid and str(pid).isdigit() else ""
-
-
-def pid_attr(pid):
-    """data-pid='<sleeper id>' for a player photo, so the rank badge never has to guess who it is."""
-    try:
-        return f" data-pid='{pid}'" if pid and re.fullmatch(r"\w+", str(pid)) else ""
-    except Exception:  # noqa: BLE001
-        return ""
 
 
 def team_cols(away, home):
@@ -2293,14 +2246,14 @@ def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=7):
         m = mu.get(r["owner"])
         mt = (f"<div class='mt'>proj <b class='{'w' if m[0] >= m[2] else 'l'}'>{m[0]:.1f}</b> – {m[2]:.1f}<br>vs {H.escape(m[1])}</div>"
               if m else "")
-        prs.append(f"<div class='pr2{' lead' if i == 0 else ''}'><img src='{H.escape(nfl_headshot(r.get('id')))}'{pid_attr(_sl_pid(r['name'], r.get('team', '')))}>"
+        prs.append(f"<div class='pr2{' lead' if i == 0 else ''}'><img src='{H.escape(nfl_headshot(r.get('id')))}'>"
                    f"<div><div class='nm2'>{H.escape(r['name'])}<span>{r['team']} · {r.get('pos', '')}</span></div>"
                    f"<div class='ln'>{H.escape(r['line'])}</div></div>"
                    f"{pj_box(r['pts'], pregame_proj('nfl', r, live), r['elite'], game_frac(event, 'nfl'))}"
                    f"<div><div class='ow'>{H.escape(r['owner'])}</div>"
                    f"<span class='bd {'st' if r['starting'] else 'bn'}'>{'STARTING' if r['starting'] else 'BENCH'}</span></div>{mt}</div>")
     if fa and fa["pts"] >= 12:
-        prs.append(f"<div class='pr2'><img src='{H.escape(nfl_headshot(fa.get('id')))}'{pid_attr(_sl_pid(fa['name'], fa.get('team', '')))}>"
+        prs.append(f"<div class='pr2'><img src='{H.escape(nfl_headshot(fa.get('id')))}'>"
                    f"<div><div class='nm2'>{H.escape(fa['name'])}<span>{fa['team']} · {fa.get('pos', '')}</span></div>"
                    f"<div class='ln'>{H.escape(fa['line'])}</div></div>{pj_box(fa['pts'], pregame_proj('nfl', fa, live), False, game_frac(event, 'nfl'))}"
                    f"<div><div class='ow'>Nobody</div><span class='bd fa'>FREE AGENT</span></div><div class='mt'>waiver pickup?</div></div>")
@@ -2334,9 +2287,8 @@ def _card(css_vars, body, height=None, extra_css="", width=880):
             f"<style>{NFL_CSS}{SLOT_CSS}{FAN_CSS}{RECAP_CSS}{OUT_CSS}{V2_CSS}{globals().get('V4_CSS', '')}{extra_css}"
             f"body,.card{{height:auto!important}}.card{{padding-bottom:6px}}{wide}</style></head><body>"
             f"<div class='card' style='{css_vars}'><div class='bg'></div><div class='in'>{body}</div></div>"
-            f"<script>addEventListener('load',()=>(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve())"
-            f".then(()=>setTimeout(()=>document.body.setAttribute('data-h',"
-            f"Math.ceil(document.querySelector('.card').getBoundingClientRect().height)),60)))</script></body></html>")
+            f"<script>addEventListener('load',()=>document.body.setAttribute('data-h',"
+            f"Math.ceil(document.querySelector('.card').getBoundingClientRect().height)))</script></body></html>")
 
 
 def render_card(html_text, width=None):
@@ -2819,7 +2771,9 @@ def nfl_prime_slot(slot, st, getctx, force=False):
         if stype["state"] == "in":
             active = True
             summary = fetch(f"football/nfl/summary?event={e['id']}")
-            plays = [p for p in summary.get("scoringPlays", []) if is_td_play(p, summary)]
+            plays = [p for p in summary.get("scoringPlays", [])
+                     if p.get("type", {}).get("abbreviation") == "TD"
+                     or "touchdown" in (p.get("type", {}).get("text", "").lower())]
             for i, p in enumerate(plays):
                 if p["id"] in g["tds"]:
                     continue
@@ -3507,12 +3461,6 @@ def nfl_projections(week):
     """Sleeper projections for the week, scored with the league's own settings: {sleeper pid: pts}."""
     if week in _PROJ:
         return _PROJ[week]
-    _PROJ[week] = _nfl_proj_fetch(week)
-    return _PROJ[week]
-
-
-def _nfl_proj_fetch(week):
-    """One fresh download of the week's Sleeper projections (no cache)."""
     out = {}
     try:
         season = fetch_url(f"{SLEEPER}/state/nfl").get("season")
@@ -3526,6 +3474,7 @@ def _nfl_proj_fetch(week):
                                                if k in sc and isinstance(v, (int, float)))
     except Exception as e:  # noqa: BLE001
         log(f"projections unavailable: {e}")
+    _PROJ[week] = out
     return out
 
 
@@ -3845,10 +3794,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
     a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
     q = play.get("period", {}).get("number", 0)
     st = _NFL_ST.get("st") or {}
-    snap = st.get("nfl_td_win") or {}
-    # the win-chance swing compares with the last snapshot only if it's recent (another game's posts in between,
-    # or a stale snapshot, would otherwise show a swing that has nothing to do with this play)
-    prev_win = snap.get("w", {}) if isinstance(snap.get("w"), dict) and time.time() - snap.get("t", 0) < 900 else {}
+    prev_win = st.get("nfl_td_win") or {}
 
     def panel(role, name, gain_):
         pid = boxscore_id(summary, name)
@@ -3863,7 +3809,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
                else "<b>Unrostered</b> — free agent")
         tot = f"<span>now <em>{fmt_pts(now)}</em> pts</span>" if now is not None else ""
         hot = " hot" if pj and now is not None and now >= pj else ""
-        return o, (f"<div class='pp5{hot}'><img src='{H.escape(hs)}'{pid_attr(_sl_pid(name, abbr))}><div><div class='role'>{role}</div>"
+        return o, (f"<div class='pp5{hot}'><img src='{H.escape(hs)}'><div><div class='role'>{role}</div>"
                    f"<div class='nm'>{H.escape(name)}</div><div class='gn'><b>+{gain_:.1f}</b>{tot}</div>{bar}"
                    f"<div class='ow3'>{own}</div></div></div>")
 
@@ -3889,7 +3835,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
         me = ol[rid]
         pw = prev_win.get(str(rid))
         sw = ""
-        if pw is not None and me["win"] - pw >= 1:             # their player just scored: only an upward swing
+        if pw is not None and abs(me["win"] - pw) >= 1:
             d = me["win"] - pw
             sw = f" <span class='{'u' if d > 0 else 'dn'}'>{'▲' if d > 0 else '▼'}{abs(d):.0f}</span>"
         on = H.escape(live["rosters"][opp]["manager"])
@@ -3943,7 +3889,7 @@ def nfl_td_fantasy_html(event, play, summary, live, ol, base, tag):
                        f"<span>is unrostered — available on waivers</span><span></span><span></span></div>")
     rows = [r for r in rows if r]
     mus = [f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>"] if rows else []
-    st["nfl_td_win"] = {"t": time.time(), "w": {str(r): v["win"] for r, v in ol.items()}}
+    st["nfl_td_win"] = {str(r): v["win"] for r, v in ol.items()}
 
     body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>TOUCHDOWN · {'OT' if q > 4 else 'Q' + str(q)} "
             f"{play.get('clock', {}).get('displayValue', '')} · {away['team']['abbreviation']} {a_s}–{h_s} "
@@ -4038,7 +3984,7 @@ def nfl_fg_html(event, play, summary, live, ol, base):
     own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
            else "<b>Unrostered</b> — free agent")
     hot = " hot" if pj and now is not None and now >= pj else ""
-    panel = (f"<div class='pair one'><div class='pp5{hot}'><img src='{H.escape(nfl_headshot(kid) or kt['team'].get('logo', ''))}'{pid_attr(_sl_pid(kicker, abbr))}><div>"
+    panel = (f"<div class='pair one'><div class='pp5{hot}'><img src='{H.escape(nfl_headshot(kid) or kt['team'].get('logo', ''))}'><div>"
              f"<div class='role'>KICKER · {abbr}</div><div class='nm'>{H.escape(kicker)}</div>"
              f"<div class='gn'><b>+{gain:g}</b>{f'<span>now <em>{fmt_pts(now)}</em> pts</span>' if now is not None else ''}</div>"
              f"{bar}<div class='ow3'>{own}</div></div></div></div>")
@@ -4133,7 +4079,7 @@ def nfl_prime_slot(slot, st, getctx, force=False):
             if e["status"]["type"]["state"] == "post":
                 # game just ended (walk-off): post any touchdown from the last few minutes before full-time
                 for p in summary.get("scoringPlays", []):
-                    if p["id"] in g["tds"] or not is_td_play(p, summary):
+                    if p["id"] in g["tds"] or (p.get("type") or {}).get("abbreviation") != "TD":
                         continue
                     _, d = play_detail(summary, p.get("id"))
                     wc = (d or {}).get("wallclock")
@@ -4161,12 +4107,8 @@ GC_CSS = """
 .sw5 .row{display:grid;grid-template-columns:90px 1fr 90px;align-items:center;gap:14px;margin-top:6px}
 .sw5 .lb{font-size:12px;letter-spacing:1.2px;font-weight:800;color:#c3cad8}
 .sw5 .lb.r{text-align:right}
-.sw5 .bar{position:relative;height:30px;border-radius:9px;overflow:hidden;background:rgba(255,255,255,.08);display:flex}
-.sw5 .bar div{height:30px}
-.sw5 .row{grid-template-columns:90px 1fr!important}
-.sw5 .sg{display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:900;color:#fff;white-space:nowrap;
- overflow:hidden;text-shadow:0 1px 2px rgba(0,0,0,.55)}
-.sw5 .sg.o{background:#c9ced8;color:#101522;text-shadow:none}
+.sw5 .bar{position:relative;height:14px;border-radius:999px;overflow:hidden;background:rgba(255,255,255,.08);display:flex}
+.sw5 .bar div{height:14px}
 .sw5 .big{display:flex;align-items:baseline;justify-content:center;gap:14px;font-size:30px;font-weight:900;margin-top:8px;
  font-variant-numeric:tabular-nums}
 .sw5 .big .from{color:#8b95a8}.sw5 .big .arr{font-size:22px;color:#c3cad8}
@@ -4222,27 +4164,14 @@ def nfl_gc_html(event, play, summary, live, ol, before, after):
     ca = vivid(gt["team"].get("color") or "1faa59")
     co = vivid(lt["team"].get("color") or "5b7bd5")
 
-    ga_, la_ = gt["team"]["abbreviation"], lt["team"]["abbreviation"]
-    import colorsys as _cs
-
-    def _pop(h):                                         # how much a colour stands out on the dark card
-        r, g_, b_ = (x / 255 for x in hex_rgb(h))
-        hh, ll, ss = _cs.rgb_to_hls(r, g_, b_)
-        return ss * min(ll, 0.6) + (0.25 if not (0.5 < hh < 0.75) else 0)      # blues stand out least on navy
-    cands = [vivid(c) for c in (gt["team"].get("color"), gt["team"].get("alternateColor")) if c]
-    cbar = max(cands, key=_pop) if cands else ca
-
-    def lab(ab, p):
-        return f"{ab} {p:.0f}%" if p >= 30 else (f"{p:.0f}%" if p >= 20 else "")
-
-    def bar(p):                                         # gaining team in its boldest colour, the other side light grey
-        return (f"<div class='bar'><div class='sg' style='width:{p:.1f}%;background:{cbar}'>{lab(ga_, p)}</div>"
-                f"<div class='sg o' style='width:{100 - p:.1f}%'>{lab(la_, 100 - p)}</div></div>")
+    def bar(p):
+        return (f"<div class='bar'><div style='width:{p:.1f}%;background:{ca}'></div>"
+                f"<div style='width:{100 - p:.1f}%;background:{co}88'></div></div>")
     sw = (f"<div class='sw5'><div class='ih'>WIN CHANCE · ESPN</div>"
           f"<div class='big'><span>{gt['team']['abbreviation']}</span><span class='from'>{g_before:.0f}%</span>"
           f"<span class='arr'>→</span><span>{g_after:.0f}%</span><span class='d u'>▲{abs(swing):.0f}</span></div>"
-          f"<div class='row'><span class='lb'>BEFORE</span>{bar(g_before)}</div>"
-          f"<div class='row'><span class='lb'>AFTER</span>{bar(g_after)}</div></div>")
+          f"<div class='row'><span class='lb'>BEFORE</span>{bar(g_before)}<span class='lb r'>{lt['team']['abbreviation']} {100 - g_before:.0f}%</span></div>"
+          f"<div class='row'><span class='lb'>AFTER</span>{bar(g_after)}<span class='lb r'>{lt['team']['abbreviation']} {100 - g_after:.0f}%</span></div></div>")
 
     # fantasy: defence that forced it gains, the player who gave it up loses
     sc = league_scoring("nfl")
@@ -4570,7 +4499,7 @@ def score_hero(event, a_s, h_s, clock_txt, sub="", hot=None, plus=None, big=None
         disc = f"<div class='disc'><img src='{H.escape(tm['team'].get('logo', ''))}'></div>"
         txt = (f"<div style='text-align:{'right' if right else 'left'}'><div class='nm'>"
                f"{H.escape(tm['team'].get('name') or ab)}</div><div class='sc {cls}' style='--hc:{hc}'>{sc}</div>{chip}</div>")
-        return f"<div class='tm{' r' if right else ''}' style='--tc:{hc}'>{(txt + disc) if right else (disc + txt)}</div>"
+        return f"<div class='tm{' r' if right else ''}'>{(txt + disc) if right else (disc + txt)}</div>"
     return (f"<div class='sbx'>{side(away, a_s, h_s, False)}<div class='mid'><div class='clk'>{H.escape(clock_txt)}</div>"
             f"{f'<div class=yd>{H.escape(big)}</div>' if big else ''}"
             f"{f'<div class=st>{H.escape(sub)}</div>' if sub else ''}</div>{side(home, h_s, a_s, True)}</div>")
@@ -5404,12 +5333,6 @@ def nba_rows(week):
     """Sleeper's NBA projections for one week: one row per game -> [(pid, US date, league fpts)]."""
     if week in _NBA_ROWS:
         return _NBA_ROWS[week]
-    _NBA_ROWS[week] = _nba_rows_fetch(week)
-    return _NBA_ROWS[week]
-
-
-def _nba_rows_fetch(week):
-    """One fresh download of Sleeper's NBA projections for the week (no cache)."""
     out = []
     try:
         season = fetch_url(f"{SLEEPER}/state/nba").get("season")
@@ -5422,12 +5345,12 @@ def _nba_rows_fetch(week):
             out.append((str(r.get("player_id")), r.get("date") or "", pts / (float(s.get("gp") or 1) or 1)))
     except Exception as e:  # noqa: BLE001
         _log_plain(f"NBA projections unavailable: {e}")
+    _NBA_ROWS[week] = out
     return out
 
 
-def best_lineup(slots, pids, pts, sport, picks=None):
-    """Best possible starting lineup points: fill the strictest slots first with the best eligible player.
-    picks: optional list that receives the chosen players."""
+def best_lineup(slots, pids, pts, sport):
+    """Best possible starting lineup points: fill the strictest slots first with the best eligible player."""
     allp = sleeper_players(sport)
     pos = {p: set((allp.get(p) or {}).get("fantasy_positions") or [(allp.get(p) or {}).get("position") or p]) for p in pids}
     for p in pids:
@@ -5441,8 +5364,6 @@ def best_lineup(slots, pids, pts, sport, picks=None):
             if pos[p] & el:
                 total += pts[p]
                 free.remove(p)
-                if picks is not None:
-                    picks.append(p)
                 break
     return total
 
@@ -5514,27 +5435,24 @@ def trade_eval(sport, t):
             return sum(wk_pts[w].get(p, 0) for w in weeks)
         n_units = max(len(weeks), 1)
     else:
-        # lock-in league: a starter's week counts ONE game, so a player's week is worth his lock-in value
-        # (optimal keep-or-play-on over that week's games), not the sum of his games
         weeks = list(range(week, last + 1))
-        wk_val = {}
-        games = {}
+        days = {}
         for w in weeks:
-            per = {}
-            for pid, d, v in sorted(nba_rows(w), key=lambda r: r[1]):
-                if v > 0:
-                    per.setdefault(pid, []).append((v, None))
-                    games[pid] = games.get(pid, 0) + 1
-            wk_val[w] = {pid: nba_lockin_value(None, g)[0] for pid, g in per.items()}
+            for pid, d, v in nba_rows(w):
+                days.setdefault(d, {})[pid] = v
+        games = {}
+        for d in days.values():
+            for pid in d:
+                games[pid] = games.get(pid, 0) + 1
 
         def ros(p):
-            return sum(wk_val[w].get(p, 0) for w in weeks)
+            return sum(d.get(p, 0) for d in days.values())
         n_units = max(len(weeks), 1)
 
     def lineup_total(roster):
         if sport == "nfl":
             return sum(best_lineup(slots, roster, wk_pts[w], "nfl") for w in weeks) / n_units
-        return sum(best_lineup(slots, [p for p in roster if p in wk_val[w]], wk_val[w], "nba") for w in weeks) / n_units
+        return sum(best_lineup(slots, [p for p in roster if p in d], d, "nba") for d in days.values()) / n_units
 
     fc = fantasycalc_values() if sport == "nfl" else {"players": {}}
 
@@ -5552,7 +5470,7 @@ def trade_eval(sport, t):
             p = allp.get(pid) or {}
             is_def = sport == "nfl" and p.get("position") == "DEF"
             r_ = ros(pid)
-            per = r_ / n_units                             # per week (NBA: lock-in value of his week)
+            per = r_ / (n_units if sport == "nfl" else max(games.get(pid, 0), 1))
             val = (fc["players"].get(pid) or {}).get("value", 0.0) if sport == "nfl" else r_
             assets.append({
                 "kind": "player", "pid": pid,
@@ -5789,7 +5707,7 @@ def trade_card_html(ev):
     sport = ev["sport"]
     sides = ev["sides"]
     logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
-    unit = "/wk"
+    unit = "/wk" if sport == "nfl" else "/g"
 
     def grade_cls(g):
         return {"A": "a", "B": "b", "C": "c"}.get(g[0], "d")
@@ -6542,7 +6460,7 @@ def prev_season_best(sport, row, event=None):
             if event is not None and str(gid) == str(event.get("id")):
                 continue
             n = lambda k: num(str(s_.get(k, "0")).split("-")[0])  # noqa: E731
-            pts, reb, ast, stl, blk, tov, tpm = (n("points") or n("PTS"), n("totalRebounds") or n("rebounds") or n("REB"), n("assists") or n("AST"),
+            pts, reb, ast, stl, blk, tov, tpm = (n("points") or n("PTS"), n("rebounds") or n("REB"), n("assists") or n("AST"),
                                                  n("steals") or n("STL"), n("blocks") or n("BLK"),
                                                  n("turnovers") or n("TO"), n("threePointFieldGoalsMade-threePointFieldGoalsAttempted") or n("3PT"))
             doubles = sum(1 for x in (pts, reb, ast, stl, blk) if x >= 10)
@@ -6788,7 +6706,7 @@ def render_anim(html_text, width=None):
     with tempfile.TemporaryDirectory() as d:
         src, grid, out = Path(d) / "card.html", Path(d) / "grid.html", Path(d) / "grid.png"
         src.write_text(card)
-        base = _gif_nice() + [chrome, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--virtual-time-budget=15000"]
+        base = [chrome, "--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--virtual-time-budget=15000"]
         try:
             dom = subprocess.run(base + [f"--window-size={width},3000", "--dump-dom", src.as_uri()],
                                  check=True, timeout=60, capture_output=True, text=True).stdout
@@ -6812,14 +6730,8 @@ def render_anim(html_text, width=None):
                 if scale != 1.0:
                     f = f.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
                 frames.append(f)
-            # one shared palette for every frame, built from frames across the whole loop (so glows and flashes
-            # have their colours too) and applied without dithering: static areas are identical in every frame
-            picks = frames[::5]
-            pw, ph = max(1, width // 2), max(1, height // 2)
-            sheet2 = Image.new("RGB", (pw, ph * len(picks)))
-            for k, f0 in enumerate(picks):
-                sheet2.paste(f0.resize((pw, ph)), (0, ph * k))
-            pal = sheet2.quantize(colors=255, method=Image.Quantize.MEDIANCUT)
+            # one shared palette keeps colours steady from frame to frame (no flicker) and the file small
+            pal = frames[0].quantize(colors=255, method=Image.Quantize.MEDIANCUT)
             q = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
             buf = __import__("io").BytesIO()
             q[0].save(buf, format="GIF", save_all=True, append_images=q[1:], loop=0,
@@ -7313,21 +7225,10 @@ def maybe_daily_race(st):
 
 
 
-# ------------------------------------------------ quality of life: live switches, catch-up, weekly matchups board, corrections, report
+# ------------------------------------------------ quality of life: live switches, catch-up, live scoreboard, corrections, report
 
 # ---- pause / test mode switches, re-read from GitHub every 2 minutes (no restart needed)
 _LIVE_CFG = {"t": 0.0, "paused": None}
-ENV_FILE = Path("/etc/sports-bot.env")                    # server secrets (e.g. a new DISCORD_BOT_TOKEN)
-
-
-def _env_mtime():
-    try:
-        return ENV_FILE.stat().st_mtime                   # readable even though the file itself is root-only
-    except OSError:
-        return None
-
-
-_ENV_AT_START = _env_mtime()
 
 
 def refresh_switches():
@@ -7351,11 +7252,6 @@ def refresh_switches():
             new = bool(remote) and hashlib.sha1(remote).digest() != hashlib.sha1(local).digest()
             remote_cfg = txt.encode()
             new = new or (bool(remote_cfg) and remote_cfg != (ROOT / "config.json").read_bytes())
-            if _ENV_AT_START is not None and _env_mtime() not in (None, _ENV_AT_START):
-                if not _LIVE_CFG.get("env_changed"):
-                    _log_plain("server settings changed (/etc/sports-bot.env): will restart at the next quiet moment")
-                _LIVE_CFG["env_changed"] = True
-                new = True
             if new and not _LIVE_CFG.get("new_code"):
                 _log_plain("new code/config on GitHub: will restart onto it at the next quiet moment")
             _LIVE_CFG["new_code"] = new
@@ -7498,855 +7394,153 @@ def maybe_catchup(st):
         st["catchups"] = done[-30:]
 
 
-def discord_edit(hook, message_id, png=None, name="live.png", content=None):
-    """Edit one of our own webhook messages: swap its image and/or text. Posts in the newer layout are edited in
-    that layout (image in a media gallery, text as a text block); classic posts the classic way."""
-    tries = []
-    if _v2_on() and (png or content is not None):
-        pl = {"flags": V2_FLAG, "components": _v2_components(name, content)}
-        if png:
-            pl["attachments"] = [{"id": 0, "filename": name}]
-        tries.append((pl, True))
-    classic = {}
-    if content is not None:
-        classic["content"] = content
-    if png:
-        classic["attachments"] = [{"id": 0, "filename": name}]
-    tries.append((classic, False))
-    for pl, v2 in tries:
-        body, ctype = _post_body(pl, {name: png} if png else None)
-        if not png:
-            body, ctype = json.dumps(pl).encode(), "application/json"
-        req = urllib.request.Request(f"{hook}/messages/{message_id}" + ("?with_components=true" if v2 else ""),
-                                     data=body, method="PATCH",
-                                     headers={"Content-Type": ctype, "User-Agent": "DiscordBot (sports-bot, 1.0)"})
-        try:
-            with urllib.request.urlopen(req, timeout=30):
-                return True
-        except urllib.error.HTTPError as e:
-            msg = e.read().decode()[:200]
-            if v2 and e.code == 400:
-                continue                                # a classic post: edit it the classic way
-            _log_plain(f"message edit failed ({e.code}): {msg}")
-            return e.code == 404 and None
-        except Exception as e:  # noqa: BLE001
-            _log_plain(f"message edit failed: {e}")
-            return False
-    return False
-
-
-# ---- 3) weekly matchups board: ONE message per fantasy week, pinned, edited in place
-#   NFL: posted 00:00 UK on the day of the week's first kick-off (normally Friday = Thursday night), pinned,
-#        unpinned Tuesday 12:00 UK.
-#   NBA: posted Monday 12:00 UK, pinned, replaced the next Monday 12:00 UK (old one unpinned, new one pinned).
-#   Each matchup: points now, projected final (points + Sleeper projections still to come), win chance,
-#   players / games left. Edited every 5 minutes while games are live (spoiler-safe: a snapshot is only shown
-#   spoiler_delay() after it was taken), hourly otherwise (lineups and projections move), once more at the end.
-#   Pinning needs a Discord bot token (DISCORD_BOT_TOKEN): webhooks can't pin. Without one the boards still post.
-import math as _math
-
-WB_CSS = """
-.wbh{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;margin:12px 2px 0}
-.wbh .h1{font-size:31px;font-weight:900;letter-spacing:-.3px;line-height:1.1;white-space:nowrap}
-.wbh .h2{font-size:17px;font-weight:700;color:#cfd5e1;text-align:right;line-height:1.3;white-space:nowrap}
-.wbh .h2 b{color:#fff;font-weight:900}
-.wbg{display:grid;grid-template-columns:1fr 1fr;gap:14px 16px;margin-top:6px}
-.wch{display:grid;grid-template-columns:minmax(0,1fr) 128px 100px;gap:10px;padding:0 14px 0 70px;
- font-size:13.5px;font-weight:900;letter-spacing:2px;color:#9aa3b5}
-.wch span{text-align:right}.wch span.w{text-align:center}.wch span.p{color:#ffd166}
-.wm{position:relative;background:rgba(255,255,255,.065);border-radius:14px;padding:3px 14px}
-.wm.close{box-shadow:inset 0 0 0 2px rgba(255,209,102,.6)}
-.wr{display:grid;grid-template-columns:46px minmax(0,1fr) 128px 100px;gap:10px;align-items:center;height:80px}
-.wr+.wr{border-top:1px solid rgba(255,255,255,.08)}
-.wr .wav,.wr img{width:46px;height:46px;border-radius:50%;object-fit:cover;background:#2a3246;display:flex;align-items:center;
- justify-content:center;font-size:21px;font-weight:900;color:#cfd5e1}
-.wr .wn{font-size:24px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.15;letter-spacing:-.2px}
-.wr .wn.s{font-size:20px}
-.wr .ws{font-size:18px;font-weight:700;color:#aab3c5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px}
-.wr .ws b{color:#fff;font-weight:900}.wr .ws .lv{color:#5ef08f;font-weight:800}.wr .ws .dn{color:#8b95a8}
-.wr .wnum{text-align:right;font-variant-numeric:tabular-nums;line-height:1}
-.wr .wpj{font-size:37px;font-weight:900;color:#ffd166;letter-spacing:-.6px}
-.wr .wno{font-size:18px;font-weight:800;color:#e6e9ef;margin-top:5px}.wr .wno i{font-style:normal;color:#9aa3b5;font-weight:700}
-.wr .wp{height:56px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:34px;font-weight:900;
- font-variant-numeric:tabular-nums;letter-spacing:-.6px;background:rgba(255,255,255,.07);color:#8b95a8}
-.wr .wp small{font-size:18px;margin-left:1px}
-.wr.fav .wp{background:linear-gradient(180deg,#4be38e,#1faa59);color:#062312;box-shadow:0 0 16px rgba(46,204,113,.35)}
-.wr.won .wp{background:linear-gradient(180deg,#ffe08a,#f5b942);color:#1b1305;box-shadow:0 0 16px rgba(245,185,66,.45);font-size:26px}
-.wr.lost .wp{font-size:24px}
-.wr.dog .wn,.wr.lost .wn{color:#c3c9d6}
-.wr.lost .wpj{color:#9aa3b5}
-.wtag{position:absolute;top:-10px;right:14px;font-size:12px;font-weight:900;letter-spacing:1.4px;padding:2px 9px;border-radius:6px;
- background:#ffd166;color:#1b1305}
-.wtag.lk{background:#3a4357;color:#e6e9ef}.wtag.fn{background:#e6e9ef;color:#101522}.wtag.cb{background:#ff8a3d;color:#1b0d03}
-.lv2{display:inline-block;background:#ff3d3d;color:#fff;font-weight:900;font-size:12px;letter-spacing:1.5px;padding:2px 8px;
- border-radius:5px;margin-right:8px}
-.lv2.f{background:#4b5563}.lv2.p{background:#1faa59}
-.top{font-size:21px!important;letter-spacing:1.5px!important}.top img{width:32px!important;height:32px!important}
-.top .pill{font-size:20px!important;padding:5px 12px!important}.lv2{font-size:18px!important}
-.nbar{font-size:22px!important;padding:8px 32px!important}
-.wbh .h2{font-size:22px!important}
-.wch{font-size:19px!important;padding-left:72px!important}
-.wr{height:80px!important}.wr .ws{font-size:22px!important}.wr .wno{font-size:22px!important}
-.wbh{flex-wrap:wrap;row-gap:4px}.wbh .h1{font-size:30px}.wr .wpj{font-size:35px}
-.wtag{font-size:16px!important;top:-17px!important;padding:1px 9px!important;line-height:1.3!important}
+# ---- 3) live scoreboard: one message per game night, edited in place every 5 minutes
+LIVE_CSS = """
+.lms{display:grid;grid-template-columns:1fr;gap:8px;margin-top:12px}
+.lm{display:grid;grid-template-columns:1fr 92px 170px 92px 1fr;grid-template-rows:auto auto;align-items:center;gap:2px 10px;background:rgba(255,255,255,.06);border-radius:12px;padding:10px 14px}
+.lm b{font-size:21px;font-weight:900;color:#cfd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lm b.w{color:#fff}.lm b.r{text-align:right}
+.lm .p{font-size:28px;font-weight:900;text-align:center;font-variant-numeric:tabular-nums}
+.wb{height:10px;border-radius:5px;background:#3b4152;overflow:hidden}.wb i{display:block;height:10px;background:linear-gradient(90deg,#ffd166,#ee6730)}
+.lm small{grid-row:2;font-size:12.5px;font-weight:800;color:#aab3c5}.lm small:nth-of-type(1){grid-column:1}.lm small.r{grid-column:5;text-align:right}
+.lv{display:inline-block;background:#ff3d3d;color:#fff;font-weight:900;font-size:12px;letter-spacing:1.5px;padding:2px 8px;border-radius:5px;margin-right:8px}
+.lv.f{background:#4b5563}
 """
 
-_WB_PENDING = {}
-_WB_CACHE = {}
-# spread of one player's score (a + b * projection) and a whole-team share on top (injuries, rest days, lineups)
-_WB_SD = {"nfl": (2.0, 0.35, 0.10), "nba": (3.0, 0.22, 0.08)}
 
-
-def _wb_cfg(sport):
-    return (CONFIG.get(sport) or {}).get("weekly_board") or {}
-
-
-def _wb_cached(key, ttl, fn):
-    hit = _WB_CACHE.get(key)
-    if hit and time.time() - hit[0] < ttl:
-        return hit[1]
-    v = fn()
-    _WB_CACHE[key] = (time.time(), v)
-    return v
-
-
-def _wb_side(sport, points, items, left, on_now):
-    """items: (projection, share of it still to come) for every starter-game still to play."""
-    a, b, team = _WB_SD[sport]
-    rem = sum(pj * f for pj, f in items)
-    var = sum(((a + b * pj) ** 2) * f for pj, f in items) + (team * rem) ** 2
-    return {"points": points, "proj": points + rem, "var": var, "left": left, "on": on_now}
-
-
-def _wb_win(sa, sb):
-    """Win chance (0-100) for side a: normal approximation on the projected finals."""
-    d, v = sa["proj"] - sb["proj"], sa["var"] + sb["var"]
-    if v <= 1e-6:
-        return 100.0 if d > 0.05 else (0.0 if d < -0.05 else 50.0)
-    return 100 * 0.5 * (1 + _math.erf(d / (2 * v) ** 0.5))
-
-
-def _wb_people(sport):
-    return _wb_cached(("people", sport), 600, lambda: _league_people(sport))
-
-
-def wb_nfl_data(week, events, live=None, proj=None, people=None):
-    """Everything the NFL board shows. events = ESPN games of that NFL week."""
-    if live is None:
-        live = league_live("nfl", week)
-        if live and live.get("pairs"):
-            live = espn_topup(live, events)
-    if not live or not live.get("pairs"):
-        return None
-    proj = proj if proj is not None else _wb_cached(("nflproj", week), 1800, lambda: _nfl_proj_fetch(week))
-    people = people if people is not None else _wb_people("nfl")
-    players = sleeper_players("nfl")
-    gofteam = {}
-    for e in events:
-        for t in teams_of(e):
-            gofteam[sl_team(t["team"]["abbreviation"])] = e
-    sides = {}
-    for rid, x in live["rosters"].items():
-        items, left, on, lp = [], 0, 0, []
-        for p in x["starters"] or []:
-            e = gofteam.get((players.get(p) or {}).get("team"))
-            if e is None:                                   # bye week / no team: nothing to come
-                continue
-            f = 1 - game_elapsed(e)
-            if f <= 0.001:
-                continue
-            left += 1
-            if e["status"]["type"]["state"] == "in":
-                on += 1
-                lp.append((p, float(x["pp"].get(p) or 0)))
-            items.append((max(0.0, float(proj.get(p) or 0)), f))
-        sides[rid] = _wb_side("nfl", float(x["points"]), items, left, on)
-        sides[rid]["lp"] = _wb_live_names("nfl", lp)
-    st_ = [e["status"]["type"]["state"] for e in events]
-    kicks = sorted(parse_time(e["date"]) for e in events if e["status"]["type"]["state"] == "pre")
-    return {"sport": "nfl", "week": week, "pairs": live["pairs"], "sides": sides, "rosters": live["rosters"],
-            "people": people, "games": len(events), "done": st_.count("post"), "live": st_.count("in"),
-            "next_kick": kicks[0] if kicks else None}
-
-
-def nba_lockin_value(score, games, sd_of=lambda mu: 3.0 + 0.22 * mu):
-    """Sleeper NBA lock-in scoring: a starter's week score is ONE game - the game he is locked in on, or his latest
-    game if never locked. With games still to come the manager keeps the score he has or plays on, so the
-    expected final is the optimal-stopping value: V = max(score, C), where C (value of playing on) is worked out
-    backwards over his remaining games: C_last = mean_last, C_k = E[max(X_k, C_k+1)].
-    games: [(mean, sd)] in order. Returns (expected final, variance, can still change)."""
-    c = None
-    for mu, sd in reversed([(m, d if d is not None else sd_of(m)) for m, d in games]):
-        if c is None:
-            c = mu
-        else:
-            sd = max(sd, 0.1)
-            z = (c - mu) / sd
-            cdf = 0.5 * (1 + _math.erf(z / 2 ** 0.5))
-            pdf = _math.exp(-z * z / 2) / (2 * _math.pi) ** 0.5
-            c = c * cdf + mu * (1 - cdf) + sd * pdf
-    if c is None:
-        return (score or 0.0), 0.0, False
-    spread = 0.8 * sum((d if d is not None else sd_of(m)) for m, d in games) / len(games)
-    if score is None:
-        return c, spread ** 2, True
-    return max(score, c), (spread * (0.5 if score >= c else 1.0)) ** 2, True
-
-
-def wb_nba_data(week, events_today=None, live=None, rows=None, people=None, day0=None):
-    """Everything the NBA board shows, with the league's LOCK-IN scoring: "now" is Sleeper's own matchup score
-    (each starter counts one game); the projection is each starter's lock-in value (see nba_lockin_value)."""
-    if live is None:
-        live = league_live("nba", week)
-    if not live or not live.get("pairs"):
-        return None
-    rows = rows if rows is not None else _wb_cached(("nbarows", week), 1800, lambda: _nba_rows_fetch(week))
-    people = people if people is not None else _wb_people("nba")
-    if day0 is None:
-        day0, today_evs = _wb_nba_today()
-        events_today = today_evs if events_today is None else events_today
-    d0 = day0
-    events_today = events_today or []
-    tmap = {}
-    for e in events_today:
-        for t in teams_of(e):
-            a = t["team"]["abbreviation"]
-            tmap[NBA_ESPN_TO_SLEEPER.get(a, a)] = e
-    by_day = {}
-    for pid, d, v in rows:
-        by_day.setdefault(d, {})[pid] = v
-    players = sleeper_players("nba")
-    sides, days = {}, set()
-    for rid, x in live["rosters"].items():
-        proj = var = 0.0
-        left = on = 0
-        lp = []
-        for p in x["starters"] or []:
-            pts = float(x["pp"].get(p) or 0)
-            played = pts != 0 or any(p in by_day[d] for d in by_day if d < d0)
-            score = pts if played else None
-            games = []
-            if p in by_day.get(d0, {}):
-                e = tmap.get((players.get(p) or {}).get("team"))
-                f = game_frac(e, "nba") if e is not None else 0.0
-                if f is not None:                           # today's game still to finish
-                    mu = by_day[d0][p]
-                    if f > 0:
-                        on += 1
-                        lp.append((p, pts))
-                        games.append((pts + mu * (1 - f), (3.0 + 0.22 * mu) * (1 - f) ** 0.5))
-                        score = None                         # this game's score replaces any earlier one
-                    else:
-                        games.append((mu, None))
-                    days.add(d0)
-                else:
-                    score = pts                             # played today: that's his current score
-            for d in sorted(by_day):
-                if d > d0 and p in by_day[d] and by_day[d][p] > 0:
-                    games.append((by_day[d][p], None))
-                    days.add(d)
-            v, vv, more = nba_lockin_value(score, games)
-            proj += v
-            var += vv
-            left += more
-        sides[rid] = {"points": float(x["points"]), "proj": max(proj, float(x["points"])), "var": var,
-                      "left": left, "on": on, "lp": _wb_live_names("nba", lp)}
-    st_ = [e["status"]["type"]["state"] for e in events_today]
-    return {"sport": "nba", "week": week, "pairs": live["pairs"], "sides": sides, "rosters": live["rosters"],
-            "people": people, "live": st_.count("in"), "days_left": len(days),
-            "games": sum(s["left"] for s in sides.values())}
-
-
-def _wb_state(data):
-    """pre (nothing played yet) / live / mid (between games) / final (nothing left for anyone)."""
-    if not any(s["left"] for s in data["sides"].values()):
-        return "final"
-    if data.get("live"):
-        return "live"
-    if not any(abs(s["points"]) > 0.01 for s in data["sides"].values()):
-        return "pre"
-    return "mid"
-
-
-# ---- who is playing right now, on each manager's row: "● Hurts 12.4 · Lamb 8.7 +1" (as many as fit, never cut)
-_WB_SUFFIX = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v"}
-_WB_SUB_W = 204          # px for the sub line (the row text column is 210px at 1160px wide), measured
-_WB_CHAR = {" ": .27, ".": .27, "·": .3, "●": .62, "+": .6, "'": .22, "-": .33, "i": .27, "l": .27, "j": .28, "I": .29,
-            "f": .34, "t": .37, "r": .4, "m": .9, "w": .82, "M": .86, "W": .97}
-
-
-def _wb_text_w(t, px=22):
-    """Rough width of the board's sub-line text (Inter 700 at px), on the generous side."""
-    w = 0.0
-    for c in t:
-        w += _WB_CHAR.get(c, .62 if c.isdigit() else (.66 if c.isupper() else .58))
-    return w * px * 1.04
-
-
-def _wb_live_names(sport, lp):
-    """[(short name, live points)] for starters in a game right now, highest first."""
-    players = sleeper_players(sport)
-    out = []
-    for p, pts in sorted(lp, key=lambda x: -x[1]):
-        pl = players.get(p) or {}
-        if sport == "nfl" and str(p).isalpha() and str(p).isupper():
-            nm = f"{p} D"
-        else:
-            parts = [w for w in (pl.get("full_name") or pl.get("last_name") or str(p)).split() if w.lower() not in _WB_SUFFIX]
-            nm = pl.get("last_name") or (parts[-1] if parts else str(p))
-            nm = " ".join(w for w in nm.split() if w.lower() not in _WB_SUFFIX) or nm
-            first = (pl.get("first_name") or (parts[0] if parts else ""))[:1]
-            out.append([nm, round(pts, 1), first])
-            continue
-        out.append([nm, round(pts, 1), ""])
-    seen = {}
-    for x in out:
-        seen[x[0]] = seen.get(x[0], 0) + 1
-    return [(f"{x[2]}. {x[0]}" if seen[x[0]] > 1 and x[2] else x[0], x[1]) for x in out]
-
-
-def _wb_busy(data):
-    """Too many games at once to list names: NFL Sunday 18:00-21:00 UK, NBA 6+ games live."""
-    if data["sport"] == "nfl":
-        now = datetime.now(UK)
-        return now.weekday() == 6 and 18 <= now.hour < 21
-    return (data.get("live") or 0) >= 6
-
-
-def _wb_live_sub(data, s, base, small_name=False):
-    """Sub line with the live players (and their points) that fit; the compact '● N live' when busy or none fit."""
+def live_board_html(sport, live, ol, final):
     import html as H
-    compact = f"{base} · <span class='lv'>● {s['on']} live</span>"
-    lp = s.get("lp") or []
-    if not lp or _wb_busy(data):
-        return compact
-    room = _WB_SUB_W
-    shown = []
-    for i, (nm, pts) in enumerate(lp):
-        rest = len(lp) - i - 1
-        txt = "● " + " · ".join(f"{a} {b:.1f}" for a, b in shown + [(nm, pts)])
-        if _wb_text_w(txt + (f" +{rest}" if rest else "")) > room:
-            break
-        shown.append((nm, pts))
-    if not shown:
-        return compact
-    more = len(lp) - len(shown)
-    body = " · ".join(f"{H.escape(a)} <b>{b:.1f}</b>" for a, b in shown)
-    plain = "● " + " · ".join(f"{a} {b:.1f}" for a, b in shown) + (f" +{more}" if more else "")
-    out = f"<span class='lv'>● {body}{f' +{more}' if more else ''}</span>"
-    tail = re.sub(r"<[^>]+>", "", base)
-    if _wb_text_w(f"{tail} · {plain}") <= room:            # room for the "N left" count too
-        return f"{base} · {out}"
-    return out
-
-
-def wb_html(data, stamp=None):
-    """The board card: 2 x 3 matchup tiles, each with points now, projected final, win chance and players left."""
-    import html as H
-    sport = data["sport"]
-    state = _wb_state(data)
-    people = data.get("people") or {}
-    unit = "left"
-    if sport == "nfl" and state == "pre":
-        unit = "to play"
-    tiles, closest = [], None
-    for ra, rb in data["pairs"]:
-        sa, sb = data["sides"][ra], data["sides"][rb]
-        wa = _wb_win(sa, sb)
-        done = not sa["left"] and not sb["left"]
-        if not done and (closest is None or abs(wa - 50) < abs(closest[0] - 50)):
-            closest = (wa, ra, rb)
-        rows = []
-        for rid, s, w in ((ra, sa, wa), (rb, sb, 100 - wa)):
-            pe = people.get(rid) or {}
-            name = pe.get("manager") or data["rosters"][rid]["manager"]
-            av = (f"<img src='https://sleepercdn.com/avatars/thumbs/{H.escape(pe['avatar'])}'>" if pe.get("avatar")
-                  else f"<div class='wav'>{H.escape(name[:1].upper())}</div>")
-            if done:
-                cls = "won" if w > 50 else ("lost" if w < 50 else "fav")
-                pill = "WON" if w > 50 else ("LOST" if w < 50 else "TIE")
-            else:
-                cls = "fav" if w >= 50 else "dog"
-                shown = ">99" if 99.5 <= w < 100 else ("<1" if 0 < w <= 0.5 else f"{w:.0f}")
-                pill = f"{shown}<small>%</small>"
-            other = sb if s is sa else sa
-            if done:
-                m = abs(s["points"] - other["points"])
-                sub = f"<span class='dn'>{'won' if w > 50 else 'lost' if w < 50 else 'tied'}{f' by {m:.1f}' if m else ''}</span>"
-            elif not s["left"]:
-                sub = "<span class='dn'>all played ✓</span>"
-            else:
-                sub = f"<b>{s['left']}</b> {unit}"
-                if s["on"]:
-                    sub = _wb_live_sub(data, s, sub, len(name) > 14)
-            pj = f"{s['proj']:.1f}" if sport == "nfl" or done else f"{s['proj']:.0f}"
-            now_txt = "" if state == "pre" else f"<div class='wno'><i>now</i> {s['points']:.1f}</div>"
-            if done:
-                pj, now_txt = f"{s['points']:.1f}", ""
-            rows.append(
-                f"<div class='wr {cls}'>{av}<div style='min-width:0'><div class='wn{' s' if len(name) > 14 else ''}'>"
-                f"{H.escape(name)}</div><div class='ws'>{sub}</div></div>"
-                f"<div class='wnum'><div class='wpj'>{pj}</div>{now_txt}</div><div class='wp'>{pill}</div></div>")
-        tag, cls = "", ""
-        fav = sa if wa > 50 else sb
-        fav_trails = (sa["points"] - sb["points"]) * (1 if wa > 50 else -1)
-        under_way = fav["points"] >= 0.3 * max(fav["proj"], 1)       # no "comeback" before the favourite has played
-        if done:
-            tag = "<div class='wtag fn'>FINAL</div>" if state != "final" else ""
-        elif 40 <= wa <= 60:
-            tag, cls = f"<div class='wtag'>🔥 {'TOO CLOSE TO CALL' if state == 'pre' else 'COIN FLIP'}</div>", " close"
-        elif max(wa, 100 - wa) >= 99.5:
-            tag = "<div class='wtag lk'>🔒 ALL BUT OVER</div>"
-        elif state != "pre" and under_way and fav_trails <= -(15 if sport == "nfl" else 60):
-            tag = "<div class='wtag cb'>⚡ COMEBACK ON</div>"
-        tiles.append(f"<div class='wm{cls}'>{tag}{rows[0]}{rows[1]}</div>")
-    # headline + top-right status
-    stamp = stamp or datetime.now(UK).strftime("%H:%M")
-    if sport == "nfl":
-        left_all = sum(s["left"] for s in data["sides"].values())
-        if state == "final":
-            h1 = f"Week {data['week']} is in the books"
-        elif state == "pre":
-            k = data.get("next_kick")
-            h1 = f"Week {data['week']} · " + (f"kicks off {k.astimezone(UK):%A %H:%M}" if k else "projections")
-        else:
-            h1 = f"{data['done']} of {data['games']} games done · {left_all} to play"
-    else:
-        dl = data.get("days_left", 0)
-        if state == "final":
-            h1 = f"Week {data['week']} is in the books"
-        else:
-            h1 = (f"Week {data['week']} · " if state == "pre" else "") + \
-                 f"{data['games']} starters to play · {dl} day{'s' if dl != 1 else ''} left"
-    if state == "final":
-        h2 = "Final scores · winners in gold"
-    elif closest:
-        wa, ra, rb = closest
-        na = (people.get(ra) or {}).get("manager") or data["rosters"][ra]["manager"]
-        nb = (people.get(rb) or {}).get("manager") or data["rosters"][rb]["manager"]
-        h2 = f"Closest: <b>{H.escape(na)}</b> v <b>{H.escape(nb)}</b> {max(wa, 100 - wa):.0f}–{min(wa, 100 - wa):.0f}"
-    else:
-        h2 = ""
-    if state == "live":
-        pill = f"<span class='lv2'>● LIVE</span>UPDATED {stamp} · EVERY 5 MIN"
-    elif state == "final":
-        pill = "<span class='lv2 f'>FINAL</span>WEEK COMPLETE"
-    elif state == "pre":
-        pill = f"<span class='lv2 p'>PROJECTED</span>UPDATED {stamp}"
-    else:
-        pill = f"UPDATED {stamp}"
+    rows = []
+    for ra, rb in live["pairs"]:
+        A, B = live["rosters"][ra], live["rosters"][rb]
+        wa = float((ol.get(ra) or {}).get("win", 50))
+        rows.append(
+            f"<div class='lm'><b class='{'w' if wa >= 50 else ''}'>{H.escape(A['manager'])}</b><span class='p'>{A['points']:.1f}</span>"
+            f"<div class='wb'><i style='width:{wa:.0f}%'></i></div><span class='p'>{B['points']:.1f}</span>"
+            f"<b class='r {'w' if wa < 50 else ''}'>{H.escape(B['manager'])}</b>"
+            f"<small>{wa:.0f}% to win</small><small class='r'>{100 - wa:.0f}%</small></div>")
     logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
-    league = CONFIG[sport].get("league_name", "League").upper()
-    colh = ("<div class='wch'><span></span><span class='p'>" + ("FINAL" if state == "final" else "PROJECTED")
-            + "</span><span class='w'>" + ("RESULT" if state == "final" else "WIN") + "</span></div>")
-    title = f"{H.escape(league)} · WEEK {data['week']} MATCHUPS" if sport == "nfl" else f"{H.escape(league)} LEAGUE"
-    body = (f"<div class='top'><div class='lg'><img src='{logo}'>{title}</div>"
-            f"<div class='pill'>{pill}</div></div>"
-            f"<div class='wbh'><div class='h1'>{H.escape(h1)}</div><div class='h2'>{h2}</div></div>"
-            f"<div class='wbg'>{colh}{colh}{''.join(tiles)}</div>")
-    css = WB_CSS + "body,.card{width:1160px!important}.wbg .wch{margin-top:2px}"
-    html_text = _card("--a:#ee6730;--h:#ffb347" if sport == "nba" else "--a:#1faa59;--h:#5b7bd5", body, None, css,
-                      width=1160)
-    return _nba_theme(html_text, None, f"WEEK {data['week']} MATCHUPS") if sport == "nba" else html_text
+    stamp = datetime.now(UK).strftime("%H:%M")
+    pill = ("<span class='lv f'>FINAL</span>TONIGHT'S GAMES ARE DONE" if final else
+            f"<span class='lv'>● LIVE</span>UPDATED {stamp} · REFRESHES EVERY 5 MIN")
+    body = (f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape(CONFIG[sport].get('league_name', 'League').upper())}"
+            f" · WEEK {live['week']} MATCHUPS</div><div class='pill'>{pill}</div></div><div class='lms'>{''.join(rows)}</div>")
+    html_text = _card("--a:#ee6730;--h:#ffb347" if sport == "nba" else "--a:#1faa59;--h:#5b7bd5", body, None,
+                      LIVE_CSS + "body,.card{width:980px!important}", width=980)
+    return _nba_theme(html_text, None, "LIVE SCOREBOARD") if sport == "nba" else html_text
 
 
-def _wb_sig(data):
-    return json.dumps([_wb_state(data)] + [[round(s["points"], 1), round(s["proj"], 1), s["left"], s["on"]]
-                                            for _, s in sorted(data["sides"].items())])
-
-
-# -- which week, and when it's on the board
-
-def _wb_nfl_events(week):
-    return _wb_cached(("nflweek", week), 240,
-                      lambda: fetch(f"football/nfl/scoreboard?seasontype=2&week={week}").get("events", []))
-
-
-def wb_nfl_window(week, events=None):
-    """(start, end) UK datetimes: 00:00 on the day of the week's first kick-off, never later than Friday 00:00
-    (Thursday night) -> Tuesday 12:00 after the last game."""
-    events = events if events is not None else _wb_nfl_events(week)
-    if not events:
-        return None
-    kicks = sorted(parse_time(e["date"]).astimezone(UK) for e in events)
-    first, last = kicks[0], kicks[-1]
-    day = first.replace(hour=0, minute=0, second=0, microsecond=0)
-    if first.weekday() in (4, 5, 6):                       # Fri/Sat/Sun first game: from Friday 00:00
-        day -= timedelta(days=first.weekday() - 4)
-    start = day                                            # Wed/Thu games (Thanksgiving, Christmas): that day 00:00
-    end = (last + timedelta(days=(1 - last.weekday()) % 7)).replace(hour=12, minute=0, second=0, microsecond=0)
-    if end <= last:
-        end += timedelta(days=7)
-    return start, min(end, start + timedelta(days=7, hours=12))
-
-
-def wb_nba_window(now=None):
-    """(start, end): Monday 12:00 UK -> next Monday 12:00 UK, for the window containing `now`."""
-    now = now or datetime.now(UK)
-    mon = (now - timedelta(days=now.weekday())).replace(hour=12, minute=0, second=0, microsecond=0)
-    if mon > now:
-        mon -= timedelta(days=7)
-    return mon, mon + timedelta(days=7)
-
-
-def wb_nba_week(monday):
-    """Sleeper NBA week whose games fall in the Monday-Sunday starting at `monday` (UK date)."""
-    sw = int(_wb_sleeper_week("nba") or 1)
-    lo, hi = monday.strftime("%Y-%m-%d"), (monday + timedelta(days=6)).strftime("%Y-%m-%d")
-    for w in (sw, sw + 1, sw - 1):
-        if w < 1:
-            continue
-        ds = [d for _, d, _ in _wb_cached(("nbarows", w), 1800, lambda w=w: _nba_rows_fetch(w))]
-        if any(lo <= d <= hi for d in ds):
-            return w
-    return sw
-
-
-def _wb_sleeper_week(sport):
-    return _wb_cached(("state", sport), 300, lambda: fetch_url(f"{SLEEPER}/state/{sport}").get("week"))
-
-
-def _wb_nba_today():
-    d0 = (datetime.now(ET) - timedelta(hours=6)).strftime("%Y-%m-%d")
-    return d0, _wb_cached(("nbatoday", d0), 60,
-                          lambda: fetch(f"basketball/nba/scoreboard?dates={d0.replace('-', '')}").get("events", []))
-
-
-def _wb_live_now(sport, b):
-    evs = _wb_nfl_events(b["week"]) if sport == "nfl" else _wb_nba_today()[1]
-    return any(e["status"]["type"]["state"] == "in" for e in evs)
-
-
-def _wb_current(sport, lead):
-    """(key, week, start, end) of the board that should be up now (or starts within `lead` seconds), else None."""
-    now = datetime.now(UK)
-    if sport == "nfl":
-        sw = int(_wb_sleeper_week("nfl") or 0)
-        for w in (sw, sw + 1):
-            win = wb_nfl_window(w) if w else None
-            if win and win[0] - timedelta(seconds=lead) <= now < win[1]:
-                return f"nfl-{w}", w, win[0], win[1]
-        return None
-    start, end = wb_nba_window(now + timedelta(seconds=lead))
-    week = _wb_cached(("nbaweek", start.isoformat()), 6 * 3600, lambda: wb_nba_week(start))
-    return f"nba-{start:%Y-%m-%d}", week, start, end
-
-
-def _wb_wake(t):
-    """Make the main loop wake up at time t (it otherwise idles for a few minutes between checks)."""
-    if t > time.time() - 1 and (_NEXT_WAKE["t"] is None or t < _NEXT_WAKE["t"]):
-        _NEXT_WAKE["t"] = max(t, time.time() + 1)
-
-
-def _wb_hook(b):
-    if b.get("where") == "alert":
-        return globals().get("ALERT_HOOK")
-    return NFL_HOOK if b["sport"] == "nfl" else NBA_HOOK
-
-
-def _wb_routed_to_alert():
-    tm = CONFIG.get("test_mode") or {}
-    return bool(tm.get("enabled") and "live" in (tm.get("kinds") or []) and globals().get("ALERT_HOOK"))
-
-
-def _hook_message(hook, mid):
-    """Our own webhook message (dict with channel_id), or None."""
+def discord_edit(hook, message_id, png=None, name="live.png", content=None):
+    """Edit one of our own webhook messages: swap its image and/or text."""
+    payload = {}
+    if content is not None:
+        payload["content"] = content
+    if png:
+        payload["attachments"] = [{"id": 0, "filename": name}]
+    boundary = "----sportsbotedit" + str(int(time.time() * 1000))
+    parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n".encode()
+             + json.dumps(payload).encode() + b"\r\n"]
+    if png:
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"{name}\"\r\n"
+                     f"Content-Type: {'image/gif' if name.endswith('.gif') else 'image/png'}\r\n\r\n".encode() + png + b"\r\n")
+    body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+    req = urllib.request.Request(f"{hook}/messages/{message_id}", data=body, method="PATCH",
+                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                                          "User-Agent": "DiscordBot (sports-bot, 1.0)"})
     try:
-        req = urllib.request.Request(f"{hook}/messages/{mid}", headers={"User-Agent": "DiscordBot (sports-bot, 1.0)"})
-        with urllib.request.urlopen(req, timeout=20) as r:
-            return json.loads(r.read().decode())
-    except Exception:  # noqa: BLE001
-        return None
+        with urllib.request.urlopen(req, timeout=30):
+            return True
+    except urllib.error.HTTPError as e:
+        _log_plain(f"message edit failed ({e.code}): {e.read().decode()[:200]}")
+        return e.code == 404 and None
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"message edit failed: {e}")
+        return False
 
 
-def _wb_adopt(st, sport, b):
-    """First run after the switch: turn tonight's still-running game-night scoreboard into this week's board
-    (edited in place) instead of leaving it stuck on LIVE and posting a second one."""
-    old = st.get("live_boards") or {}
-    cands = [(v.get("t", 0), k) for k, v in old.items()
-             if k.startswith(sport + "-") and v.get("msg") and not v.get("final")
-             and v.get("t", 0) >= b["start"] - 86400]
-    if not cands:
-        return
-    k = max(cands)[1]
-    hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
-    m = _hook_message(hook, old[k]["msg"]) if hook and not (DRY_RUN or CAPTURE is not None) else None
-    if m and m.get("channel_id"):
-        b.update(msg=str(old[k]["msg"]), ch=str(m["channel_id"]), where="main", posted=time.time(), adopted=k)
-        _log_plain(f"{sport} weekly board: took over tonight's scoreboard message {old[k]['msg']}")
-    old.pop(k, None)
-
-
-def _wb_next_start(sport, b, data):
-    """Unix time of the next kick-off / tip-off of this board's week (the board starts updating then), or None."""
+def _games_live(sport):
+    """(any game live now, any game finished tonight, key for tonight's board)."""
     if sport == "nfl":
-        k = data.get("next_kick")
-        return int(k.timestamp()) if k else None
-    now = datetime.now(ET)
-    for i in range(7):
-        d = (now - timedelta(hours=6) + timedelta(days=i)).strftime("%Y%m%d")
-        evs = (_wb_nba_today()[1] if i == 0 else
-               _wb_cached(("nbaday", d), 6 * 3600, lambda d=d: fetch(f"basketball/nba/scoreboard?dates={d}").get("events", [])))
-        ts = sorted(parse_time(e["date"]).timestamp() for e in evs if e["status"]["type"]["state"] == "pre")
-        ts = [t for t in ts if t < b.get("end", 9e12)]
-        if ts:
-            return int(ts[0])
-    return None
+        evs = [e for e in fetch("football/nfl/scoreboard").get("events", []) if is_prime(parse_time(e["date"]))]
+        if any(e["status"]["type"]["state"] == "in" and not is_prime(parse_time(e["date"]))
+               for e in fetch("football/nfl/scoreboard").get("events", [])):
+            return False, False, None                     # Sunday window already has its 30-minute updates
+    else:
+        d = datetime.now(ET) - timedelta(hours=6)          # an NBA "night" runs into the early hours
+        evs = fetch(f"basketball/nba/scoreboard?dates={d:%Y%m%d}").get("events", [])
+    live_now = any(e["status"]["type"]["state"] == "in" for e in evs)
+    today = [e for e in evs if (now_utc() - parse_time(e["date"])).total_seconds() < 14 * 3600]
+    started = [e for e in today if e["status"]["type"]["state"] != "pre"]
+    all_done = bool(started) and all(e["status"]["type"]["state"] == "post" for e in today)
+    key = f"{sport}-{(datetime.now(ET) - timedelta(hours=6)):%Y-%m-%d}"
+    return live_now, all_done, key
 
 
-def _wb_line(b, data, last, live_next=None):
-    """One text line on the board: when it was drawn and when it will next change (Discord shows both live)."""
-    state = _wb_state(data)
-    lt = int(last)
-    if state == "final":
-        return f"✅ Final · last updated <t:{lt}:R>"
-    nxt = int(live_next or last + 300) if state == "live" else _wb_next_start(b["sport"], b, data)
-    if not nxt or nxt <= time.time():
-        return f"🕒 Last updated <t:{lt}:R>"
-    return f"🕒 Last updated <t:{lt}:R> · Next update <t:{nxt}:R> (<t:{nxt}:t>)"
-
-
-def _wb_publish(st, b, pend):
-    sport = b["sport"]
-    if b.get("msg"):
-        if CONFIG.get("paused"):
-            return
-        r = discord_edit(_wb_hook(b), b["msg"], pend["png"], "live.png", content=pend.get("line"))
-        if r is None:                                       # someone deleted it: post a new one next time
-            _log_plain(f"{sport} weekly board message is gone: posting a fresh one")
-            b["msg"] = None
-            b["pin"] = {"state": "none"}
-        elif r:
-            b.update(final=pend["final"], sig=pend["sig"], shown=time.time(), layout=pend.get("layout"),
-                     line=pend.get("line"), drawn=pend["t"])
-        return
-    _LAST_MSG.clear()
-    routed = _wb_routed_to_alert()
-    if sport == "nba":
-        _POSTER["name"] = (CONFIG.get("nba") or {}).get("bot_name") or "Donald 🏀"
-    try:
-        ok = discord(NFL_HOOK if sport == "nfl" else NBA_HOOK, [], "live", content=pend.get("line"),
-                     files={"live.png": pend["png"]})
-    finally:
-        _POSTER.clear()
-    if ok and _LAST_MSG.get("id"):
-        b.update(msg=str(_LAST_MSG["id"]), ch=str(_LAST_MSG.get("channel_id") or ""), where="alert" if routed else "main",
-                 posted=time.time(), final=pend["final"], sig=pend["sig"], shown=time.time(), layout=pend.get("layout"),
-                 line=pend.get("line"), drawn=pend["t"])
-        b["pin"] = {"state": "none"}
-        _log_plain(f"{sport} weekly board posted for week {b['week']}")
-    elif ok and CAPTURE is not None:
-        b.update(msg="capture", posted=time.time(), final=pend["final"], sig=pend["sig"])
-
-
-def wb_snapshot(sport, b):
-    """Data for the board right now, or None."""
-    if sport == "nfl":
-        evs = _wb_nfl_events(b["week"])
-        return wb_nfl_data(b["week"], evs)
-    return wb_nba_data(b["week"])
+_BOARD_PENDING = {}
 
 
 def maybe_live_board(st):
-    """Weekly matchups boards (NFL + NBA): post when the week opens, keep them fresh, pin/unpin on time."""
-    boards = st.setdefault("weekly_boards", {})
-    delay = spoiler_delay()
-    lead = delay + 30
+    """Post tonight's live scoreboard when the first game starts and edit it every 5 minutes; mark it FINAL at the end.
+    Spoiler-safe: each snapshot is only shown once it's spoiler_delay() seconds old."""
     for sport in ("nfl", "nba"):
-        cfg = _wb_cfg(sport)
+        cfg = (CONFIG.get(sport) or {}).get("live_scoreboard") or {}
         if not cfg.get("enabled", True):
             continue
         try:
-            cur = _wb_current(sport, lead)
-            soon = _wb_current(sport, lead + 900)              # a new week opening in the next 15 minutes?
-            if soon and (not cur or soon[0] != cur[0]):
-                _wb_wake(soon[2].timestamp() - lead)
-            if not cur:
+            live_now, done, key = _games_live(sport)
+            if not key:
                 continue
-            key, week, start, end = cur
-            b = boards.get(key)
-            if b is None:
-                b = {"sport": sport, "week": week, "start": start.timestamp(), "end": end.timestamp(), "msg": None,
-                     "t": 0, "pin": {"state": "none"}}
-                if time.time() >= b["start"]:
-                    _wb_adopt(st, sport, b)
-                boards[key] = b
-            now = time.time()
-            pend = _WB_PENDING.get(key)
+            boards = st.setdefault("live_boards", {})
+            b = boards.get(key) or {}
+            pend = _BOARD_PENDING.get(key)
+            # 1) publish a waiting snapshot once it's old enough
+            if pend and time.time() < pend["t"] + spoiler_delay():
+                w = pend["t"] + spoiler_delay()
+                if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
+                    _NEXT_WAKE["t"] = w
+            if pend and time.time() >= pend["t"] + spoiler_delay():
+                hook = NFL_HOOK if sport == "nfl" else NBA_HOOK
+                if b.get("msg"):
+                    r = discord_edit(hook, b["msg"], pend["png"])
+                    if r is None:
+                        boards.pop(key, None)
+                    elif r:
+                        b["final"] = pend["final"]
+                else:
+                    _LAST_MSG.clear()
+                    if sport == "nba":
+                        _POSTER["name"] = (CONFIG.get("nba") or {}).get("bot_name") or "Donald 🏀"
+                    try:
+                        ok = discord(hook, [], "live", files={"live.png": pend["png"]})
+                    finally:
+                        _POSTER.clear()
+                    if ok and _LAST_MSG.get("id"):
+                        boards[key] = {"msg": _LAST_MSG["id"], "t": pend["t"], "final": pend["final"]}
+                _BOARD_PENDING.pop(key, None)
+                continue
             if pend:
-                if now >= pend["show"]:
-                    _WB_PENDING.pop(key, None)
-                    _wb_publish(st, b, pend)
-                else:
-                    if _NEXT_WAKE["t"] is None or pend["show"] < _NEXT_WAKE["t"]:
-                        _NEXT_WAKE["t"] = pend["show"]
                 continue
-            relayout = (bool(b.get("msg")) and b.get("layout") != _code_version()   # new code: redraw once
-                        and now - b.get("t", 0) >= 120)
-            if (b.get("final") and b.get("msg") and not relayout) or CONFIG.get("paused"):
+            # 2) take a new snapshot every 5 minutes while games are on (and one last FINAL one)
+            need_final = bool(done) and b.get("msg") and not b.get("final")
+            if not live_now and not need_final:
                 continue
-            if not b.get("msg") and now - b.get("t", 0) < 60:
-                continue                                    # last post attempt failed: try again in a minute
-            # when: every 5 min while games are live, once more when they end, never in between
-            # (plus the new board when the week opens and one redraw after a code/layout update)
-            live_now = _wb_live_now(sport, b)
-            idle = int(cfg.get("idle_refresh_min", 0) or 0) * 60
-            just_ended = b.get("was_live") and not live_now
-            if b.get("msg") and not just_ended and not relayout:
-                if live_now:
-                    if now < b.get("t", 0) + 300:
-                        continue
-                elif not idle or now < b.get("t", 0) + idle:
-                    continue
-            if now < b["start"] - lead:
-                w = b["start"] - lead
-                if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
-                    _NEXT_WAKE["t"] = w
+            if b.get("t") and time.time() - b["t"] < 300 and not need_final:
                 continue
-            data = wb_snapshot(sport, b)
-            b["t"] = now
-            if not data:
+            if sport == "nba":
+                live, ol, _ = nba_ctx(st)
+            else:
+                ctx = nfl_ctx(st, fetch("football/nfl/scoreboard").get("events", []))
+                live, ol = (ctx or {}).get("live"), (ctx or {}).get("ol")
+            if not live or not live.get("pairs") or not ol:
                 continue
-            state = _wb_state(data)
-            ended = b.get("was_live") and state != "live"
-            b["was_live"] = state == "live"
-            sig = _wb_sig(data)
-            if b.get("msg") and sig == b.get("sig") and not ended and not relayout:
-                # nothing moved: keep the image; while live, only the "next update" time moves on (text-only edit)
-                line = _wb_line(b, data, b.get("drawn") or b.get("shown") or now, now + 300)
-                if state == "live" and line != b.get("line") and not CONFIG.get("paused"):
-                    if discord_edit(_wb_hook(b), b["msg"], None, "live.png", content=line):
-                        b["line"] = line
-                continue
-            png = render_card(wb_html(data))
+            png = render_card(live_board_html(sport, live, ol, bool(need_final)))
             if png:
-                _WB_PENDING[key] = {"png": png, "t": now, "show": max(now + delay, b["start"]),
-                                    "final": state == "final", "sig": sig, "layout": _code_version(),
-                                    "line": _wb_line(b, data, now, now + 300)}
-                w = _WB_PENDING[key]["show"]
-                if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
-                    _NEXT_WAKE["t"] = w
+                _BOARD_PENDING[key] = {"png": png, "t": time.time(), "final": bool(need_final)}
+                if key in boards:
+                    boards[key]["t"] = time.time()
+            for k in list(boards)[:-6]:
+                boards.pop(k, None)
         except Exception as ex:  # noqa: BLE001
-            _log_plain(f"{sport} weekly board skipped: {ex}")
-    for k in sorted(boards, key=lambda k: boards[k].get("start", 0))[:-6]:
-        if (boards[k].get("pin") or {}).get("state") != "pinned":
-            boards.pop(k, None)
-    try:
-        wb_pins(st)
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"weekly board pins skipped: {ex}")
-
-
-# -- pins: catch-up every loop, so a restart never double-pins or misses an unpin
-
-def _pinned_ids(ch):
-    """Message ids pinned in the channel right now, or None if Discord can't be asked."""
-    code, js = discord_api("GET", f"/channels/{ch}/messages/pins?limit=50")
-    if code == 200 and isinstance(js, dict):
-        return {str((i.get("message") or {}).get("id")) for i in js.get("items") or []}
-    code, js = discord_api("GET", f"/channels/{ch}/pins")
-    if code == 200 and isinstance(js, list):
-        return {str(m.get("id")) for m in js}
-    return None
-
-
-def _wb_drop_notice(ch, mid, tries=3):
-    """Delete Discord's "<bot> pinned a message" line (message type 6 pointing at our message).
-    True when deleted, False when not found yet, None when not allowed."""
-    for i in range(tries):
-        code, msgs = discord_api("GET", f"/channels/{ch}/messages?limit=25")
-        for m in msgs or []:
-            if m.get("type") == 6 and str((m.get("message_reference") or {}).get("message_id")) == str(mid):
-                c, _ = discord_api("DELETE", f"/channels/{ch}/messages/{m['id']}")
-                if c in (200, 204, 404):
-                    return True
-                return None if c == 403 else False
-        if code in (401, 403):
-            return None
-        time.sleep(1.5 * (i + 1))
-    return False
-
-
-def _wb_fail(b, what, code):
-    p = b["pin"]
-    p["tries"] = p.get("tries", 0) + 1
-    p["next"] = time.time() + min(1800, 60 * 2 ** min(p["tries"], 5))
-    why = {401: "the bot token is wrong or was reset", 403: "the bot is missing the Pin Messages / Manage Messages "
-           "permission in the channel", 404: "Discord can't find the message", 0: "Discord couldn't be reached"}.get(
-        code, f"Discord said {code}")
-    _log_plain(f"weekly board {what} failed ({code}) for {b['sport']} week {b['week']}, retrying: {why}")
-    if p["tries"] in (3, 10):
-        alert(f"📌 Couldn't {what} the {b['sport'].upper()} week {b['week']} matchups board: {why}",
-              f"wbpin-{b['sport']}-{what}", 6)
-
-
-def wb_pins(st):
-    """Pin the board that should be pinned now, unpin the ones whose time is up, and remove Discord's pin notice."""
-    boards = st.get("weekly_boards") or {}
-    if not BOT_TOKEN or DRY_RUN or CAPTURE is not None or SILENT:
-        if not BOT_TOKEN and any(b.get("msg") for b in boards.values()) and not (DRY_RUN or CAPTURE is not None) \
-                and any(_wb_cfg(s).get("pin", True) for s in ("nfl", "nba")) \
-                and time.time() - st.get("wb_token_alert", 0) > 7 * 86400:
-            st["wb_token_alert"] = time.time()             # once a week, also across restarts
-            alert("📌 Weekly matchups boards are posting but can't be pinned yet: no Discord bot token "
-                  "(DISCORD_BOT_TOKEN) on the server", "wb-notoken", 24 * 7)
-        return
-    now = time.time()
-    newest = {}
-    for k, b in boards.items():
-        if b.get("msg") and b["msg"] != "capture" and b.get("ch"):
-            if b["sport"] not in newest or b["start"] > boards[newest[b["sport"]]]["start"]:
-                newest[b["sport"]] = k
-    # unpins first, so a Monday NBA swap never has two boards pinned at once
-    for k in sorted(boards, key=lambda k: (boards[k].get("start", 0))):
-        b = boards[k]
-        if not b.get("msg") or b["msg"] == "capture" or not b.get("ch"):
-            continue
-        p = b.setdefault("pin", {"state": "none"})
-        want = (_wb_cfg(b["sport"]).get("pin", True) and b["start"] - 120 <= now < b["end"]
-                and newest.get(b["sport"]) == k)
-        if p["state"] == "pinned" and now < b["end"] < now + 900:
-            _wb_wake(b["end"])                              # unpin on the minute, not at the next idle check
-        if now < p.get("next", 0):
-            continue
-        if want and p["state"] != "pinned":
-            ids = _pinned_ids(b["ch"])
-            if ids is not None and b["msg"] in ids:
-                code = 204                                  # already pinned (e.g. before a restart): don't pin twice
-            else:
-                code = _pin(b["ch"], b["msg"], True)
-            if code in (200, 204):
-                p.update(state="pinned", at=now, tries=0, next=0, checked=now)
-                _log_plain(f"pinned {b['sport']} week {b['week']} matchups board")
-                if ids is None or b["msg"] not in ids:
-                    p["notice"] = _wb_drop_notice(b["ch"], b["msg"])
-                else:
-                    p["notice"] = True
-            else:
-                _wb_fail(b, "pin", code)
-        elif not want and p["state"] == "pinned":
-            code = _pin(b["ch"], b["msg"], False)
-            if code in (200, 204, 404):
-                p.update(state="unpinned", at=now, tries=0, next=0)
-                _log_plain(f"unpinned {b['sport']} week {b['week']} matchups board")
-            else:
-                _wb_fail(b, "unpin", code)
-        elif not want and p["state"] == "none" and not p.get("end_checked"):
-            ids = _pinned_ids(b["ch"])                     # crash between pin and save? make sure it's not left up
-            if ids is not None:
-                p["end_checked"] = True
-                if b["msg"] in ids and _pin(b["ch"], b["msg"], False) in (200, 204, 404):
-                    _log_plain(f"unpinned {b['sport']} week {b['week']} matchups board (left over)")
-        elif want and p["state"] == "pinned":
-            if p.get("notice") is False and p.get("notice_tries", 0) < 5:
-                p["notice_tries"] = p.get("notice_tries", 0) + 1
-                p["notice"] = _wb_drop_notice(b["ch"], b["msg"], tries=1)
-            if now - p.get("checked", 0) > 3600:           # hourly: is it really still pinned?
-                ids = _pinned_ids(b["ch"])
-                p["checked"] = now
-                if ids is not None and b["msg"] not in ids:
-                    p["state"] = "none"
-                    _log_plain(f"{b['sport']} week {b['week']} board was not pinned any more: pinning it again")
+            _log_plain(f"{sport} live scoreboard skipped: {ex}")
 
 
 # ---- 4) touchdowns taken away on review (or re-credited) get corrected in place
@@ -8372,8 +7566,7 @@ def post_td_fantasy(event, play, summary, ctx):
         st = _NFL_ST["st"]
         st.setdefault("td_posts", {})[str(play["id"])] = {
             "game": event["id"], "msg": _LAST_MSG["id"], "t": time.time(), "scorer": td_parse(play).get("scorer", ""),
-            "team": (play.get("team") or {}).get("abbreviation", ""),
-            "file": next((f for _, f in _LAST_MSG.get("att") or [] if f), "td.png")}
+            "team": (play.get("team") or {}).get("abbreviation", "")}
         if _last_td_html["h"]:
             _TD_HTML[str(play["id"])] = _last_td_html["h"]
     return ok
@@ -8422,325 +7615,19 @@ def check_overturns(st):
                 if html_text:
                     html_text = html_text.replace("<div class='card'", "<div class='card' style='filter:grayscale(.75) brightness(.8)'", 1)
                     png = render_card(html_text.replace("</body>", OVERTURN_HTML + "</body>"))
-                ok = discord_edit(NFL_HOOK, r["msg"], png, "td.png" if png else (r.get("file") or "td.png"),
+                ok = discord_edit(NFL_HOOK, r["msg"], png, "td.png",
                                   content=None if png else "❌ **OVERTURNED** · this touchdown was taken away on review")
                 if ok is not False:
                     r["done"] = "overturned"
                     _log_plain(f"touchdown {pid} overturned: post corrected")
             else:
                 now_scorer = td_parse(plays[pid]).get("scorer", "")
-                if now_scorer and r.get("scorer") and not same_player_name(now_scorer, r["scorer"]):
-                    ok = discord_edit(NFL_HOOK, r["msg"], None, r.get("file") or "td.png",
+                if now_scorer and r.get("scorer") and now_scorer != r["scorer"]:
+                    ok = discord_edit(NFL_HOOK, r["msg"], None,
                                       content=f"✏️ **CORRECTED** · this touchdown is now credited to **{now_scorer}** (not {r['scorer']})")
                     if ok is not False:
                         r["scorer"] = now_scorer
                         _log_plain(f"touchdown {pid} re-credited to {now_scorer}")
-
-
-# ---- 5) the try after a touchdown (extra point / 2-pt): accurate score on the card, edited in when it happens
-#   ESPN adds the try to the touchdown's own scoring play (text "(Jake Bates Kick)", score +1) once it's kicked.
-#   Spoiler rule: the try only appears on a card once its own moment is spoiler_delay() old. Its moment is not in
-#   the feed, so we use a time that is never earlier than it: when we first saw it, or the next play's wallclock.
-#   A touchdown posted before that shows the score after the touchdown only ("+6 · conversion to come"); the
-#   same Discord message is then edited (image only, no text) to the full score with the result of the try.
-import copy as _copy
-
-TRY_CSS = """
-.sbx .tryt{display:inline-block;margin:6px 0 0 6px;border-radius:8px;padding:3px 9px;font-size:13px;font-weight:900;
- letter-spacing:1px;vertical-align:top;white-space:nowrap}
-.sbx .tryt.ok{background:#1faa59;color:#fff}.sbx .tryt.no{background:#5b6273;color:#fff}
-.sbx .tryt.wait{background:rgba(255,255,255,.12);color:#e3e7ef}
-"""
-TRY_GIVE_UP = 600                                          # no try after 10 minutes: stop waiting
-_TRY_TAG = {"tag": None}
-_TEAM_SIDE = {}                                            # team abbreviation -> "away" / "home" (current games)
-
-
-def _note_sides(event):
-    for t in teams_of(event):
-        _TEAM_SIDE[t["team"]["abbreviation"]] = t.get("homeAway") or ""
-
-
-def _td_prev_score(play, summary):
-    """(away, home) just before this scoring play, from ESPN's list of scoring plays."""
-    sps = summary.get("scoringPlays") or []
-    ids = [str(p.get("id")) for p in sps]
-    i = ids.index(str(play.get("id"))) if str(play.get("id")) in ids else len(sps)
-    if i == 0:
-        return 0, 0
-    p = sps[i - 1]
-    return int(num(p.get("awayScore"))), int(num(p.get("homeScore")))
-
-
-def _td_drive_play(summary, pid):
-    """(the touchdown's play in the drive chart, wallclock of the first play after it or None)."""
-    drives = summary.get("drives") or {}
-    pool = [p for d in list(drives.get("previous") or []) + ([drives["current"]] if drives.get("current") else [])
-            for p in d.get("plays") or []]
-    seen, uniq = set(), []
-    for p in pool:                                  # ESPN can list the drive in progress twice (previous + current)
-        if str(p.get("id")) not in seen:
-            seen.add(str(p.get("id")))
-            uniq.append(p)
-    for i, p in enumerate(uniq):
-        if str(p.get("id")) == str(pid):
-            mine = p.get("wallclock") or ""
-            nxt = next((q.get("wallclock") for q in uniq[i + 1:] if q.get("wallclock") and q["wallclock"] > mine), None)
-            return p, nxt
-    return None, None
-
-
-def _try_gain(play, summary):
-    """(points the scoring team got on top of the 6, points the other team got) according to ESPN's score,
-    or (None, None) when the earlier scores can't explain this play (e.g. an incomplete feed)."""
-    a0, h0 = _td_prev_score(play, summary)
-    away = teams_of_play_side(play, summary)
-    a1, h1 = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
-    mine = (a1 - a0 if away else h1 - h0) - 6
-    theirs = (h1 - h0) if away else (a1 - a0)
-    if not (0 <= mine <= 2 and theirs in (0, 2)):
-        return None, None
-    return mine, theirs
-
-
-def td_try(play, summary):
-    """Result of the try after this touchdown, or None while it isn't in yet (or never comes).
-    dict(label, cls ok/no). The score is the judge: a "good" try only counts once ESPN's score shows it."""
-    m = re.search(r"\(([^()]*)\)\s*$", play.get("text") or "")
-    pat = (m.group(1) if m else "").lower()
-    dp, _ = _td_drive_play(summary, play.get("id"))
-    pa = (dp or {}).get("pointAfterAttempt") or {}
-    pa_id = pa.get("id") if pa.get("id") not in (0, None) else None
-    mine, theirs = _try_gain(play, summary)
-    known = mine is not None
-    if known and theirs == 2:
-        return {"label": "✗ DEFENSIVE 2-PT RETURN", "cls": "no"}
-    if not pat and pa_id is None and (not known or mine == 0):
-        return None                                        # nothing yet
-    two = bool(re.search(r"two-point|2pt|2-pt", pat)) or pa_id in (15, 16) or mine == 2
-    failed = bool(re.search(r"fail|miss|block|no good", pat)) or pa_id in (62, 43) \
-        or (pa_id in (15, 16) and not pa.get("value"))
-    if known and not failed and mine < (2 if two else 1):
-        return None                                        # feed says good but the score isn't there yet
-    if two:
-        return {"label": "✓ 2-PT GOOD", "cls": "ok"} if not failed else {"label": "✗ 2-PT FAILED", "cls": "no"}
-    if not failed:
-        return {"label": "✓ EXTRA POINT GOOD", "cls": "ok"}
-    return {"label": "✗ EXTRA POINT BLOCKED" if ("block" in pat or pa_id == 43) else "✗ EXTRA POINT MISSED",
-            "cls": "no"}
-
-
-def teams_of_play_side(play, summary):
-    """True when the scoring team is the away team."""
-    comps = ((summary.get("header") or {}).get("competitions") or [{}])[0].get("competitors") or []
-    abbr = (play.get("team") or {}).get("abbreviation")
-    for c in comps:
-        if (c.get("team") or {}).get("abbreviation") == abbr and c.get("homeAway"):
-            return c.get("homeAway") == "away"
-    if abbr in _TEAM_SIDE:                                 # header can't tell: from the scoreboard
-        return _TEAM_SIDE[abbr] == "away"
-    a0, h0 = _td_prev_score(play, summary)
-    return int(num(play.get("awayScore"))) - a0 >= 6
-
-
-def td_only_play(play, summary):
-    """The scoring play as it stood the moment the touchdown was scored: no try, score +6 only."""
-    p = _copy.deepcopy(play)
-    p["text"] = re.sub(r"\s*\([^()]*\)\s*$", "", p.get("text") or "")
-    mine, theirs = _try_gain(play, summary)
-    if mine is None:                                       # earlier scores unknown: go by the try itself
-        res = td_try(play, summary) or {}
-        mine, theirs = (2 if "2-PT GOOD" in res.get("label", "") else 1 if "POINT GOOD" in res.get("label", "")
-                        else 0), (2 if "DEFENSIVE" in res.get("label", "") else 0)
-    a1, h1 = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
-    if teams_of_play_side(play, summary):
-        p["awayScore"], p["homeScore"] = a1 - mine, h1 - theirs
-    else:
-        p["awayScore"], p["homeScore"] = a1 - theirs, h1 - mine
-    return p
-
-
-def _try_moment(st, play, summary):
-    """A time never earlier than the try: first time we saw it, or the wallclock of the next play if earlier."""
-    seen = st.setdefault("td_try_seen", {})
-    pid = str(play.get("id"))
-    seen.setdefault(pid, time.time())
-    for k in list(seen):
-        if time.time() - seen[k] > 86400:
-            seen.pop(k, None)
-    t0 = seen[pid]
-    dp, nxt = _td_drive_play(summary, pid)
-    try:
-        if nxt:
-            t0 = min(t0, _wallclock_ts(nxt))
-        if (dp or {}).get("wallclock"):
-            t0 = max(t0, _wallclock_ts(dp["wallclock"]))     # never before the touchdown itself
-    except Exception:  # noqa: BLE001
-        pass
-    return t0
-
-
-_nfl_td_html_try = nfl_td_fantasy_html
-
-
-def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
-    """Adds the try result (or "conversion to come") next to the +N chip on the scoreboard."""
-    h = _nfl_td_html_try(event, play, summary, live, ol, base, *a, **k)
-    tag = _TRY_TAG.get("tag")
-    if tag and "<div class='plus'>" in h:
-        i = h.find("</div>", h.find("<div class='plus'>")) + len("</div>")
-        h = h[:i] + f"<div class='tryt {tag['cls']}'>{tag['label']}</div>" + h[i:]
-        h = h.replace("</style>", TRY_CSS + "</style>", 1)
-        _last_td_html["h"] = h
-    return h
-
-
-_post_td_try = post_td_fantasy
-
-
-def post_td_fantasy(event, play, summary, ctx):
-    """Post the touchdown with the try only if it's old enough to show; otherwise remember to edit it in."""
-    _note_sides(event)
-    st = _NFL_ST.get("st")
-    res = None
-    try:
-        res = td_try(play, summary)
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"try check skipped: {ex}")
-    send_at = max(_SEND_AT.get("t") or 0, time.time())    # a late post goes out now
-    show = res is not None and st is not None and _try_moment(st, play, summary) + spoiler_delay() <= send_at + 1
-    if res is not None and st is None:
-        show = True
-    live_game = event["status"]["type"].get("state") == "in"
-    if show:
-        _TRY_TAG["tag"] = res
-        p = play
-    else:
-        p = td_only_play(play, summary)
-        _TRY_TAG["tag"] = {"label": "⏳ CONVERSION TO COME", "cls": "wait"} if live_game else None
-    try:
-        ok = _post_td_try(event, p, summary, ctx)
-    finally:
-        _TRY_TAG["tag"] = None
-    if ok and st is not None:
-        r = (st.get("td_posts") or {}).get(str(play["id"]))
-        if r is not None:
-            r["try"] = "shown" if show else "pending"
-    return ok
-
-
-def _rebuild_td_image(event, play, summary, ctx, tag):
-    """Build the touchdown card again exactly as a post would (still or animated), without posting.
-    Returns (bytes, filename, html) or (None, None, None)."""
-    global CAPTURE
-    keep_cap, keep_send = CAPTURE, dict(_SEND_AT)
-    CAPTURE = []
-    _TRY_TAG["tag"] = tag
-    _last_td_html["h"] = None
-    try:
-        _post_td_track(event, play, summary, ctx)
-        got = CAPTURE[-1] if CAPTURE else None
-    finally:
-        CAPTURE = keep_cap
-        _TRY_TAG["tag"] = None
-        _SEND_AT.update(keep_send)
-    if not isinstance(got, dict) or not got.get("attachments"):
-        return None, None, None
-    path = Path(got["attachments"][0].replace("file://", ""))
-    return path.read_bytes(), path.name, _last_td_html["h"]
-
-
-def td_try_tick(st, slot, getctx):
-    """Edit posted touchdowns once their try is in (and old enough to show). True while one is still waiting."""
-    posts = st.get("td_posts") or {}
-    waiting = False
-    for e in slot:
-        pend = [(pid, r) for pid, r in posts.items()
-                if r.get("game") == e["id"] and r.get("try") == "pending" and not r.get("done")]
-        if not pend:
-            continue
-        summary = fetch(f"football/nfl/summary?event={e['id']}")
-        plays = {str(p.get("id")): p for p in summary.get("scoringPlays") or []}
-        over = e["status"]["type"]["state"] == "post"
-        for pid, r in pend:
-            p = plays.get(pid)
-            age = time.time() - r.get("t", time.time())
-            res = td_try(p, summary) if p else None
-            if res is None:
-                if age > TRY_GIVE_UP or (over and age > 300) or (p is None and age > 300):
-                    r["try"] = "gave_up"                   # no try (walk-off, game over, feed never had it)
-                    _log_plain(f"touchdown {pid}: no try after {age / 60:.0f} min")
-                    ctx = getctx() if p else None
-                    if ctx:                                # take "conversion to come" off the card (nothing new shown)
-                        img, name, _ = _rebuild_td_image(e, td_only_play(p, summary), summary, ctx, None)
-                        if img and not r.get("done"):
-                            if discord_edit(NFL_HOOK, r["msg"], img, name):
-                                _gif_after_edit(NFL_HOOK, r["msg"])
-                else:
-                    waiting = True
-                continue
-            target = _try_moment(st, p, summary) + spoiler_delay()
-            if time.time() < target - PREP_SECONDS:
-                waiting = True
-                w = target - PREP_SECONDS
-                if _NEXT_WAKE["t"] is None or w < _NEXT_WAKE["t"]:
-                    _NEXT_WAKE["t"] = w
-                continue
-            ctx = getctx()
-            if not ctx:
-                waiting = True
-                continue
-            img, name, html_text = _rebuild_td_image(e, p, summary, ctx, res)
-            if not img:
-                r["try_fail"] = r.get("try_fail", 0) + 1
-                if r["try_fail"] >= 3:
-                    r["try"] = "gave_up"
-                continue
-            if r.get("done"):                              # overturned while we were building
-                continue
-            _SEND_AT.update(t=target, t0=target - spoiler_delay(), label=f"try {res['label']}")
-            _wait_for_send_slot()
-            ok = discord_edit(NFL_HOOK, r["msg"], img, name)
-            _record_send(ok is True)
-            if ok:
-                _gif_after_edit(NFL_HOOK, r["msg"])
-            if ok is not False:
-                r["try"] = "done" if ok else "gone"
-                r["try_result"] = res["label"]
-                if html_text:
-                    _TD_HTML[pid] = html_text
-                _log_plain(f"touchdown {pid}: post updated with the try ({res['label']})")
-    return waiting
-
-
-_td_ready_try = td_ready
-
-
-def td_ready(summary, play, first_seen):
-    """Also note the moment we first see the try of a touchdown that isn't posted yet (for the spoiler rule)."""
-    st = _NFL_ST.get("st")
-    if st is not None and (play.get("type") or {}).get("abbreviation") == "TD":
-        try:
-            if td_try(play, summary) is not None:
-                _try_moment(st, play, summary)
-        except Exception:  # noqa: BLE001
-            pass
-    return _td_ready_try(summary, play, first_seen)
-
-
-_nfl_prime_slot_try = nfl_prime_slot
-
-
-def nfl_prime_slot(slot, st, getctx, force=False):
-    for e in slot:
-        _note_sides(e)
-    active = _nfl_prime_slot_try(slot, st, getctx, force)
-    try:
-        if td_try_tick(st, slot, getctx):
-            active = True
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"try edit skipped: {ex}")
-    return active
 
 
 # ---- 6) daily report in #rick-only (08:00 UK)
@@ -9251,8 +8138,7 @@ def _moment_landscape(html_text):
         if e < 0 or e > tail:
             return html_text
         rest = html_text[e:tail]
-        cut = min([k for k in (rest.find("<div class='cv'>"), rest.find("<div class='imp'>"), rest.find("<div class='fx'>"))
-                   if k >= 0], default=-1)
+        cut = min([k for k in (rest.find("<div class='cv'>"), rest.find("<div class='imp'>")) if k >= 0], default=-1)
         if cut <= 0 or not rest[:cut].strip():
             return html_text
         block = f"<div class='lsx'><div class='lcol'>{rest[:cut]}</div><div class='rcol'>{rest[cut:]}</div></div>"
@@ -9301,1146 +8187,6 @@ def render_card(html_text, width=None):
 
 def render_anim(html_text, width=None):
     return _render_anim_tall(_shape_more(_moment_landscape(html_text)), width)
-
-
-# ------------------------------------------------ readable without opening: in-game cards sized for Discord's inline view
-#   Donald attaches each card as a plain image; Discord desktop shows it scaled to fit about 550 x 350 px, so a card
-#   W px wide shows its text at 550 / W of its size. Target: the smallest meaningful text >= ~11px on screen, i.e.
-#   about W / 50 px in the card. Less text, bigger: no top strip (the scoreboard says it), commentary kept to one
-#   line, no per-row matchup column on game cards (the pinned weekly board has those), and long player
-#   lists show the top 8 with the rest in one line. Few rows -> bigger rows that fill the panel.
-#   tools/inline_size.py measures any card.
-
-INLINE_W, INLINE_H = 550, 350
-# Every in-game card is exactly W x (W * 350/550): the shape Discord shows at its full inline width (also in the
-# components-v2 media gallery Donald posts with: same box shape, ~0.64 height/width), and the
-# same size before and after an edit. Short content stretches to fill; long content is zoomed to fit.
-FIT_CSS = (".card{height:%dpx!important;overflow:hidden!important}"
-           ".card>.in{min-height:100%%;display:flex;flex-direction:column}"
-           ".card>.in>.lsx{flex:1}")
-_FIT_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const fit=()=>{const c=document.querySelector('.card'),"
-           "n=c&&c.querySelector('.in');if(!n)return;let z=1;n.style.zoom=1;"
-           "for(let i=0;i<16&&c.scrollHeight>c.clientHeight+1;i++){z*=0.96;n.style.zoom=z;}};"
-           "(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(fit);});</script>")
-_MIN_TEXT_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const f=%s;"
-                "document.querySelectorAll('.card *').forEach(el=>{if(![...el.childNodes].some(n=>n.nodeType==3&&n.textContent.trim()))return;"
-                "const s=parseFloat(getComputedStyle(el).fontSize);if(s<f)el.style.fontSize=f+'px';});});</script>")
-
-BIG_MOMENT_CSS = """
-.in>.top{display:none!important}
-.in>.hl{margin:0 0 12px!important;padding:10px 18px!important}
-.hl .h1{font-size:28px!important;line-height:1.18!important}
-.hl .h2{display:-webkit-box!important;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;
- font-size:20px!important;line-height:1.3!important;margin-top:4px!important}
-.sbx{padding:10px 22px!important;margin-top:0!important;gap:12px!important}
-.sbx .disc{width:80px!important;height:80px!important}.sbx .disc img{width:62px!important;height:62px!important}
-.sbx .tm{gap:14px!important}
-.sbx .nm{font-size:24px!important}
-.sbx .sc{font-size:84px!important}
-.sbx .clk{font-size:22px!important}
-.sbx .yd{font-size:34px!important;margin-top:4px!important}
-.sbx .st{font-size:22px!important;margin-top:6px!important;padding:3px 14px!important;display:inline-block!important;vertical-align:middle}
-.sbx .plus{font-size:24px!important;padding:1px 12px!important;margin-top:4px!important}
-.sbx .tryt{font-size:22px!important;padding:3px 12px!important;margin:6px 0 0 8px!important;vertical-align:middle}
-.lsx{gap:14px!important;margin-top:12px!important;align-items:stretch!important}
-.lsx>.lcol,.lsx>.rcol{display:flex;flex-direction:column;gap:12px}
-.lsx .lcol>*{margin-top:0!important}
-.lsx .lcol>.pair{flex:1;display:flex!important;flex-direction:column;gap:12px!important;margin:0!important}
-.lsx .lcol>.pair>.pp5{flex:1}
-.lsx .rcol>.imp,.lsx .rcol>.sw5{flex:1}
-.lsx .cv{margin:0!important}
-.pp5{grid-template-columns:92px minmax(0,1fr)!important;gap:16px!important;padding:10px 16px!important;align-items:center!important}
-.pp5 img{width:92px!important;height:92px!important;border-radius:14px!important}
-.pp5 .role{display:none!important}
-.pp5 .nm{font-size:26px!important;white-space:normal;overflow:visible;line-height:1.1}
-.pp5 .nm.lng,.lsx .lcol .pp5 .nm.lng{font-size:22px!important}
-.pp5 .gn{gap:10px!important;margin-top:2px!important}
-.pp5 .gn b{font-size:40px!important}
-.pp5 .gn span{font-size:22px!important}.pp5 .gn span em{font-size:26px!important}
-.pb5:not(:has(.beat)){display:none!important}
-.pb5{margin-top:6px!important;display:block!important}.pb5 .bar{display:none!important}
-.pb5 .beat{display:inline-block;max-width:100%;white-space:normal!important;font-size:21px!important;font-weight:900!important;padding:4px 12px!important;letter-spacing:.4px!important;
- background:#ffd166!important;color:#140d00!important;box-shadow:none!important;text-shadow:none!important;border-radius:9px!important}
-.pjn{font-size:22px!important;margin-top:4px!important}.pjn b{font-size:22px!important}
-.lsx .lcol:not(:has(.pp5+.pp5)) .pp5{grid-template-columns:124px minmax(0,1fr)!important}
-.lsx .lcol:not(:has(.pp5+.pp5)) .pp5 img{width:124px!important;height:124px!important}
-.lsx .lcol:not(:has(.pp5+.pp5)) .pp5 .nm{font-size:30px!important}
-.lsx .lcol:not(:has(.pp5+.pp5)) .pp5 .gn b{font-size:50px!important}
-.lsx .lcol:not(:has(.pp5+.pp5)) .pjn,.lsx .lcol:not(:has(.pp5+.pp5)) .pp5 .ow3{font-size:24px!important}
-.pp5 .ow3{font-size:22px!important;margin-top:4px!important}
-.cv{font-size:20px!important;padding:8px 14px!important;gap:8px!important;flex-wrap:nowrap!important;white-space:nowrap;overflow:hidden}
-.cv .tg,.cv .ok,.cv .no{font-size:20px!important}.cv .cvw{font-size:21px!important}
-.imp{padding:12px 18px!important;display:flex;flex-direction:column}
-.imp .ih{font-size:21px!important;letter-spacing:1.5px!important;margin-bottom:2px!important}
-
-.lsx .im{grid-template-columns:26px max-content minmax(0,1fr)!important;font-size:22px!important;padding:10px 0!important;
- column-gap:12px!important;row-gap:4px!important}
-.lsx .im>*{grid-row:auto!important}
-.lsx .im>:nth-child(1){grid-column:1!important;grid-row:1!important}
-.lsx .im>:nth-child(2){grid-column:2!important;grid-row:1!important}
-.lsx .im>:nth-child(4){grid-column:3!important;grid-row:1!important;text-align:right;white-space:normal!important;min-width:0;font-size:21px!important}
-.lsx .im>:nth-child(3){grid-column:2/-1!important;grid-row:2!important;font-size:22px!important}
-.lsx .im>:nth-child(5){grid-column:2/-1!important;grid-row:3!important}
-.lsx .im>:nth-child(5):empty{display:none}
-.lsx .im .who5{font-size:27px!important}
-.lsx .im .who5{white-space:normal!important;overflow:visible!important;text-overflow:clip!important;min-width:0;overflow-wrap:anywhere}
-.lsx .imp .im .who5.lng.lng.lng.lng{font-size:24px!important}
-.lsx .im .ar{font-size:22px!important}
-.imp:not(:has(.im+.im+.im)) .im .who5{font-size:31px!important}
-.imp:not(:has(.im+.im+.im)) .im{font-size:24px!important}
-.imp:not(:has(.im+.im+.im)) .im>:nth-child(3){font-size:24px!important}
-.imp:has(.im+.im+.im) .im{grid-template-columns:26px max-content minmax(0,1fr)!important;padding:7px 0!important;column-gap:10px!important}
-.imp:has(.im+.im+.im) .im>:nth-child(5){display:none!important}
-.imp:has(.im+.im+.im) .im .who5{font-size:25px!important}
-.imp:not(:has(.im+.im)) .im .who5{font-size:36px!important}.imp:not(:has(.im+.im)) .im{font-size:27px!important}
-.imp:not(:has(.im+.im)) .im>:nth-child(3){font-size:27px!important}
-.sw5{padding:14px 20px!important;display:flex;flex-direction:column;justify-content:space-evenly}
-.sw5 .ih{font-size:21px!important}.sw5 .lb{font-size:21px!important}
-.sw5 .big{font-size:40px!important}.sw5 .row{grid-template-columns:120px 1fr!important;margin-top:10px!important}
-.sw5 .bar,.sw5 .bar div{height:46px!important;border-radius:0}.sw5 .bar{border-radius:12px!important}
-.sw5 .sg{font-size:23px!important}
-"""
-
-BIG_LIST_CSS = """
-body,.card{width:1100px!important}
-.card>.in{display:grid!important;align-content:start}
-.in{grid-template-columns:minmax(0,1fr) auto!important;column-gap:14px!important}
-.in>.top{display:none!important}
-.in>.nbar{font-size:22px!important}
-.in>.hl{margin-top:0!important;display:flex;flex-direction:column;justify-content:center}
-.in>.sb5,.in>.sbx{margin-top:0!important}
-.hl .h1{font-size:27px!important;line-height:1.18!important}.hl .h2{font-size:21px!important;line-height:1.3!important;margin-top:6px!important}
-.sb5{padding:12px 20px!important;gap:14px!important;grid-template-columns:auto auto auto!important;justify-content:center}.sb5 .sc{font-size:68px!important}
-.sb5 .tm>span:not(.sc){display:none!important}
-.sb5 .tm img{width:58px!important;height:58px!important}.sb5 .clk{font-size:22px!important;line-height:1.15}
-.sbx{padding:12px 20px!important;gap:14px!important;grid-template-columns:auto auto auto!important;justify-content:center}.sbx .sc{font-size:68px!important}.sbx .nm{display:none!important}
-.sbx .disc{width:62px!important;height:62px!important}.sbx .disc img{width:48px!important;height:48px!important}
-.sbx .clk{font-size:22px!important}
-.hd{margin-top:12px!important}.hd .s2{display:none!important}.hd .big2{font-size:27px!important}
-.pl2{column-gap:12px!important;row-gap:8px!important;margin-top:8px!important}
-.pr2{grid-template-columns:58px minmax(0,1fr) 118px!important;grid-template-rows:auto auto;column-gap:12px!important;row-gap:2px!important;
- padding:8px 12px!important;height:auto!important;min-height:0!important;align-items:center!important}
-.pr2>img{grid-column:1;grid-row:1/3;width:58px!important;height:58px!important}
-.pr2>div:nth-of-type(1){grid-column:2;grid-row:1}
-.pr2>.fp{grid-column:3;grid-row:1/3}
-.pr2>div:nth-of-type(3){grid-column:2;grid-row:2;display:flex;align-items:center;gap:10px;min-width:0}
-.pr2 .mt{display:none!important}
-.pr2 .nm2{font-size:24px!important;white-space:normal!important;overflow:visible!important;line-height:1.1}.pr2 .nm2 span{display:none!important}
-.pr2 .ln{font-size:20px!important;margin-top:2px!important;white-space:normal!important;overflow:visible!important;line-height:1.15!important}
-.pr2 .fp{font-size:31px!important;padding:5px 0!important;line-height:1.05!important}
-.pr2 .fp small,.pr2 .fp.pjx small{font-size:20px!important;letter-spacing:0!important}
-.pr2 .fp.pjx i{font-size:20px!important}
-.pr2 .ow{font-size:22px!important;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pr2 .bd{font-size:18px!important;padding:2px 8px!important;margin-top:0!important;flex:none;letter-spacing:1px!important}
-.pr2 .shr{font-size:16px!important}.pr2 .shr em{font-size:14px!important}
-.more{grid-column:1/-1;font-size:20px!important;line-height:1.4!important;margin-top:10px!important;color:#c3cad8!important}
-.in>.lg2{display:none!important}
-.pr2.sh{padding-top:16px!important}.pr2 .shr{left:auto!important;right:134px!important;top:-13px!important}
-"""
-
-BIG_GROUP_CSS = """
-body,.card{width:1100px!important}
-.card>.in{display:block!important}
-.in>.top{display:none!important}
-.in>.nbar{font-size:22px!important}
-.hl{margin-top:0!important}.hl .h1{font-size:28px!important;line-height:1.2!important}
-.hl .h2{font-size:21px!important;line-height:1.35!important}
-.rows{display:grid!important;grid-template-columns:1fr 1fr;gap:12px!important;margin-top:12px}
-.gl{grid-template-columns:minmax(0,1fr) auto!important;padding:12px 14px!important;row-gap:10px!important;align-content:start}
-.gl .sc2{grid-template-columns:40px auto auto 16px auto auto 40px!important;justify-content:start;font-size:22px!important;gap:8px!important}
-.gl .sc2 img{width:40px!important;height:40px!important}
-.gl .sc2 b{font-size:34px!important}
-.gl .st{font-size:19px!important;justify-self:end}
-.gl .f1{grid-column:1/-1;font-size:20px!important;white-space:normal!important}
-.tpr{grid-template-columns:30px minmax(0,1fr) 78px!important;grid-template-rows:auto auto;row-gap:2px!important;
- font-size:22px!important;padding:8px 12px!important}
-.tpr .rk5{grid-row:1/3}
-.tpr .nm5{grid-column:2;font-size:23px!important}.tpr .nm5 small{font-size:17px!important}
-.tpr .fp5{grid-column:3;grid-row:1/3;font-size:27px!important;padding:4px 0!important}
-.tpr .pj5{display:none!important}
-.tpr .ow5{grid-column:2;grid-row:2;font-size:20px!important;display:flex;gap:8px;align-items:center;min-width:0}
-.tpr .ow5 em{font-size:15px!important}
-.tpr .ln5{display:none!important}
-.tpr .shr{display:none!important}
-"""
-
-BIG_OT_CSS = """
-body,.card{width:1100px!important}
-.card>.in{display:block!important}
-.otg{grid-template-columns:1fr 1.15fr!important;gap:20px!important}
-.otg .otw{font-size:104px!important}
-.ots{font-size:24px!important}
-.otv .nm{font-size:24px!important}.otv .sc{font-size:70px!important}.otv .vs{font-size:24px!important}
-.otq{font-size:20px!important}
-.otl{padding:12px 18px!important}.otl .ih{font-size:19px!important;line-height:1.3}
-.otr{grid-template-columns:minmax(0,1fr) auto!important;row-gap:4px!important;padding:10px 0!important}
-.otr .mg{font-size:26px!important}
-.otr .ch{justify-content:flex-end}.otr .ch span{font-size:21px!important;padding:3px 9px!important}
-.otr .pj{grid-column:1/-1;text-align:left!important;font-size:21px!important}.otr .pj b{font-size:22px!important}
-.otr .flip{font-size:17px!important}
-.tape span{font-size:18px!important}
-"""
-
-
-DENSE_CSS = """
-.card>.in{display:block!important}
-.r2 .n{white-space:normal!important;overflow:visible!important;text-overflow:clip!important;line-height:1.1}
-.rr2 .m,.tr2 .m,.cm .n,.card .m{overflow:visible!important;text-overflow:clip!important}
-.tr2 .m,.cm .n{white-space:normal!important;line-height:1.1}
-"""
-RACE_BIG_CSS = """
-.rr2{grid-template-columns:34px minmax(0,1fr) 228px 70px 80px 80px 250px 170px!important;height:44px!important;font-size:22px!important}
-.rr2.h{height:30px!important;font-size:16px!important;letter-spacing:1px!important}
-.rr2 .chip{font-size:16px!important;padding:4px 10px!important;letter-spacing:.6px!important}
-.rr2 .o{grid-template-columns:62px 1fr 54px!important}.rr2 .o2{grid-template-columns:60px 1fr!important}
-.mv{font-size:18px!important}
-.race-note{display:none!important}
-.cmp{grid-template-columns:1fr 1fr!important;gap:8px 14px!important}
-.cmp .cm{font-size:21px!important;padding:8px 14px!important;grid-template-columns:minmax(0,1fr) 170px minmax(0,1fr)!important}
-.cmp .cm .n{white-space:nowrap;overflow:visible!important;text-overflow:clip!important}
-.cmp .mt2 b{font-size:20px!important}
-"""
-
-
-DENSE_FIT_CSS = ".card{max-height:%dpx!important;overflow:hidden!important}"   # never taller than the box; else natural
-
-
-def _dense_floor(html_text):
-    """Trades and the race read better with a text floor; recaps / playoff cards keep their own sizes (sidebars)."""
-    return 8.0 if ("<div class='rt'>" in html_text or "TRADE" in html_text) else 0
-
-
-def _dense_css(html_text):
-    return DENSE_CSS + (RACE_BIG_CSS if "<div class='rt'>" in html_text else "")
-
-
-def _dense_html(html_text):
-    html_text = re.sub(r"<span class='m'>([^<]{13,})</span>", r"<span class='m' style='font-size:.82em'>\1</span>", html_text)
-    return html_text.replace("PLAYOFFS · SINCE YESTERDAY", "PLAYOFFS")
-
-
-def _card_width(html_text):
-    m = re.findall(r"body,\.card\{width:(\d+)px", html_text)
-    return int(m[-1]) if m else 880
-
-
-def _cap_rows(html_text, keep=8):
-    """Long game cards: the top `keep` players in full, everyone else in one 'also' line."""
-    s = html_text.find("<div class='pl2'>")
-    if s < 0:
-        return html_text
-    e = _div_end(html_text, s)
-    inner = html_text[s + len("<div class='pl2'>"):e - len("</div>")]
-    rows, i = [], 0
-    while True:
-        j = inner.find("<div class='pr2", i)
-        if j < 0:
-            break
-        k = _div_end(inner, j)
-        rows.append(inner[j:k])
-        i = k
-    if len(rows) <= keep:
-        return html_text
-    import html as H
-    extra = []
-    for r in rows[keep:]:
-        nm = re.search(r"class='nm2'>([^<]+)", r)
-        pts = re.search(r"class='fp[^']*'>([^<]+)", r)
-        ow = re.search(r"class='ow'>([^<]+)", r)
-        if nm:
-            extra.append(f"<b>{H.escape(H.unescape(nm.group(1)).strip())}</b> {pts.group(1) if pts else ''}"
-                         + (f" ({H.escape(H.unescape(ow.group(1)))})" if ow else ""))
-    more = f"<div class='more'>Also: {' · '.join(extra)}</div>"
-    n = keep
-    html_text = (html_text[:s] + "<div class='pl2'>" + "".join(rows[:keep]) + "</div>" + more + html_text[e:])
-    return re.sub(r"\.pl2\{grid-template-rows:repeat\(\d+,auto\)\}", f".pl2{{grid-template-rows:repeat({(n + 1) // 2},auto)}}",
-                  html_text)
-
-
-def readable_inline(html_text):
-    """Re-size an in-game card so it reads in Discord without opening it (see the note above)."""
-    try:
-        floor_k = 9.5
-        if "class='wbg'" in html_text or "class='wn'" in html_text:
-            return html_text                                  # weekly boards / pre-game card: sized by their own code
-        if "<div class='rt'>" in html_text or "class='rc'" in html_text or "class='card shc'" not in html_text \
-                and not any(k in html_text for k in ("class='otg'", "class='lsx'", "class='pl2'", "class='gl'")):
-            css, w, floor_k = _dense_css(html_text), _card_width(html_text), _dense_floor(html_text)   # trades, recaps, race
-            html_text = _dense_html(html_text)
-        elif "class='otg'" in html_text:
-            css, w = BIG_OT_CSS, 1100
-            html_text = html_text.replace("<br>win ", " · win ")
-        elif "class='lsx'" in html_text:
-            css, w = BIG_MOMENT_CSS, MOMENT_W
-            html_text = re.sub(r"<b class='who5'>([^<]{13,})</b>", r"<b class='who5 lng'>\1</b>", html_text)
-            html_text = re.sub(r"<div class='nm'>([^<]{14,})</div>", r"<div class='nm lng'>\1</div>", html_text)
-            m = re.search(r"<div class='tryt [a-z]+'>[^<]*</div>", html_text)
-            if m and "<div class=st>" in html_text:          # try tag under the lead line, not under the +N chip
-                html_text = html_text.replace(m.group(0), "", 1)
-                k = html_text.find("</div>", html_text.find("<div class=st>")) + len("</div>")
-                html_text = html_text[:k] + m.group(0) + html_text[k:]
-            html_text = (html_text.replace("<div class='pjn'>projected ", "<div class='pjn'>proj ")
-                         .replace("<span class='tg'>EXTRA POINT</span>", "<span class='tg'>XP</span>")
-                         .replace("<span class='tg'>2-PT CONVERSION</span>", "<span class='tg'>2-PT</span>"))
-            c, l = html_text.find("<div class='cv'>"), html_text.find("<div class='lcol'>")
-            if c > 0 and l > 0 and c > l:                     # kicker / 2-pt strip under the players: evens the columns
-                ce = _div_end(html_text, c)
-                cv = html_text[c:ce]
-                html_text = html_text[:c] + html_text[ce:]
-                le = _div_end(html_text, l) - len("</div>")
-                html_text = html_text[:le] + cv + html_text[le:]
-        elif "<div class='pl2'>" in html_text and "class='pr2" in html_text:
-            busy = "<div class='h2'>" in html_text or "class='nbar'" in html_text
-            html_text = _cap_rows(html_text, 6 if busy else 8)       # extra headline lines: fewer full rows
-            css, w = BIG_LIST_CSS, 1100
-        elif "class='gl'" in html_text and "class='tpr" in html_text:
-            css, w = BIG_GROUP_CSS, 1100
-        else:
-            css, w, floor_k = _dense_css(html_text), _card_width(html_text), _dense_floor(html_text)
-            html_text = _dense_html(html_text)
-        floor = round(w / INLINE_W * floor_k, 1)             # safety net: nothing under ~9.5px (dense: 9) on screen
-        hmax = int(w * INLINE_H / INLINE_W)                   # fixed shape: Discord shows it at its full width
-        dense = css.startswith(DENSE_CSS)
-        html_text = re.sub(r"body,\.card\{width:\d+px(!important)?\}", "", html_text)
-        fit = (DENSE_FIT_CSS if dense else FIT_CSS) % hmax
-        css = f"body,.card{{width:{w}px!important}}" + css + fit
-        return (html_text.replace("<style>", "<style>" + f"body,.card{{width:{w}px!important}}", 1)
-                .replace("</style>", css + "</style>", 1)
-                .replace("</head>", (_MIN_TEXT_JS % floor if floor_k else "") + _FIT_JS + "</head>", 1))
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"inline sizing skipped: {ex}")
-        return html_text
-
-
-
-
-# ------------------------------------------------ league matchups in standings order + readable win-chance meters
-#   Anywhere the bot lists league matchups (pre-game "who needs what", Sunday updates, the race card) they go in
-#   order of the two managers' average standings rank (1 = top of the table), closest win chance first on ties.
-#   (The pinned weekly boards keep Sleeper's matchup order so people find their game in the same place.)
-
-def _rank_sorted(pairs, ol=None, sport="nfl"):
-    try:
-        ppl = _wb_people(sport)
-    except Exception:  # noqa: BLE001
-        return list(pairs)
-
-    def key(p):
-        a, b = p
-        avg = ((ppl.get(a) or {}).get("rank", 99) + (ppl.get(b) or {}).get("rank", 99)) / 2
-        return avg, abs(float((ol or {}).get(a, {}).get("win", 50)) - 50)
-    return sorted(pairs, key=key)
-
-
-_matchup_rows_html_plain = matchup_rows_html
-
-
-def matchup_rows_html(live, ol, *a, **k):
-    return _matchup_rows_html_plain(dict(live, pairs=_rank_sorted(live["pairs"], ol)), ol, *a, **k)
-
-
-_compact_matchups_html_plain = compact_matchups_html
-
-
-def compact_matchups_html(live, ol, pairs):
-    return _compact_matchups_html_plain(live, ol, _rank_sorted(pairs, ol))
-
-
-METER_CSS = """
-.mt2{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;margin-top:8px}
-.mt2 b{font-size:24px;font-weight:900;font-variant-numeric:tabular-nums}.mt2 b.dog{color:#7d879b}
-.mt2 .tk{position:relative;height:16px;border-radius:999px;background:#3a4152;overflow:hidden}
-.mt2 .tk i{position:absolute;top:0;bottom:0;background:linear-gradient(90deg,#4be38e,#1faa59)}
-.mt2 .tk em{position:absolute;left:50%;top:0;bottom:0;width:2px;margin-left:-1px;background:rgba(255,255,255,.55)}
-.mt2.sm b{font-size:17px}.mt2.sm .tk{height:10px}
-"""
-
-
-def meter_html(win_a, size=""):
-    """Win-chance meter: big percentages, a solid green bar growing from the favourite's side."""
-    wa = max(0.0, min(100.0, win_a))
-    fav_left = wa >= 50
-    w = wa if fav_left else 100 - wa
-    side = "left:0" if fav_left else "right:0"
-    return (f"<style>{METER_CSS}</style><div class='mt2 {size}'><b class='{'' if fav_left else 'dog'}'>{wa:.0f}%</b>"
-            f"<div class='tk'><i style='{side};width:{w:.1f}%'></i><em></em></div>"
-            f"<b class='{'dog' if fav_left else ''}'>{100 - wa:.0f}%</b></div>")
-
-
-# ---- pre-game "who needs what": landscape tiles, standings order, readable without opening
-#   Starters in gold; bench players in this game as muted outlined chips after them. Bench chips never add a line:
-#   as many as fit, then "+N bench" (a small script in the card does the fitting).
-BENCH_FIT_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const go=()=>{"
-                # names and chips never spill into the playoff column: shrink a size at a time until they fit (no "...")
-                "document.querySelectorAll('.wnr .wnm').forEach(n=>{let f=parseFloat(getComputedStyle(n).fontSize);"
-                "while(n.scrollWidth>n.clientWidth+1&&f>14){f-=1;n.style.fontSize=f+'px';}});"
-                "document.querySelectorAll('.wnr .wch2 span').forEach(c=>{const w=c.parentElement.clientWidth;"
-                "let f=parseFloat(getComputedStyle(c).fontSize);while(c.offsetWidth>w&&f>12){f-=1;c.style.fontSize=f+'px';}});"
-                "document.querySelectorAll('.wch2').forEach(w=>{const bn=[...w.querySelectorAll('span.bn')];if(!bn.length)return;"
-                "const st=[...w.querySelectorAll('span:not(.bn)')];bn.forEach(b=>b.style.display='none');"
-                "const base=st.length?w.offsetHeight:(bn[0].style.display='',w.offsetHeight);bn[0].style.display='none';"
-                "let n=bn.length,more=null;const put=()=>{if(more)more.remove();more=null;if(n<bn.length){more=document.createElement('span');"
-                "more.className='bn';more.textContent='+'+(bn.length-n)+' bench';w.appendChild(more);}};"
-                "let k=0;for(;k<bn.length;k++){bn[k].style.display='';n=k+1;put();if(w.offsetHeight>base+1){bn[k].style.display='none';n=k;put();"
-                "if(w.offsetHeight>base+1&&more){more.textContent='+'+(bn.length-n);}if(w.offsetHeight>base+1&&more){more.remove();}break;}}"
-                "bn.slice(n).forEach(b=>b.remove());});};"
-                "(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(go);});</script>")
-WHO_CSS = """
-body,.card{width:1100px!important}
-.top{font-size:20px!important;letter-spacing:1.5px!important}.top img{width:32px!important;height:32px!important}
-.top .pill{font-size:20px!important;padding:5px 12px!important}
-.hl{margin:10px 0 0!important;padding:10px 18px!important}.hl .h1{font-size:28px!important}.hl .h2{font-size:21px!important}
-.wn{display:grid;grid-template-columns:1fr 1fr;gap:12px 14px;margin-top:12px}
-.wnt{position:relative;background:rgba(255,255,255,.065);border-radius:14px;padding:4px 14px;display:flex;flex-direction:column}
-.wnt.cold{opacity:.62}
-.wnr{display:grid;grid-template-columns:40px minmax(0,1fr) auto 98px;gap:8px;align-items:center;padding:7px 0;min-height:70px;flex:1 1 auto}
-.wnr+.wnr{border-top:1px solid rgba(255,255,255,.08)}
-.wnr .rk{font-size:21px;font-weight:900;color:#ffd166;text-align:center;font-variant-numeric:tabular-nums;letter-spacing:-.5px}
-.wnr .wnm.s{font-size:19px;overflow:visible;text-overflow:clip}
-.wnr .wnm{font-size:24px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:clip;text-transform:none;letter-spacing:0}
-.wnr .wch2{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px}
-.wnr .wch2 span{background:#f5c542;color:#1b1f2a;font-weight:900;font-size:17px;border-radius:7px;padding:1px 8px;white-space:nowrap}
-.wnr .wch2 span small{font-size:14px;font-weight:800;opacity:.75;margin-left:5px}
-.wnr .no{font-size:18px;color:#8b95a8;font-style:italic;margin-top:3px;white-space:nowrap}
-.wnr .wch2 span.bn{background:transparent;color:#c3cad8;box-shadow:inset 0 0 0 1.5px #6b7385;font-weight:800}
-.wnr .wch2 span.bn i{font-style:normal;font-size:12px;font-weight:900;letter-spacing:.8px;color:#8b95a8;margin-right:5px}
-.wnr .wch2 span.bn small{opacity:.9}
-.wnr .po{text-align:right;font-size:18px;font-weight:800;color:#cfd5e1;white-space:nowrap;line-height:1.3}
-.wnr .po .wl{font-size:16px}
-.wnr .po b{color:#fff;font-size:21px}.wnr .po .g{color:#7ee2a8}.wnr .po .r{color:#ff9a9e}.wnr .po .out{color:#7d879b;font-style:italic}
-.wnr .wp{height:52px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:900;letter-spacing:-.5px;
- background:rgba(255,255,255,.08);color:#8b95a8;font-variant-numeric:tabular-nums}
-.wnr.fav .wp{background:linear-gradient(180deg,#4be38e,#1faa59);color:#062312}
-.wnt .tg{position:absolute;top:-11px;right:14px;font-size:14px;font-weight:900;letter-spacing:1.2px;padding:2px 9px;border-radius:6px;
- background:#ffd166;color:#1b1305}
-"""
-
-
-def nfl_preview_fantasy_html(events, live, ol, title, show_teams=None):
-    """Pre-game card (30 min before kick-off): every matchup as a tile, best-ranked matchups first; each side shows
-    its standings rank, its players in this game (with projections), playoff odds with a win / a loss, win chance."""
-    import html as H
-    k = parse_time(events[0]["date"]).astimezone(UK)
-    players = sleeper_players("nfl")
-    proj = nfl_projections(live["week"])
-    ppl = _wb_people("nfl")
-
-    def mine(r):
-        return [p for p in ol[r]["left"] if show_teams is None or (players.get(p) or {}).get("team") in show_teams]
-
-    here = show_teams or {sl_team(t["team"]["abbreviation"]) for e in events for t in teams_of(e)}
-
-    def bench(r):
-        x = live["rosters"][r]
-        on = set(x.get("starters") or [])
-        out = [p for p in x.get("players") or [] if p not in on and ((players.get(p) or {}).get("team") or p) in here]
-        return sorted(out, key=lambda p: -proj.get(str(p), 0))
-
-    def chip_name(p):
-        pl = players.get(p) or {}
-        return short_name(pl.get("full_name") or "") or (pl.get("last_name", p) + " D/ST")
-
-    tiles = []
-    for a, b in _rank_sorted(live["pairs"], ol):
-        rows, any_in = [], False
-        for r, w in ((a, ol[a]["win"]), (b, 100 - ol[a]["win"])):
-            pe, o = ppl.get(r) or {}, ol[r]
-            ps = mine(r)
-            bn = bench(r)
-            any_in = any_in or bool(ps)
-            chips = "".join(f"<span>{H.escape(chip_name(p))}<small>{proj.get(str(p), 0):.1f}</small></span>" for p in ps[:3])
-            chips += "".join(f"<span class='bn'><i>BN</i>{H.escape(chip_name(p))}<small>{proj.get(str(p), 0):.1f}</small></span>"
-                             for p in bn[:6])
-            who = (f"<div class='wch2'>{chips}</div>" if ps or bn else "<div class='no'>nobody playing</div>")
-            if o["po"] < 0.5 and (o["po_w"] or 0) < 0.5:
-                po = "<div class='po'><span class='out'>out of the race</span></div>"
-            else:
-                po = (f"<div class='po'>playoffs <b>{o['po']:.0f}%</b>"
-                      + (f"<br><span class='wl'>win <span class='g'>{_pct(o['po_w'])}</span> · lose <span class='r'>{_pct(o['po_l'])}</span></span>"
-                         if o["po_w"] is not None and o["po_l"] is not None and abs(o["po_w"] - o["po_l"]) >= 3 else "")
-                      + "</div>")
-            rows.append(f"<div class='wnr{' fav' if w >= 50 else ''}'><div class='rk'>#{pe.get('rank', '–')}</div>"
-                        f"<div style='min-width:0'><div class='wnm{' s' if len(live['rosters'][r]['manager']) > 10 else ''}'>{H.escape(live['rosters'][r]['manager'])}</div>{who}</div>"
-                        f"{po}<div class='wp'>{w:.0f}%</div></div>")
-        tag = "<div class='tg'>🔥 COIN FLIP</div>" if 42 <= ol[a]["win"] <= 58 and any_in else ""
-        tiles.append(f"<div class='wnt{'' if any_in else ' cold'}'>{tag}{''.join(rows)}</div>")
-    pill = "KICK-OFF IMMINENT" if now_utc() > parse_time(events[0]["date"]) else f"KICK-OFF {k:%H:%M} UK"
-    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL · WEEK {live['week']} · {H.escape(title.upper())}</div>"
-            f"<div class='pill'>{pill}</div></div><div class='wn'>{''.join(tiles)}</div>")
-    return _card("--a:#5b7bd5;--h:#d50a0a", body, extra_css=WHO_CSS, width=1100).replace("<head>", "<head>" + BENCH_FIT_JS, 1)
-
-
-# ---- big games get hype: NFL 30+ "BIG GAME", 40+ "MONSTER GAME"; NBA (lock-in, defence-heavy) 55+ / 70+.
-#   Config: <sport>.hype = [big, monster]. Works on the TD/FG scorer panels, game-card rows and grouped NBA rows,
-#   stacks with the season-high ribbon (that one sits on the other side). Animated in GIFs, glowing in stills.
-HYPE_DEFAULT = {"nfl": (30, 40), "nba": (55, 70)}
-
-HYPE_CSS = """
-.pp5.h3,.pr2.h3,.tpr.h3,.pp5.h4,.pr2.h4,.tpr.h4{position:relative;overflow:visible!important}
-.pp5.h3,.pr2.h3,.tpr.h3{box-shadow:0 0 0 3px #ff8a00,0 0 26px rgba(255,120,0,.6)!important;
- background:linear-gradient(120deg,rgba(110,38,0,.9),rgba(24,12,8,.88))!important}
-.pp5.h4,.pr2.h4,.tpr.h4{box-shadow:0 0 0 4px #ffd600,0 0 44px rgba(255,40,0,.9)!important;
- background:radial-gradient(circle at 15% 0%,rgba(255,90,0,.6),rgba(130,0,0,.8) 55%,rgba(30,4,4,.92))!important}
-.hyr{position:absolute;top:-15px;right:14px;z-index:7;font-size:20px;font-weight:900;letter-spacing:1.2px;padding:3px 12px;
- border-radius:8px;white-space:nowrap;background:linear-gradient(90deg,#ff3d00,#ff9100,#ffd600,#ff9100,#ff3d00);
- background-size:240px 100%;color:#1a0800;box-shadow:0 0 16px rgba(255,120,0,.75)}
-.hyr.h4{font-size:22px;color:#fff;text-shadow:0 1px 0 rgba(0,0,0,.6);
- background:linear-gradient(90deg,#9e0000,#ff2d00,#ffb000,#ff2d00,#9e0000);background-size:240px 100%;box-shadow:0 0 24px rgba(255,50,0,1)}
-.pr2 .hyr{right:auto;left:70px}.pr2.h3,.pr2.h4{padding-top:16px!important}
-.tpr .hyr{right:90px;top:-13px;font-size:16px}.tpr.h3,.tpr.h4{margin-top:10px}
-.pp5.h3,.pp5.h4{padding-top:28px!important}
-.pp5.h3 .gn span em{color:#ffb347!important}
-.pp5.h4 .gn span em{color:#ffd600!important;text-shadow:0 0 12px rgba(255,60,0,.95)}
-.pp5.h3 .gn,.pp5.h4 .gn{white-space:nowrap}
-.pr2.h3 .fp,.tpr.h3 .fp5{background:linear-gradient(180deg,#ffc04d,#ff6a00)!important;color:#1a0800!important}
-.pr2.h4 .fp,.tpr.h4 .fp5{background:linear-gradient(180deg,#fff066,#ff3d00)!important;color:#1a0000!important;
- box-shadow:0 0 18px rgba(255,60,0,.9)}
-.pr2.h3 .fp{font-size:35px!important}.pr2.h4 .fp{font-size:38px!important}
-"""
-
-ANIM_CSS += """
-@keyframes a_hype{0%,100%{box-shadow:0 0 0 3px #ff8a00,0 0 16px rgba(255,120,0,.45)}50%{box-shadow:0 0 0 3px #ffb000,0 0 44px rgba(255,140,0,1)}}
-@keyframes a_mon{0%,100%{box-shadow:0 0 0 4px #ffd600,0 0 30px rgba(255,40,0,.8)}25%{box-shadow:0 0 0 4px #ff3d00,0 0 64px rgba(255,200,0,1)}
- 50%{box-shadow:0 0 0 4px #ffd600,0 0 36px rgba(255,40,0,.9)}75%{box-shadow:0 0 0 4px #fff,0 0 70px rgba(255,90,0,1)}}
-@keyframes a_shake{0%,100%{transform:translate(0,0) rotate(0)}20%{transform:translate(-2px,1px) rotate(-2deg)}
- 40%{transform:translate(2px,-1px) rotate(2deg)}60%{transform:translate(-1px,-1px) rotate(-1deg)}80%{transform:translate(1px,1px) rotate(1deg)}}
-@keyframes a_embers{from{background-position:0 0,23px 30px}to{background-position:0 -60px,23px -30px}}
-.pp5.h3,.pr2.h3,.tpr.h3{animation:a_hype 1s ease-in-out infinite!important}
-.pp5.h4,.pr2.h4,.tpr.h4{animation:a_mon .5s linear infinite!important}
-.pp5.h4::after,.pr2.h4::after,.tpr.h4::after{content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;
- background-image:radial-gradient(circle,rgba(255,214,0,.9) 0 2px,transparent 3px),radial-gradient(circle,rgba(255,110,0,.8) 0 3px,transparent 4px);
- background-size:46px 60px,70px 60px;background-position:0 0,23px 30px;opacity:.45;animation:a_embers .5s linear infinite}
-.pp5.h4 .gn span em,.pr2.h4 .fp,.tpr.h4 .fp5{display:inline-block;animation:a_shake .5s linear infinite}
-.hyr{animation:a_shine 1s linear infinite}
-"""
-
-
-def _hype_levels(html_text):
-    sport = "nba" if "class='nbar'" in html_text else "nfl"
-    lv = (CONFIG.get(sport) or {}).get("hype") or HYPE_DEFAULT[sport]
-    return sport, float(lv[0]), float(lv[1])
-
-
-def _hype_scan(html_text):
-    """[(start, end, tier, points)] for every scorer panel / player row worth hype."""
-    sport, lo, hi = _hype_levels(html_text)
-    out = []
-    for cls, num_re in (("pp5", r"now <em>([\d.]+)</em>"), ("pr2", r"class='fp[^']*'>([\d.]+)"),
-                        ("tpr", r"class='fp5'>([\d.]+)")):
-        for m in re.finditer(r"<div class='%s[^']*'>" % cls, html_text):
-            e = _div_end(html_text, m.start())
-            v = re.search(num_re, html_text[m.start():e])
-            if v and float(v.group(1)) >= lo:
-                out.append((m.start(), m.end(), 4 if float(v.group(1)) >= hi else 3, float(v.group(1))))
-    return out
-
-
-def hype_mark(html_text):
-    """Add the BIG GAME / MONSTER GAME treatment to the panels and rows that earned it."""
-    try:
-        sport, lo, hi = _hype_levels(html_text)
-        found = sorted(_hype_scan(html_text), reverse=True)
-        if not found:
-            return html_text
-        for start, tag_end, tier, v in found:
-            tag = html_text[start:tag_end]
-            new = tag[:-2] + f" h{tier}'>"
-            label = (f"💥 MONSTER GAME · {v:g} PTS" if tier == 4 else f"🔥 BIG GAME · {v:g} PTS")
-            html_text = html_text[:start] + new + f"<span class='hyr h{tier}'>{label}</span>" + html_text[tag_end:]
-        return html_text.replace("</style>", HYPE_CSS + "</style>", 1)
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"hype skipped: {ex}")
-        return html_text
-
-
-_wants_animation_plain = wants_animation
-
-
-def wants_animation(html_text):
-    return _wants_animation_plain(html_text) or (
-        (CONFIG.get("animations") or {}).get("enabled", True) and any(t == 4 for _, _, t, _ in _hype_scan(html_text)))
-
-
-# ---- ribbons (season high, league record, big game) never leave their row and never cover text: they are merged into
-#      one strip held inside the row's own width, and the row gets room above its name.
-RIBBON_CSS = """
-.rb{position:relative;overflow:visible!important}
-.pr2.rb,.pp5.rb,.tpr.rb{padding-top:26px!important}
-.pl2>.pr2.rb,.tp>.tpr.rb{margin-top:12px!important}.lsx .pp5.rb{margin-top:8px!important}
-.rbs{position:absolute;top:-13px;left:10px;right:10px;display:flex;gap:6px;z-index:8;overflow:hidden;pointer-events:none;
- padding:0 2px 2px}
-.rbs>*{position:static!important;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
- font-size:16px!important;padding:3px 10px!important;letter-spacing:.8px!important;margin:0!important;box-shadow:none!important}
-.rbs>* em{font-size:15px!important;margin-left:4px!important}
-.pp5 .rbs{left:14px;right:14px}.pp5 .rbs>*{font-size:19px!important}.pp5 .rbs>* em{font-size:17px!important}
-.tpr.rb{padding-top:20px!important}.tpr .rbs>*{font-size:14px!important}
-"""
-
-
-def ribbon_merge(html_text):
-    try:
-        found = False
-        for cls in ("pp5", "pr2", "tpr"):
-            i = 0
-            while True:
-                m = re.compile(r"<div class='%s([^']*)'>" % cls).search(html_text, i)
-                if not m:
-                    break
-                e = _div_end(html_text, m.start())
-                blk = html_text[m.end():e - len("</div>")]
-                rib = []
-                for rx in (r"<span class='recr'>.*?</em></span>", r"<span class='hyr[^']*'>[^<]*</span>",
-                           r"<span class='shr'>.*?</em></span>"):
-                    mm = re.search(rx, blk)
-                    if mm:
-                        rib.append(mm.group(0))
-                        blk = blk.replace(mm.group(0), "", 1)
-                if not rib:
-                    i = e
-                    continue
-                short = []
-                for r in rib:
-                    r = re.sub(r"🏛️ NEW LEAGUE RECORD<em>best game in league history · old ([\d.]+) \((?:[^ ),]+ )*([^ ),]+), wk \d+\)</em>",
-                               r"🏛️ LEAGUE RECORD<em>· old \1 (\2)</em>", r)
-                    r = r.replace("<em>old best ", "<em>· old ")
-                    if cls != "pp5" or len(rib) > 1:          # points are on the card already
-                        r = re.sub(r"(GAME) · [\d.]+ PTS", r"\1", r)
-                    if cls != "pp5" and len(rib) > 1:          # two ribbons in a row: keep both readable
-                        r = re.sub(r" \([^()]*\)</em>", "</em>", r)
-                    short.append(r)
-                found = True
-                new = (m.group(0)[:-2] + " rb'>" + "<span class='rbs'>" + "".join(short) + "</span>" + blk)
-                html_text = html_text[:m.start()] + new + "</div>" + html_text[e:]
-                i = m.start() + len(new)
-        return html_text.replace("</style>", RIBBON_CSS + "</style>", 1) if found else html_text
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"ribbon layout skipped: {ex}")
-        return html_text
-
-
-# ---- positional rank badge on every player photo ("WR12"): the league-scoring season rank, like the Sleeper app.
-#      Same size for everyone; only the style escalates (#1 shimmering gold, top 3 gold, top 5 silver, top 12 bronze).
-_RANKS = {}
-
-RANK_CSS = """
-.pp5,.pr2,.as,.pp2,.pog{position:relative}
-.phw{position:relative;display:block;width:fit-content;line-height:0;margin-bottom:15px}
-.pr2>.phw{grid-column:1;grid-row:1/3}.pr2>.phw>img{width:58px!important;height:58px!important}
-.prk{position:absolute;left:50%;bottom:-19px;transform:translateX(-50%);z-index:6;font-style:normal;font-weight:900;font-size:16px;
- line-height:22px;height:24px;width:auto;min-width:68px;padding:0 7px;text-align:center;letter-spacing:.3px;border-radius:999px;box-sizing:border-box;
- background:#1f2937;color:#f3f4f6;border:1.5px solid #6b7280;white-space:nowrap;pointer-events:none;font-variant-numeric:tabular-nums;
- text-shadow:none}
-.as .prk,.pog .prk{min-width:58px;padding:0 6px;font-size:14px;height:22px;line-height:20px;bottom:-17px}
-.prk.r12{background:linear-gradient(180deg,#f8fafc,#cbd5e1);color:#0f172a;border-color:#f8fafc}
-.prk.r5{background:linear-gradient(135deg,#6d28d9,#a855f7 60%,#e879f9);color:#fff;border-color:#f0abfc;
- box-shadow:0 0 12px rgba(192,132,252,.85)}
-.prk.r3{background:linear-gradient(180deg,#ffe08a,#f5b942);color:#1b1305;border-color:#fff1b8;box-shadow:0 0 12px rgba(255,200,80,.85)}
-.prk.r1{background:linear-gradient(90deg,#f5b942,#fff6c2,#f5b942,#ffd166);background-size:136px 100%;color:#1b1305;
- border-color:#fffbe6;box-shadow:0 0 16px rgba(255,210,90,1),0 0 4px #fff}
-.prk .sp{display:inline-block;margin-right:2px}
-"""
-
-ANIM_CSS += """
-@keyframes a_rk{from{background-position:0 0}to{background-position:136px 0}}
-@keyframes a_tw{0%,100%{opacity:.35;transform:scale(.8)}50%{opacity:1;transform:scale(1.2)}}
-.prk.r1{animation:a_rk 1s linear infinite}
-.prk.r5 .sp{animation:a_tw .5s ease-in-out infinite}
-"""
-
-
-def position_ranks(sport):
-    """{sleeper pid: (position, rank)} from this season's stats scored with the league's settings (cached a day)."""
-    hit = _RANKS.get(sport)
-    if hit and time.time() - hit[0] < 86400:
-        return hit[1]
-    out = {}
-    try:
-        season = fetch_url(f"{SLEEPER}/state/{sport}").get("season")
-        stats = fetch_url(f"{SLEEPER}/stats/{sport}/regular/{season}?season_type=regular") or {}
-        sc = league_scoring(sport)
-        players = sleeper_players(sport)
-        by_pos = {}
-        for pid, st_ in stats.items():
-            if not isinstance(st_, dict):
-                continue
-            p = players.get(pid) or {}
-            pos = "DEF" if (sport == "nfl" and pid.isalpha() and pid.isupper()) else (p.get("position") or "")
-            if not pos:
-                continue
-            pts = sum(float(v or 0) * float(sc[k]) for k, v in st_.items() if k in sc and isinstance(v, (int, float)))
-            if pts > 0:
-                by_pos.setdefault(pos, []).append((pts, pid))
-        for pos, lst in by_pos.items():
-            for i, (_, pid) in enumerate(sorted(lst, reverse=True), 1):
-                out[pid] = (pos, i)
-    except Exception as e:  # noqa: BLE001
-        _log_plain(f"positional ranks unavailable: {e}")
-        if hit:
-            return hit[1]
-    _RANKS[sport] = (time.time(), out)
-    return out
-
-
-def _rank_badge(pos, rk):
-    tier = "r1" if rk == 1 else "r3" if rk <= 3 else "r5" if rk <= 5 else "r12" if rk <= 12 else ""
-    mark = "<span class='sp'>👑</span>" if rk == 1 else ("<span class='sp'>✦</span>" if 4 <= rk <= 5 else "")
-    return f"<em class='prk {tier}'>{mark}{pos}{rk}</em>"
-
-
-def _badge_pid(sport, blk, img, name_re, ranks, by_espn, by_name):
-    """Sleeper id of the player in one card block: data-pid, then the photo URL, then the name (+ team if shown)."""
-    m = re.search(r"data-pid='(\w+)'", blk)
-    if m:
-        return m.group(1)
-    if img:
-        src = img.group(1)
-        m = re.search(r"/players/thumb/(\w+)\.", src)
-        if m:
-            return m.group(1)
-        m = re.search(r"/headshots/(?:nfl|nba)/players/full/(\d+)\.", src)
-        if m and by_espn.get(m.group(1)):
-            return by_espn[m.group(1)]
-    nm = re.search(name_re, blk)
-    if not nm:
-        return None
-    t = H_unescape(nm.group(1)).strip()
-    if t.endswith(" D/ST") and sport == "nfl":
-        tm = sl_team(t.split()[0])
-        return tm if tm in ranks else None
-    hits = by_name.get(name_key(t)) or []
-    if len(hits) == 1:
-        return hits[0]
-    if hits:                                                # two players with one name: use the team on the card
-        teams = set(re.findall(r"\b([A-Z]{2,4})\b", re.sub(r"<[^>]+>", " ", blk)))
-        teams |= {sl_team(x) for x in teams}
-        players = sleeper_players(sport)
-        on = [pid for pid in hits if (players.get(pid) or {}).get("team") in teams]
-        return on[0] if len(on) == 1 else None
-    return None
-
-
-def H_unescape(t):
-    import html as H
-    return H.unescape(t)
-
-
-_BADGE_BLOCKS = (("pp5", r"class='nm(?: [^']*)?'>([^<]+)"), ("pr2", r"class='nm2(?: [^']*)?'>([^<]+)"),
-                 ("pp2", r"class='nm(?: [^']*)?'>([^<]+)"), ("pog", r"<b>([^<]+)</b>"), ("as", r"<b>([^<]+)</b>"))
-
-
-def rank_badges(html_text):
-    try:
-        sport = "nba" if ("class='nbar'" in html_text or "/nba/" in html_text) else "nfl"
-        if "data-pid=" not in html_text and not any(f"<div class='{c}" in html_text for c, _ in _BADGE_BLOCKS):
-            return html_text
-        ranks = position_ranks(sport)
-        if not ranks:
-            return html_text
-        players = sleeper_players(sport)
-        by_espn = _RANKS.setdefault(f"{sport}-espn", {})
-        if not by_espn:
-            for pid, p in players.items():
-                if p.get("espn_id"):
-                    by_espn[str(p["espn_id"])] = pid
-        by_name = _RANKS.get(f"{sport}-names")
-        if not by_name or by_name[0] != id(ranks):
-            names = {}
-            for pid in ranks:
-                p = players.get(pid) or {}
-                if p.get("full_name"):
-                    names.setdefault(name_key(p["full_name"]), []).append(pid)
-            _RANKS[f"{sport}-names"] = by_name = (id(ranks), names)
-        by_name = by_name[1]
-        found = False
-        for cls, name_re in _BADGE_BLOCKS:
-            out = []
-            for m in re.finditer(r"<div class='%s[ '][^>]*>" % cls, html_text):
-                e = _div_end(html_text, m.start())
-                blk = html_text[m.start():e]
-                img = re.search(r"<img[^>]*src='([^']+)'[^>]*>", blk)
-                if not img or "class='prk" in blk:
-                    continue
-                pid = _badge_pid(sport, blk, img, name_re, ranks, by_espn, by_name)
-                if pid in ranks:
-                    pos, rk = ranks[pid]
-                    out.append((m.start() + img.start(), m.start() + img.end(), _rank_badge(pos, rk)))
-            for a0, a1, badge in sorted(out, reverse=True):          # badge centred on the photo's bottom edge
-                html_text = html_text[:a0] + "<span class='phw'>" + html_text[a0:a1] + badge + "</span>" + html_text[a1:]
-                found = True
-        return html_text.replace("</style>", RANK_CSS + "</style>", 1) if found else html_text
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"rank badges skipped: {ex}")
-        return html_text
-
-
-# ------------------------------------------------ recap / playoff cards, redesigned to read without opening (inline)
-#   Same data as before, 1100 x 700 (Discord's full-width box), text >= ~22px in the card (~11px on screen):
-#   results + awards as big tiles, a short lineup "verdict" band instead of the full table, a race table with
-#   only what matters, the playoff picture and bracket as big tiles. Switch: config "recap_layout": "v2".
-RD_CSS = """
-body,.card{width:1100px!important}
-.top{font-size:19px!important;letter-spacing:1.5px!important}.top img{width:32px!important;height:32px!important}
-.top .pill{font-size:18px!important;padding:5px 12px!important}
-.hl{margin:10px 0 0!important;padding:10px 18px!important}.hl .h1{font-size:30px!important;line-height:1.15}
-.hl .h2{font-size:21px!important;margin-top:4px}
-.rd2{display:grid;grid-template-columns:430px 1fr;gap:16px;margin-top:12px}
-.sx{font-size:17px;font-weight:900;letter-spacing:1.6px;color:#c3cad8;margin:0 0 8px 2px}
-.rsl{display:flex;flex-direction:column;gap:7px}
-.rsr{display:grid;grid-template-columns:minmax(0,1fr) 84px;gap:1px 10px;align-items:center;background:rgba(255,255,255,.065);
- border-radius:11px;padding:6px 14px;font-variant-numeric:tabular-nums}
-.rsr b{font-size:22px;font-weight:900;white-space:nowrap;line-height:1.15}
-.rsr .s{font-size:24px;font-weight:900;text-align:right}.rsr .lo{color:#8b95a8}
-.rsr b.lo{font-weight:800;font-size:19px}.rsr .s.lo{font-size:20px}
-.rsr.blow{box-shadow:inset 4px 0 0 #ff8a3d}.rsr.close{box-shadow:inset 4px 0 0 #ffd166}
-.awg{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.awt{position:relative;background:rgba(255,255,255,.065);border-radius:12px;padding:11px 14px;min-height:96px}
-.awt .k{font-size:16px;font-weight:900;letter-spacing:1.2px;color:#ffd166}
-.awt .v{font-size:25px;font-weight:900;margin-top:4px;line-height:1.1}
-.awt .x{font-size:19px;color:#dbe0ea;margin-top:3px;line-height:1.25}
-.awt .x b{color:#fff}
-.awt.pow{background:linear-gradient(120deg,rgba(255,179,71,.22),rgba(255,255,255,.05))}
-.awt .prk{position:static!important;transform:none!important;display:inline-block;vertical-align:middle;margin-left:10px}
-.vb{display:flex;flex-direction:column;gap:6px;margin-top:12px;background:rgba(9,12,22,.55);border-radius:12px;padding:10px 16px}
-.vb div{font-size:20px;color:#dbe0ea;line-height:1.3}.vb b{color:#fff}.vb .c{color:#ff9a9e;font-weight:900}
-.st3{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:16px;margin-top:12px}
-.trw{display:grid;grid-template-columns:34px minmax(0,1fr) 70px 92px 200px 84px;gap:10px;align-items:center;height:41px;
- font-size:22px;font-variant-numeric:tabular-nums;border-radius:8px;padding:0 8px}
-.trw:nth-child(even){background:rgba(255,255,255,.04)}
-.trw.h{height:28px;font-size:15px;font-weight:900;letter-spacing:1.2px;color:#9aa3b5;background:none!important}
-.trw .k{color:#9aa3b5;font-weight:900}.trw .m{font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:clip}
-.trw .pf{color:#aab3c5}.trw.cut{border-bottom:2px dashed rgba(245,197,66,.7)}.trw.out{opacity:.5}
-.trw .po{display:grid;grid-template-columns:62px 1fr;gap:8px;align-items:center;font-weight:900}
-.trw .po i{height:10px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden}
-.trw .po i em{display:block;height:10px;border-radius:999px;background:linear-gradient(90deg,#1faa59,#7ee2a8)}
-.trw .ti{font-weight:900;color:#ffd166;text-align:right}
-.trw .chip{font-size:14px;font-weight:900;letter-spacing:.6px;border-radius:6px;padding:4px 7px;text-align:center;white-space:nowrap}
-.chip.in{background:#1faa59;color:#fff}.chip.bye{background:linear-gradient(90deg,#ffd166,#ffb347);color:#1b1305}
-.chip.out{background:#3a1218;color:#ff9a9e}.chip.alive{background:rgba(255,255,255,.1);color:#dbe0ea}
-.chip.mir{background:linear-gradient(90deg,#6d28d9,#a855f7);color:#fff}
-.sdc{display:flex;flex-direction:column;gap:10px}
-.sdt{background:rgba(255,255,255,.065);border-radius:12px;padding:11px 14px}
-.sdt .k{font-size:16px;font-weight:900;letter-spacing:1.2px;color:#c3cad8}
-.sdt .v{font-size:27px;font-weight:900;margin-top:3px;color:#ffd166;line-height:1.1}
-.sdt .x{font-size:19px;color:#dbe0ea;margin-top:3px;line-height:1.3}.sdt .x b{color:#fff}
-.mvl{display:flex;flex-direction:column;gap:3px;margin-top:4px;font-size:20px}
-.mvl .u{color:#7ee2a8;font-weight:900}.mvl .dn{color:#ff9a9e;font-weight:900}
-.stp2{display:grid;grid-template-columns:52px minmax(0,1fr);gap:12px;align-items:center;border-radius:12px;padding:10px 12px;
- background:rgba(255,255,255,.07)}
-.stp2 img,.stp2 .av{width:52px;height:52px;border-radius:50%;object-fit:cover;background:#2a3246;display:flex;align-items:center;
- justify-content:center;font-weight:900;font-size:22px}
-.stp2 b{font-size:24px;font-weight:900;display:block;line-height:1.1}.stp2 small{font-size:17px;font-weight:900;letter-spacing:1px}
-.stp2.in,.stp2.bye{box-shadow:inset 0 0 0 2px #1faa59;background:linear-gradient(120deg,rgba(31,170,89,.25),rgba(255,255,255,.04))}
-.stp2.in small,.stp2.bye small{color:#7ee2a8}
-.stp2.out{box-shadow:inset 0 0 0 2px rgba(255,154,158,.6)}.stp2.out small{color:#ff9a9e}
-.bk2{display:grid;grid-template-columns:1fr 1fr 0.9fr 270px;gap:14px;margin-top:12px;align-items:stretch}
-.bkc2{display:flex;flex-direction:column;gap:10px}
-.bkc2 .k{font-size:16px;font-weight:900;letter-spacing:1.3px;color:#c3cad8}
-.bkg2{display:flex;flex-direction:column;justify-content:space-around;flex:1;gap:12px}
-.bkm2{display:flex;flex-direction:column;gap:4px;background:rgba(255,255,255,.05);border-radius:12px;padding:6px}
-.bkt{display:grid;grid-template-columns:30px minmax(0,1fr) auto;gap:8px;align-items:center;border-radius:9px;padding:7px 10px;
- background:rgba(255,255,255,.07);font-variant-numeric:tabular-nums}
-.bkt .sd{font-size:18px;font-weight:900;color:#ffd166;text-align:center}
-.bkt b{font-size:22px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:clip;line-height:1.1}
-.bkt small{display:block;font-size:16px;color:#aab3c5;font-weight:700}
-.bkt .o{font-size:20px;font-weight:900;color:#7ee2a8}.bkt .o.lo{color:#9aa3b5}
-.bkt.w{box-shadow:inset 0 0 0 2px #ffd166}.bkt.l{opacity:.5}.bkt.tbd b{color:#8b95a8;font-weight:700}
-.bkye{font-size:16px;font-weight:900;letter-spacing:1px;color:#ffd166;text-align:center;padding:2px 0}
-.bko{background:rgba(9,12,22,.55);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:7px}
-.bko .k{font-size:16px;font-weight:900;letter-spacing:1.2px;color:#c3cad8}
-.bko div.r{display:grid;grid-template-columns:minmax(0,1fr) 54px;gap:8px;align-items:center;font-size:20px}
-.bko div.r span:first-child{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:clip}
-.bko div.r b{text-align:right;color:#ffd166}
-.bko i{grid-column:1/-1;height:7px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden;margin-top:-4px}
-.bko i em{display:block;height:7px;background:linear-gradient(90deg,#f5b942,#ffe08a)}
-"""
-
-
-def _rd_card(sport, body, css_vars, label):
-    body = re.sub(r"<span class='m'>([^<]{15,})</span>", r"<span class='m' style='font-size:16px;letter-spacing:-.2px'>\1</span>", body)
-    body = re.sub(r"<span class='m'>([^<]{12,})</span>", r"<span class='m' style='font-size:18px'>\1</span>", body)
-    body = re.sub(r"<div style='min-width:0'><b>([^<]{11,})</b>", r"<div style='min-width:0'><b style='font-size:18px'>\1</b>", body)
-    html_text = _card(css_vars, body, None, HL_CSS + RD_CSS + RANK_CSS, width=1100)
-    return _nba_theme(html_text, None, label) if sport == "nba" else html_text
-
-
-def _rd_top(sport, title, pill):
-    import html as H
-    logo = NFL_LOGO if sport == "nfl" else NBA_LOGO
-    return f"<div class='top'><div class='lg'><img src='{logo}'>{H.escape(title)}</div><div class='pill'>{H.escape(pill)}</div></div>"
-
-
-def recap_v2_html(sport, week, live, settings):
-    """Weekly recap as two inline-readable cards: (1) results + awards + lineup verdicts, (2) the title race."""
-    import html as H
-    league = CONFIG[sport].get("league_name", "League")
-    players = sleeper_players(sport)
-    names = {rid: x["manager"] for rid, x in live["rosters"].items()}
-    games, starters, bench = [], [], []
-    for ra, rb in live["pairs"]:
-        A, B = live["rosters"][ra], live["rosters"][rb]
-        games.append((A, B) if A["points"] >= B["points"] else (B, A))
-    for rid, x in live["rosters"].items():
-        for pid in x["players"]:
-            p = players.get(pid) or {}
-            nm = p.get("full_name") or (f"{p.get('last_name', pid)} D/ST" if p.get("position") == "DEF" else pid)
-            row = {"pid": pid, "name": nm, "pts": float(x["pp"].get(pid) or 0), "manager": x["manager"]}
-            (starters if pid in x["starters"] else bench).append(row)
-    scores, rec = season_history(sport, week)
-    odds, po_start, n_po = simulate_odds(sport, settings, scores, rec, week)
-    table = sorted(rec.keys(), key=lambda r: (-(rec[r]["w"] + 0.5 * rec[r]["t"]), -rec[r]["pf"]))
-    allr = [x for x in live["rosters"].values() if x.get("matchup_id")]
-    allpts = sorted((x["points"] for x in allr), reverse=True)
-
-    def allplay(p):
-        return sum(1 for q in allpts if q < p), len(allpts) - 1
-    top = max(allr, key=lambda x: x["points"])
-    blow = max(games, key=lambda g: g[0]["points"] - g[1]["points"])
-    close = min(games, key=lambda g: g[0]["points"] - g[1]["points"])
-    lucky = min((w for w, _ in games), key=lambda x: x["points"])
-    unlucky = max((l for _, l in games), key=lambda x: x["points"])
-    pow_ = max(starters, key=lambda p: p["pts"], default=None)
-    lw, ln_ = allplay(lucky["points"])
-    uw, un = allplay(unlucky["points"])
-    proj = {}
-    try:
-        proj = nfl_projections(week) if sport == "nfl" else {}
-    except Exception:  # noqa: BLE001
-        pass
-    ranks = position_ranks(sport)
-    pow_extra, badge = "", ""
-    if pow_:
-        pj = proj.get(pow_["pid"])
-        pow_extra = f"<b>{pow_['pts']:.1f}</b> pts for {H.escape(pow_['manager'])}" + (f" · proj {pj:.1f}" if pj else "")
-        if pow_["pid"] in ranks:
-            pos, rk = ranks[pow_["pid"]]
-            badge = _rank_badge(pos, rk)
-    tiles = [
-        ("⭐ PLAYER OF THE WEEK", pow_["name"] if pow_ else "—", pow_extra, " pow", badge),
-        ("💥 BIGGEST WIN", blow[0]["manager"], f"by <b>{blow[0]['points'] - blow[1]['points']:.1f}</b> over {H.escape(blow[1]['manager'])}", "", ""),
-        ("😬 CLOSEST FINISH", close[0]["manager"], f"by <b>{close[0]['points'] - close[1]['points']:.1f}</b> over {H.escape(close[1]['manager'])}", "", ""),
-        ("🍀 LUCKIEST WIN", lucky["manager"], f"won with {lucky['points']:.1f} (beats {lw} of {ln_})", "", ""),
-        ("🥶 UNLUCKIEST LOSS", unlucky["manager"], f"lost with {unlucky['points']:.1f} (beats {uw} of {un})", "", ""),
-    ]
-    lr = lineup_report(sport, week, live, settings)
-    verdicts = []
-    if lr:
-        tiles.append(("🧠 MANAGER OF THE WEEK", lr[0]["manager"], f"{lr[0]['eff']:.0f}% of their best lineup", "", ""))
-        perfect = [r["manager"] for r in lr if r["eff"] >= 99.5]
-        if perfect:
-            verdicts.append(f"🧠 <b>Perfect lineups:</b> {H.escape(', '.join(perfect[:4]))}" + (f" +{len(perfect) - 4}" if len(perfect) > 4 else ""))
-        for r in [r for r in lr if r["cost"]][:2]:
-            bp = players.get(r["top_bench"]) or {}
-            bname = bp.get("full_name") or (f"{bp.get('last_name', '')} D/ST" if bp else "")
-            verdicts.append(f"<span class='c'>💔 Bench cost {H.escape(r['manager'])} the win</span> · "
-                            f"{H.escape(bname)} scored {r['top_bench_pts']:.1f} on the bench vs {H.escape(r['opp'])}")
-        worst = max(lr, key=lambda r: r["left"])
-        if worst["left"] >= 5 and not worst["cost"]:
-            verdicts.append(f"🪑 <b>Most left on the bench:</b> {H.escape(worst['manager'])} −{worst['left']:.1f}")
-    else:
-        bb = max(bench, key=lambda p: p["pts"], default=None)
-        low = min(allr, key=lambda x: x["points"])
-        tiles.append(("📉 LOW SCORE", low["manager"], f"{low['points']:.1f} pts", "", ""))
-        if bb:
-            verdicts.append(f"🪑 <b>Bench star:</b> {H.escape(bb['name'])} {bb['pts']:.1f} on {H.escape(bb['manager'])}'s bench")
-    res = "".join(
-        f"<div class='rsr{' blow' if (w, l) == blow else ' close' if (w, l) == close else ''}'><b>{H.escape(w['manager'])}</b>"
-        f"<span class='s'>{w['points']:.1f}</span><b class='lo'>{H.escape(l['manager'])}</b>"
-        f"<span class='s lo'>{l['points']:.1f}</span></div>" for w, l in games)
-    aw = "".join(f"<div class='awt{cls}'><div class='k'>{k}</div><div class='v'>{H.escape(v)}{bd}</div><div class='x'>{x}</div></div>"
-                 for k, v, x, cls, bd in tiles)
-    vb = f"<div class='vb'>{''.join(f'<div>{v}</div>' for v in verdicts[:3])}</div>" if verdicts else ""
-    body_a = (_rd_top(sport, f"{league.upper()} · WEEK {week}", "WEEKLY RECAP · 1 OF 2")
-              + f"<div class='hl'><div class='h1'>Week {week}: {H.escape(top['manager'])} top-scores with {top['points']:.1f}</div></div>"
-              + f"<div class='rd2'><div><div class='sx'>RESULTS</div><div class='rsl'>{res}</div></div>"
-              + f"<div><div class='sx'>AWARDS</div><div class='awg'>{aw}</div></div></div>{vb}")
-    # card 2: the race
-    rows = ["<div class='trw h'><span>#</span><span>MANAGER</span><span>W-L</span><span>PF</span><span>PLAYOFFS</span>"
-            "<span style='text-align:right'>TITLE</span></div>"]
-    for i, r in enumerate(table, 1):
-        x = rec[r]
-        po, ti = odds[r]
-        rows.append(f"<div class='trw{' cut' if i == n_po else ''}{' out' if po < 0.5 else ''}'><span class='k'>{i}</span>"
-                    f"<span class='m'>{H.escape(names.get(r, '?'))}</span><span>{x['w']}-{x['l']}{'-' + str(x['t']) if x['t'] else ''}</span>"
-                    f"<span class='pf'>{x['pf']:.0f}</span><span class='po'><span>{po:.0f}%</span><i><em style='width:{max(po, 1.5):.0f}%'></em></i></span>"
-                    f"<span class='ti'>{ti:.0f}%</span></div>")
-    fav = max(odds, key=lambda r: odds[r][1])
-    side = [f"<div class='sdt'><div class='k'>🏆 TITLE FAVOURITE</div><div class='v'>{H.escape(names[fav])}</div>"
-            f"<div class='x'><b>{odds[fav][1]:.0f}%</b> to win it all</div></div>"]
-    try:
-        lid = str(CONFIG[sport].get("sleeper_league_id")).strip()
-        ms = fetch_url(f"{SLEEPER}/league/{lid}/matchups/{week + 1}", tries=2) if week + 1 < po_start else []
-        by = {}
-        for m in ms:
-            if m.get("matchup_id"):
-                by.setdefault(m["matchup_id"], []).append(m["roster_id"])
-        pairs = [p for p in by.values() if len(p) == 2]
-        if pairs:
-            a, b = max(pairs, key=lambda p: min(odds[p[0]][0], odds[p[1]][0]) + 0.3 * (odds[p[0]][0] + odds[p[1]][0]))
-            side.append(f"<div class='sdt'><div class='k'>👀 GAME TO WATCH NEXT WEEK</div><div class='x'><b>{H.escape(names[a])}</b> v "
-                        f"<b>{H.escape(names[b])}</b><br>playoff odds {odds[a][0]:.0f}% and {odds[b][0]:.0f}%</div></div>")
-    except Exception as e:  # noqa: BLE001
-        _log_plain(f"recap next week unavailable: {e}")
-    try:
-        now_r, _, _ = power_rankings(sport, week)
-        prev_r, _, _ = power_rankings(sport, week - 1) if week > 1 else ([], {}, {})
-        mv = []
-        for i, r in enumerate(now_r, 1):
-            if r in prev_r:
-                d = (prev_r.index(r) + 1) - i
-                if d:
-                    mv.append((abs(d), d, i, r))
-        mv = sorted(mv, reverse=True)[:3]
-        if now_r:
-            items = "".join(f"<div><span class='{'u' if d > 0 else 'dn'}'>{'▲' if d > 0 else '▼'}{abs(d)}</span> "
-                            f"{H.escape(names.get(r, '?'))} <span style='color:#9aa3b5'>now #{i}</span></div>" for _, d, i, r in mv)
-            side.append(f"<div class='sdt'><div class='k'>⚡ POWER RANKINGS</div><div class='x'>#1 <b>{H.escape(names.get(now_r[0], '?'))}</b></div>"
-                        f"<div class='mvl'>{items}</div></div>")
-    except Exception as e:  # noqa: BLE001
-        _log_plain(f"recap power rankings unavailable: {e}")
-    left = max(0, po_start - week - 1)
-    body_b = (_rd_top(sport, f"{league.upper()} · WEEK {week}", "TITLE RACE · 2 OF 2")
-              + f"<div class='hl'><div class='h1'>The race: top {n_po} make it, {left} week{'s' if left != 1 else ''} to go</div></div>"
-              + f"<div class='st3'><div>{''.join(rows)}</div><div class='sdc'>{''.join(side)}</div></div>")
-    v = "--a:#1faa59;--h:#5b7bd5"
-    return _rd_card(sport, body_a, v, "WEEKLY RECAP"), _rd_card(sport, body_b, v, "TITLE RACE")
-
-
-def playoff_picture_v2_html(sport, settings, rec, status, changes, odds, week):
-    import html as H
-    people = _league_people(sport)
-    s = settings.get("settings") or {}
-    n, po = int(s.get("playoff_teams") or 6), int(s.get("playoff_week_start") or 15)
-    byes = _byes(n)
-    words = {"bye": "🔒 BYE CLINCHED", "in": "🔒 PLAYOFF SPOT CLINCHED", "out": "❌ ELIMINATED"}
-    stamps = []
-    for rid, old, new in changes[:4]:
-        pe = people.get(rid, {"manager": "?"})
-        r = rec[rid]
-        stamps.append(f"<div class='stp2 {new}'>{_avatar(pe)}<div><b>{H.escape(pe['manager'])}</b>"
-                      f"<small>{words[new]} · {r['w']}-{r['l']}</small></div></div>")
-    rows = ["<div class='trw h' style='grid-template-columns:34px minmax(0,1fr) 70px 220px 84px'><span>#</span><span>MANAGER</span>"
-            "<span>W-L</span><span>STATUS</span><span style='text-align:right'>ODDS</span></div>"]
-    for rid in sorted(rec, key=lambda r: status[r]["seed"]):
-        x, stt = rec[rid], status[rid]
-        if stt["status"] == "alive" and odds.get(rid, (0, 0))[0] < 0.5:
-            chip = "<span class='chip mir'>NEEDS A MIRACLE</span>"
-        elif stt["status"] == "alive":
-            chip = (f"<span class='chip alive'>{stt['magic']} WIN{'S' if stt['magic'] != 1 else ''} TO CLINCH</span>"
-                    if stt["magic"] else "<span class='chip alive'>IN THE HUNT</span>")
-        else:
-            chip = f"<span class='chip {stt['status']}'>{ {'bye': 'BYE ✓', 'in': 'CLINCHED ✓', 'out': 'ELIMINATED'}[stt['status']] }</span>"
-        rows.append(f"<div class='trw{' cut' if stt['seed'] == n else ''}{' out' if stt['status'] == 'out' else ''}' "
-                    f"style='grid-template-columns:34px minmax(0,1fr) 70px 220px 84px'><span class='k'>{stt['seed']}</span>"
-                    f"<span class='m'>{H.escape(people.get(rid, {}).get('manager', '?'))}</span><span>{x['w']}-{x['l']}</span>"
-                    f"<span style='justify-self:start'>{chip}</span><span class='ti' style='color:#fff'>{odds.get(rid, (0, 0))[0]:.0f}%</span></div>")
-    ins = [people[c[0]]["manager"] for c in changes if c[2] in ("in", "bye") and c[0] in people]
-    outs = [people[c[0]]["manager"] for c in changes if c[2] == "out" and c[0] in people]
-    head = " · ".join(x for x in ((" & ".join(ins) + (" clinch!" if len(ins) > 1 else " clinches!")) if ins else "",
-                                  (" & ".join(outs) + (" are out" if len(outs) > 1 else " is out")) if outs else "") if x)
-    left = max(po - 1 - week, 0)
-    body = (_rd_top(sport, f"{(settings.get('name') or '').upper()} · PLAYOFF PICTURE", f"{left} WEEK{'S' if left != 1 else ''} LEFT · TOP {n}")
-            + f"<div class='hl'><div class='h1'>{H.escape(head)}</div><div class='h2'>Gold line = the playoff cut · top {byes} get a bye</div></div>"
-            + f"<div class='st3' style='grid-template-columns:minmax(0,1fr) 340px'><div>{''.join(rows)}</div>"
-            + f"<div class='sdc'>{''.join(stamps)}</div></div>")
-    return _rd_card(sport, body, "--a:#1faa59;--h:#d4af37", "PLAYOFF PICTURE")
-
-
-def bracket_v2_html(sport, settings, br, rec, odds, stage):
-    import html as H
-    people = _league_people(sport)
-    seed_of = {r: s for s, r in br["seed"].items()}
-
-    def team(rid, g=None, side=None):
-        if rid is None:
-            return "<div class='bkt tbd'><span class='sd'>?</span><b>TBD</b><span></span></div>"
-        pe = people.get(rid, {"manager": "?"})
-        x = rec.get(rid, {"w": 0, "l": 0})
-        cls, right = "", (f"<span class='o'>{odds.get(rid, 0):.0f}%</span>" if odds else "<span></span>")
-        if g and g.get("win"):
-            cls = " w" if g["win"] == rid else " l"
-            right = f"<span class='o{'' if g['win'] == rid else ' lo'}'>{(g['pa'] if side == 'a' else g['pb']):.1f}</span>"
-        return (f"<div class='bkt{cls}'><span class='sd'>{seed_of.get(rid, '')}</span><div style='min-width:0'><b>{H.escape(pe['manager'])}</b>"
-                f"<small>{x['w']}-{x['l']}</small></div>{right}</div>")
-
-    def game(g):
-        return f"<div class='bkm2'>{team(g['a'], g, 'a')}{team(g['b'], g, 'b')}</div>"
-    po = br["po"]
-    r1 = (f"<div class='bkc2'><div class='k'>ROUND 1 · WK {po}</div><div class='bkg2'>"
-          f"<div class='bkm2'>{team(br['seed'].get(1))}<div class='bkye'>BYE</div></div>{game(br['r1'][0])}{game(br['r1'][1])}"
-          f"<div class='bkm2'>{team(br['seed'].get(2))}<div class='bkye'>BYE</div></div></div></div>")
-    r2 = f"<div class='bkc2'><div class='k'>SEMI-FINALS · WK {po + 1}</div><div class='bkg2'>{game(br['r2'][0])}{game(br['r2'][1])}</div></div>"
-    fn = f"<div class='bkc2'><div class='k'>🏆 FINAL · WK {po + 2}</div><div class='bkg2'>{game(br['final'])}</div></div>"
-    if br["champ"]:
-        pe = people.get(br["champ"], {"manager": "?"})
-        side = f"<div class='bko'><div class='k'>🏆 CHAMPION</div><div class='r'><span>{H.escape(pe['manager'])}</span><b>👑</b></div></div>"
-    else:
-        rows = "".join(f"<div class='r'><span>{H.escape(people.get(r, {}).get('manager', '?'))}</span><b>{p:.0f}%</b>"
-                       f"<i><em style='width:{max(p, 2):.0f}%'></em></i></div>" for r, p in sorted(odds.items(), key=lambda kv: -kv[1]))
-        side = f"<div class='bko'><div class='k'>TITLE ODDS</div>{rows}</div>"
-    titles = {0: "THE PLAYOFFS ARE SET", 1: "ROUND 1 RESULTS", 2: "THE FINAL IS SET", 3: "CHAMPION CROWNED"}
-    head = {0: "Six teams, one trophy: the bracket is set", 1: "Round 1 is done: the semi-finals are set",
-            2: "Two left standing: it's the final",
-            3: f"🏆 {people.get(br['champ'], {}).get('manager', '?')} is the champion!"}.get(stage, "")
-    body = (_rd_top(sport, f"{(settings.get('name') or '').upper()} · PLAYOFFS {settings.get('season', '')}", titles.get(stage, "PLAYOFFS"))
-            + f"<div class='hl'><div class='h1'>{H.escape(head)}</div></div><div class='bk2'>{r1}{r2}{fn}{side}</div>")
-    html_text = _rd_card(sport, body, "--a:#d4af37;--h:#5b7bd5", "PLAYOFFS")
-    if br["champ"]:
-        html_text = html_text.replace("<div class='card'", "<div class='card shc'", 1).replace("</style>", SH_CSS + "</style>", 1)
-    return html_text
-
-
-# ---- live: the recap / playoff posts use the redesigned cards; the old ones are only a fallback if a new one fails
-#      (config "recap_layout": "classic" goes back to the old cards)
-_recap_wide_classic = recap_wide_html
-_playoff_picture_classic = playoff_picture_html
-_bracket_classic = bracket_html
-
-
-def _v2_layout():
-    return CONFIG.get("recap_layout", "v2") == "v2"
-
-
-def recap_wide_html(sport, week, live, settings):
-    if _v2_layout():
-        try:
-            return recap_v2_html(sport, week, live, settings)
-        except Exception as ex:  # noqa: BLE001
-            _log_plain(f"new recap layout failed, using the classic one: {ex}")
-    return _recap_wide_classic(sport, week, live, settings)
-
-
-def playoff_picture_html(sport, settings, rec, status, changes, odds, week):
-    if _v2_layout():
-        try:
-            return playoff_picture_v2_html(sport, settings, rec, status, changes, odds, week)
-        except Exception as ex:  # noqa: BLE001
-            _log_plain(f"new playoff picture layout failed, using the classic one: {ex}")
-    return _playoff_picture_classic(sport, settings, rec, status, changes, odds, week)
-
-
-def bracket_html(sport, settings, br, rec, odds, stage):
-    if _v2_layout():
-        try:
-            return bracket_v2_html(sport, settings, br, rec, odds, stage)
-        except Exception as ex:  # noqa: BLE001
-            _log_plain(f"new bracket layout failed, using the classic one: {ex}")
-    return _bracket_classic(sport, settings, br, rec, odds, stage)
-
-
-_render_card_small = render_card
-_render_anim_small = render_anim
-
-
-def _inline_ready(html_text):
-    return rank_badges(ribbon_merge(hype_mark(readable_inline(_shape_more(_moment_landscape(html_text))))))
-
-
-def render_card(html_text, width=None):
-    return _render_card_small(_inline_ready(html_text), width)
-
-
-def render_anim(html_text, width=None):
-    return _render_anim_small(_inline_ready(html_text), width)
 
 
 
@@ -10516,6 +8262,82 @@ def save_state(st):
         import threading
         threading.Thread(target=_hc_ping, args=(url,), daemon=True).start()     # never holds up a post
     return r
+
+
+
+# ------------------------------------------------ animations, server-safe: draw the card once, photograph every frame
+# The old way loaded 40 copies of the card in one Chrome screenshot; on the 1-core Oracle server Chrome took the
+# picture before some copies had finished drawing, so frames had missing pieces (flicker) and builds took 20-35s.
+# With Playwright (installed on the server) each frame waits until it is fully drawn. No Playwright -> old way.
+
+_render_anim_grid = _render_anim_timed
+
+
+def _playwright_ok():
+    try:
+        import playwright.sync_api  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _render_anim_pw(html_text, width=None):
+    import io
+    try:
+        from PIL import Image
+        from playwright.sync_api import sync_playwright
+    except Exception:  # noqa: BLE001
+        return None
+    chrome = find_chrome()
+    if not chrome:
+        return None
+    try:
+        html_text = inline_images(html_text)
+    except Exception:  # noqa: BLE001
+        pass
+    if width is None:
+        m = re.search(r"body,\.card\{width:(\d+)px", html_text)
+        width = int(m.group(1)) if m else 880
+    card = html_text.replace("</style>", ANIM_CSS + ANIM_FREEZE + "</style>", 1)
+    frames = []
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch(executable_path=chrome, args=["--no-sandbox", "--disable-gpu"])
+            try:
+                pg = b.new_page(viewport={"width": width, "height": 1000}, device_scale_factor=1)
+                pg.set_content(card, wait_until="load", timeout=60000)
+                pg.evaluate("document.fonts.ready.then(() => true)")
+                pg.wait_for_function("[...document.images].every(i => i.complete)", timeout=20000)
+                h = pg.evaluate("Math.ceil(document.querySelector('.card').getBoundingClientRect().height)")
+                pg.set_viewport_size({"width": width, "height": int(h)})
+                for i in range(ANIM_FRAMES):
+                    pg.evaluate(f"document.documentElement.style.setProperty('--t', '{i * ANIM_SECONDS / ANIM_FRAMES:.3f}')")
+                    shot = pg.screenshot(type="png", animations="allow")
+                    frames.append(Image.open(io.BytesIO(shot)).convert("RGB"))
+            finally:
+                b.close()
+        scale = ANIM_WIDTH / width if width > ANIM_WIDTH else 1.0
+        if scale != 1.0:
+            frames = [f.resize((int(f.width * scale), int(f.height * scale)), Image.LANCZOS) for f in frames]
+        pal = frames[0].quantize(colors=255, method=Image.Quantize.MEDIANCUT)
+        q = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
+        buf = io.BytesIO()
+        q[0].save(buf, format="GIF", save_all=True, append_images=q[1:], loop=0,
+                  duration=int(ANIM_SECONDS * 1000 / ANIM_FRAMES), optimize=True, disposal=1)
+        data = buf.getvalue()
+        if len(data) > 9_000_000:
+            _log_plain(f"animation too big ({len(data) // 1024} KB): posting the still image")
+            return None
+        return data
+    except Exception as e:  # noqa: BLE001
+        _log_plain(f"animation failed, posting the still image: {e}")
+        return None
+
+
+def _render_anim_timed(html_text, width=None):          # used by the timing/bookkeeping wrapper above
+    if _playwright_ok():
+        return _render_anim_pw(html_text, width)          # never falls back to the flickery way on the server
+    return _render_anim_grid(html_text, width)
 
 
 # ===================================================================== main
@@ -10632,2907 +8454,6 @@ def push_state():
         if r.returncode and c[1] not in ("commit",):
             log(f"state push: {' '.join(c[:2])} failed: {r.stderr.strip()[:200]}")
             return
-
-
-
-# ------------------------------------------------ faster in-game posts: the still card goes out at once (~2-3s to
-#   build), the looping animation is built in the background and swapped into the same message when it's ready.
-#   One animation is built at a time (queued; Chrome runs at low priority so the next still card isn't slowed).
-#   Every edit of a message bumps its version; a swap is only made if nothing newer was put in the message since
-#   the animation was asked for (try edits, overturned stamps, corrections always win). Pending swaps live in memory
-#   only: after a restart the message simply keeps its still card. Switch: config animations.still_first (default on).
-import queue as _queue
-import threading as _threading
-
-_GIF_Q = _queue.Queue()
-_GIF_VER = {}                         # message id -> version (bumped by every edit that isn't a swap)
-_GIF_LOCK = _threading.Lock()         # an edit and a swap never interleave
-_GIF_WORKER = {"t": None}
-_GIF_LAST = {}                        # html + file name of the last still-first card (for the try-edit rebuilds)
-_GIF_LOG = []                         # (built secs, swapped secs after the still) for the report / tests
-
-
-def _still_first():
-    a = CONFIG.get("animations") or {}
-    return a.get("enabled", True) and a.get("still_first", True)
-
-
-def _gif_nice():
-    """Low CPU priority for the Chrome that builds animations (the bot has one core)."""
-    import shutil
-    if _threading.current_thread().name == "gif-swap" and shutil.which("nice"):
-        return ["nice", "-n", "15"]
-    return []
-
-
-def _gif_bump(message_id):
-    if message_id:
-        _GIF_VER[str(message_id)] = _GIF_VER.get(str(message_id), 0) + 1
-
-
-def _gif_queue(hook, message_id, html_text, name, t0=None, posted=None):
-    """Ask for the animated version of a posted still card (latest version of that message only)."""
-    if not (hook and message_id and html_text) or CAPTURE is not None:
-        return
-    job = {"hook": hook, "msg": str(message_id), "html": html_text, "name": name.rsplit(".", 1)[0] + ".gif",
-           "ver": _GIF_VER.get(str(message_id), 0), "t0": t0, "posted": posted or time.time()}
-    _GIF_Q.put(job)
-    if _GIF_WORKER["t"] is None or not _GIF_WORKER["t"].is_alive():
-        _GIF_WORKER["t"] = _threading.Thread(target=_gif_worker, name="gif-swap", daemon=True)
-        _GIF_WORKER["t"].start()
-
-
-def _gif_worker():
-    while True:
-        job = _GIF_Q.get()
-        try:
-            _gif_swap(job)
-        except Exception as ex:  # noqa: BLE001
-            _log_plain(f"animation swap failed: {ex}")
-        finally:
-            _GIF_Q.task_done()
-
-
-def _gif_swap(job):
-    msg = job["msg"]
-    if _GIF_VER.get(msg, 0) != job["ver"]:
-        return                                            # the message changed since: a newer job (or none) applies
-    t = time.time()
-    gif = render_anim(job["html"])
-    built = time.time() - t
-    if not gif:
-        _log_plain("animation not built: the post keeps its still card")
-        return
-    with _GIF_LOCK:
-        if _GIF_VER.get(msg, 0) != job["ver"]:
-            _log_plain("animation dropped: the post was edited while it was being built")
-            return
-        ok = _discord_edit_raw(job["hook"], msg, gif, job["name"])
-    if ok:
-        after = time.time() - job["posted"]
-        _GIF_LOG.append((round(built, 1), round(after, 1)))
-        del _GIF_LOG[:-40]
-        mom = f", {time.time() - job['t0']:.1f}s after the moment" if job.get("t0") else ""
-        _log_plain(f"gif swapped {after:.1f}s later (built in {built:.1f}s{mom})")
-        st = _NFL_ST.get("st") or {}
-        for r in (st.get("td_posts") or {}).values():   # later text-only edits must name the new file
-            if str(r.get("msg")) == msg:
-                r["file"] = job["name"]
-
-
-_discord_edit_raw = discord_edit
-
-
-def discord_edit(hook, message_id, png=None, name="live.png", content=None):
-    with _GIF_LOCK:
-        _gif_bump(message_id)
-        return _discord_edit_raw(hook, message_id, png, name, content)
-
-
-_post_card_animfirst = _post_card
-
-
-def _post_card(hook, html_text, content, embed, name):
-    """Animated moments: post the still card now and swap the animation in when it's built."""
-    if not ((CONFIG.get("bot") or {}).get("image_only", True) and wants_animation(html_text) and _still_first()):
-        return _post_card_animfirst(hook, html_text, content, embed, name)
-    for nm in list(_SH_HEAD):                             # same SEASON HIGH headline as the other paths
-        for k in ("img_title", "title"):
-            t = embed.get(k)
-            if t and nm in t and "SEASON HIGH" not in t:
-                embed[k] = f"🔥 SEASON HIGH! {t}"
-    _SH_HEAD.clear()
-    full = _inject_headline(html_text, embed)
-    png = render_card(full)
-    if not png:
-        return _post_card_animfirst(hook, html_text, content, embed, name)
-    still = name.rsplit(".", 1)[0] + ".png"
-    _GIF_LAST.clear()
-    _GIF_LAST.update(html=full, name=still)
-    t0 = _SEND_AT.get("t0")
-    if _SEND_AT.get("label") and not _SEND_AT["label"].startswith("still "):
-        _SEND_AT["label"] = "still " + _SEND_AT["label"]
-    _LAST_MSG.clear()
-    ok = discord(hook, [], name, files={still: png})
-    if ok is True and _LAST_MSG.get("id"):
-        _gif_queue(hook, _LAST_MSG["id"], full, still, t0)
-    return ok
-
-
-_rebuild_td_image_still = _rebuild_td_image
-
-
-def _rebuild_td_image(event, play, summary, ctx, tag):
-    _GIF_LAST.clear()
-    return _rebuild_td_image_still(event, play, summary, ctx, tag)
-
-
-def _gif_after_edit(hook, message_id):
-    """After a try / give-up edit made with a rebuilt still card: queue its animated version."""
-    if _GIF_LAST.get("html"):
-        _gif_queue(hook, message_id, _GIF_LAST["html"], _GIF_LAST["name"])
-
-
-
-# ------------------------------------------------ where the seconds go: play -> seen in ESPN's feed -> card built -> sent
-_STAGE = {}
-_TICKS = []
-_td_ready_stage = td_ready
-
-
-def td_ready(summary, play, first_seen):
-    ok = _td_ready_stage(summary, play, first_seen)
-    if ok:
-        _STAGE.clear()
-        _STAGE.update(seen=first_seen, start=time.time())
-    return ok
-
-
-_post_card_stage = _post_card
-
-
-def _post_card(hook, html_text, content, embed, name):
-    _STAGE.setdefault("start", time.time())
-    _STAGE["built0"] = time.time()
-    return _post_card_stage(hook, html_text, content, embed, name)
-
-
-_render_card_stage = render_card
-
-
-def render_card(html_text, width=None):
-    png = _render_card_stage(html_text, width)
-    if "built0" in _STAGE and "built" not in _STAGE:
-        _STAGE["built"] = time.time()
-    return png
-
-
-_record_send_stage = _record_send
-
-
-def _record_send(ok):
-    t0, lab = _SEND_AT.get("t0"), _SEND_AT.get("label") or "post"
-    if ok and t0 and _STAGE.get("seen"):
-        now = time.time()
-        seen = _STAGE["seen"]
-        built = _STAGE.get("built") or now
-        gaps = [b - a for a, b in zip(_TICKS[-6:], _TICKS[-5:])]
-        every = f" · ESPN checked every {sum(gaps) / len(gaps):.0f}s" if gaps else ""
-        _log_plain(f"timing {lab}: play -> seen in ESPN feed {seen - t0:.1f}s · seen -> card built {built - seen:.1f}s · "
-                   f"built -> sent {now - built:.1f}s{every}")
-    _STAGE.clear()
-    return _record_send_stage(ok)
-
-
-_nfl_prime_slot_tick = nfl_prime_slot
-
-
-def nfl_prime_slot(slot, st, getctx, force=False):
-    if any(e["status"]["type"]["state"] == "in" for e in slot):
-        _TICKS.append(time.time())
-        del _TICKS[:-20]
-    return _nfl_prime_slot_tick(slot, st, getctx, force)
-
-
-
-# ------------------------------------------------ defensive / special-teams touchdowns: who really scored, and the D/ST
-#   ESPN's scoring-play line for these is odd ("Bryan Anger Punt Blk'd Kick Blocked by Ty Robinson"); the drive chart has
-#   the real story ("... BLOCKED by T.Robinson ... RECOVERED by PHI-K.Moore at DAL 3. K.Moore for 3 yards, TOUCHDOWN").
-#   Every NFL summary we fetch is indexed so td_parse can use it. The card: returner (blocker credited), the scoring
-#   team's D/ST owner in the fantasy impact (TD + block points, live D/ST total, win swing), MONSTER-style hype and the
-#   ESPN win-chance swing.
-_PLAYTXT = {}
-_RET_KINDS = (("blocked punt", "blocked_punt", "blocked"), ("blocked field goal", "blocked_fg", "blocked"),
-              ("blocked fg", "blocked_fg", "blocked"), ("punt return", "punt", "punt"),
-              ("kickoff return", "kick", "kick"), ("interception return", "int", "int"),
-              ("fumble return", "fumble", "fumble"), ("fumble recovery (opponent)", "fumble", "fumble"),
-              ("opp fumble recovery", "fumble", "fumble"), ("interception", "int", "int"),
-              ("missed field goal return", "kick", "kick"))
-_DST_SUB = {"blocked_punt": ("BLOCKED PUNT TD", "⚡"), "blocked_fg": ("BLOCKED FG TD", "⚡"), "punt": ("PUNT RETURN TD", "⚡"),
-            "kick": ("KICK RETURN TD", "⚡"), "int": ("PICK-SIX", "🛡️"), "fumble": ("SCOOP AND SCORE", "🛡️")}
-_fetch_index_plain = fetch
-
-
-def _index_summary(d):
-    names = []
-    for t in (d.get("boxscore") or {}).get("players") or []:
-        ab = (t.get("team") or {}).get("abbreviation", "")
-        for cat in t.get("statistics") or []:
-            for a in cat.get("athletes") or []:
-                nm = (a.get("athlete") or {}).get("displayName")
-                if nm:
-                    names.append((nm, ab))
-    dr = d.get("drives") or {}
-    for dv in list(dr.get("previous") or []) + ([dr["current"]] if dr.get("current") else []):
-        for p in dv.get("plays") or []:
-            if "touchdown" in ((p.get("type") or {}).get("text") or "").lower():
-                _PLAYTXT[str(p.get("id"))] = (p.get("text") or "", names)
-    if len(_PLAYTXT) > 4000:
-        for k in list(_PLAYTXT)[:2000]:
-            _PLAYTXT.pop(k, None)
-
-
-def fetch(path, tries=3):
-    d = _fetch_index_plain(path, tries)
-    if path.startswith("football/nfl/summary"):
-        try:
-            _index_summary(d)
-        except Exception:  # noqa: BLE001
-            pass
-    return d
-
-
-_SFX = r"(?:\s(?:Jr|Sr|II|III|IV)\.?)?"
-_ABBR = r"[A-Z][A-Za-z]?\.\s?[A-Z][\w'\-]+" + _SFX
-
-
-def _full_name(short, names, team):
-    """'K.Moore' -> 'Kenny Moore II' using the game's box score (scoring team first)."""
-    m = re.match(r"([A-Z][A-Za-z]?)\.\s?([\w'\-]+)", short or "")
-    if not m:
-        return short
-    ini, last = m.group(1).lower(), m.group(2).lower()
-    best = []
-    for nm, ab in names:
-        parts = [w for w in nm.split() if w.lower().rstrip(".") not in ("jr", "sr", "ii", "iii", "iv")]
-        if len(parts) >= 2 and parts[-1].lower() == last and parts[0].lower().startswith(ini):
-            best.append((ab != team, nm))
-    best = sorted(set(best))
-    return best[0][1] if best else f"{m.group(1)}. {m.group(2)}"
-
-
-_td_parse_plain = td_parse
-
-
-def is_td_play(p, summary):
-    """A touchdown, whatever ESPN calls it: its label says so, or the play added 6+ points (defensive / return TDs
-    come as "Sack Opp Fumble Recovery", "Interception Return" …). Field goals, safeties and tries never count."""
-    ty = p.get("type") or {}
-    ab, tt = ty.get("abbreviation") or "", (ty.get("text") or "").lower()
-    if ab == "TD" or "touchdown" in tt:
-        return True
-    if ab in ("FG", "SF", "PAT", "XP", "2PT", "D2P") or "field goal" in tt or "safety" in tt:
-        return False
-    sp = summary.get("scoringPlays") or []
-    i = next((k for k, q in enumerate(sp) if q.get("id") == p.get("id")), None)
-    tot = lambda q: int(num(q.get("awayScore"))) + int(num(q.get("homeScore")))  # noqa: E731
-    before = tot(sp[i - 1]) if i else 0
-    return i is not None and tot(p) - before >= 6
-
-
-def td_parse(play):
-    td = _td_parse_plain(play)
-    try:
-        tt = ((play.get("type") or {}).get("text") or "").lower()
-        hit = next(((sub, k) for key, sub, k in _RET_KINDS if key in tt), None)
-        if not hit:
-            return td
-        sub, kind = hit
-        info = _PLAYTXT.get(str(play.get("id")))
-        team = (play.get("team") or {}).get("abbreviation", "")
-        td.update(kind=kind, sub=sub)
-        raw = td.get("raw") or ""
-        b = re.search(r"Blocked by ([A-Z][\w'\-]+(?: [A-Z][\w'\-.]+)+?)(?:\s*\(|$)", raw)
-        if b:
-            td["blocker"] = b.group(1).strip()
-        if re.search(r"in (the )?end zone", raw, re.I):
-            td["endzone"] = True
-        if td.get("scorer"):  # "T.J. Watt Fumble Recovery in End Zone" -> "T.J. Watt"
-            td["scorer"] = re.sub(r"\s+(?:Fumble|Recovery|Interception|Return|in End Zone|for \d+).*$", "", td["scorer"], flags=re.I).strip() or td["scorer"]
-        if not info:
-            if td.get("scorer") and len(td["scorer"].split()) > 4:  # the odd ESPN line: never show it as a name
-                td["scorer"] = td.get("blocker") or "Special teams"
-            return td
-        text, names = info
-        m = re.search(rf"({_ABBR})(?: to [A-Z]{{2,3}} \d+)? for (-?\d+|no gain)(?: yards?)?,? TOUCHDOWN", text)
-        who = m.group(1) if m else None
-        if m:
-            td["yds"] = 0 if m.group(2) == "no gain" else int(m.group(2))
-        if not who:
-            r = re.search(rf"RECOVERED by [A-Z]{{2,3}}-({_ABBR})", text) or re.search(rf"INTERCEPTED by ({_ABBR})", text)
-            who = r.group(1) if r else None
-        if who:
-            td["scorer"] = _full_name(who, names, team)
-        bb = re.search(rf"BLOCKED by ({_ABBR})", text)
-        if bb and not td.get("blocker"):
-            td["blocker"] = _full_name(bb.group(1), names, team)
-        if td.get("blocker") == td.get("scorer"):
-            td.pop("blocker", None)
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"return TD parse skipped: {ex}")
-    return td
-
-
-_td_headline_plain = _td_headline
-
-
-def _td_headline(td, nick):
-    sub = td.get("sub")
-    if not sub:
-        return _td_headline_plain(td, nick)
-    y = td.get("yds")
-    far = f" {y} yards" if y else ""
-    who, blk = td["scorer"], td.get("blocker")
-    if sub == "blocked_punt":
-        return (f"BLOCKED PUNT! {blk} blocks it, {who} takes it to the house — {nick}!" if blk
-                else f"BLOCKED PUNT! {who} takes it to the house — {nick}!")
-    if sub == "blocked_fg":
-        return (f"BLOCKED FIELD GOAL! {blk} gets a hand on it, {who} returns it{far} — {nick}!" if blk
-                else f"BLOCKED FIELD GOAL! {who} returns it{far} for the TD — {nick}!")
-    if sub == "punt":
-        return f"PUNT RETURN TD! {who} takes it{far} to the house — {nick}!"
-    if sub == "kick":
-        return f"KICK RETURN TD! {who} goes{far} all the way — {nick}!"
-    if sub == "int":
-        return f"PICK-SIX! {who} picks it off and takes it{far} to the house — {nick}!"
-    if td.get("endzone") and not y:
-        return f"DEFENSIVE TOUCHDOWN! {who} falls on the fumble in the end zone — {nick}!"
-    return f"SCOOP AND SCORE! {who} returns the fumble{far} for the TD — {nick}!"
-
-
-_td_yards_label_plain = _td_yards_label
-
-
-def _td_yards_label(td):
-    return _DST_SUB[td["sub"]][0] if td.get("sub") in _DST_SUB else _td_yards_label_plain(td)
-
-
-def _win_swing(summary, play_id, home_side):
-    """(win chance before, after) for the scoring side from ESPN's win probability, or None."""
-    wp = {str(w.get("playId")): float(w.get("homeWinPercentage") or 0) * 100 for w in summary.get("winprobability") or []}
-    prev = None
-    for p in _all_plays(summary):
-        w = wp.get(str(p.get("id")))
-        if str(p.get("id")) == str(play_id) and w is not None and prev is not None:
-            return (prev, w) if home_side else (100 - prev, 100 - w)
-        if w is not None:
-            prev = w
-    return None
-
-
-DST_CSS = """
-.dstw{margin-top:10px;display:flex;align-items:center;gap:10px;white-space:nowrap;padding:10px 14px;border-radius:14px;min-width:0;overflow:hidden;
- background:linear-gradient(100deg,rgba(255,214,0,.28),rgba(255,61,61,.22));box-shadow:0 0 0 3px #ffd600,0 0 34px rgba(255,140,0,.75);
- font-size:20px;font-weight:800;color:#fff}
-.dstw{font-size:18px!important}.dstw b{font-size:22px;font-weight:900;color:#ffd600}.dstw .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;background:#ff3d3d;
- color:#fff;border-radius:7px;padding:3px 9px;flex:none}
-.pp5 .blk{font-size:20px;color:#ffe08a;font-weight:800;margin-top:3px}.pp5 .blk b{color:#fff}
-"""
-ANIM_CSS += ".dstw{animation:a_pulse 1s ease-in-out infinite}"
-_nfl_td_html_dst = nfl_td_fantasy_html
-
-
-def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
-    st = _NFL_ST.get("st") or {}
-    snap = st.get("nfl_td_win") or {}
-    prev_win = dict(snap.get("w") or {}) if isinstance(snap.get("w"), dict) and time.time() - snap.get("t", 0) < 900 else {}
-    h = _nfl_td_html_dst(event, play, summary, live, ol, base, *a, **k)
-    td = td_parse(play)
-    if not td.get("sub"):
-        return h
-    try:
-        import html as H
-        away, home = teams_of(event)
-        abbr = (play.get("team") or {}).get("abbreviation", "")
-        team = away if away["team"]["abbreviation"] == abbr else home
-        nick = team["team"].get("name") or abbr
-        label, emo = _DST_SUB[td["sub"]]
-        # D/ST owner instead of "unrostered — available on waivers"
-        sc = league_scoring("nfl")
-        st_td = td["kind"] in ("punt", "kick", "blocked")
-        pts_td = float(sc.get("def_st_td" if st_td else "def_td") or sc.get("def_td") or 6)
-        extra = {"blocked": ("block", float(sc.get("blk_kick") or 0)), "int": ("INT", float(sc.get("int") or 0)),
-                 "fumble": ("fumble rec", float(sc.get("fum_rec") or 0))}.get(td["kind"])
-        gain = pts_td + (extra[1] if extra else 0)
-        bits = f"TD +{pts_td:g}" + (f" · {extra[0]} +{extra[1]:g}" if extra and extra[1] else "")
-        o = league_owner(f"def:{sl_team(abbr)}", "")
-        dn = next((x for x in nfl_defenses(summary, event) if x["team"] == abbr), None)
-        row = ""
-        if o:
-            rid = next((r for r, x in live["rosters"].items() if x["manager"] == o["manager"]), None)
-            win = ""
-            if rid is not None and rid in ol:
-                pw = prev_win.get(str(rid))
-                d = ol[rid]["win"] - pw if pw is not None else 0
-                win = (f"win <b>{ol[rid]['win']:.0f}%</b>"
-                       + (f" <span class='u'>▲{d:.0f}</span>" if d >= 1 else ""))
-            row = (f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(o['manager'])}</b>"
-                   f"<span>{H.escape(nick)} D/ST <b class='u'>+{gain:g}</b> ({bits})"
-                   + (f" → now <b>{fmt_pts(dn['pts'])}</b> pts" if dn else "") + f"</span>"
-                   f"<span>{win or ('starting' if o['starting'] else 'bench')}</span><span></span></div>")
-        h = re.sub(r"<div class='im'><span class='ar'>🆓</span>.*?</span><span></span><span></span></div>", row, h, count=1,
-                   flags=re.S) if "🆓" in h else h.replace("<div class='ih'>FANTASY IMPACT</div>",
-                                                         "<div class='ih'>FANTASY IMPACT</div>" + row, 1)
-        # scorer panel: MONSTER-style hype, blocker credited
-        i = h.find("<div class='pp5")
-        if i >= 0:
-            j = h.find(">", i)
-            tag = h[i:j + 1]
-            h = h[:i] + tag.replace("class='pp5", "class='pp5 h4 dstc", 1) + \
-                f"<span class='hyr h4'>{emo} {label} · {H.escape(nick.upper())}</span>" + h[j + 1:]
-            g0 = h.find("<div class='gn'>", i)                # the returner scores for the team's D/ST
-            if g0 > 0:
-                g1 = _div_end(h, g0)
-                h = h[:g0] + (f"<div class='gn'><b>+{gain:g}</b><span>for the <em>{H.escape(nick)} D/ST</em></span></div>") + h[g1:]
-            w0 = h.find("<div class='ow3'>", i)
-            if w0 > 0:
-                w1 = _div_end(h, w0)
-                own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
-                       else f"<b>{H.escape(nick)} D/ST</b> unrostered")
-                h = h[:w0] + f"<div class='ow3'>{own}</div>" + h[w1:]
-            if td.get("blocker"):
-                k2 = h.find("<div class='gn'>", i)
-                if k2 > 0:
-                    h = h[:k2] + f"<div class='blk'>🖐️ blocked by <b>{H.escape(td['blocker'])}</b></div>" + h[k2:]
-        # game-changer strip: ESPN win chance swing
-        sw = _win_swing(summary, play.get("id"), team is home)
-        strip = f"<div class='dstw'><span class='gc'>GAME-CHANGER</span>"
-        if sw and abs(sw[1] - sw[0]) >= 1:
-            strip += f"{H.escape(nick)} win chance <b>{sw[0]:.0f}% → {sw[1]:.0f}%</b>"
-        else:
-            strip += f"{emo} <b>{label}</b> · {H.escape(nick)} special teams strike"
-        strip += "</div>"
-        k3 = h.find("<div class='imp'>")
-        h = (h[:k3] + strip + h[k3:]) if k3 >= 0 else h.replace("</div></div></body>", strip + "</div></div></body>", 1)
-        h = h.replace("</style>", HYPE_CSS + DST_CSS + "</style>", 1)
-        _last_td_html["h"] = h
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"D/ST touchdown extras skipped: {ex}")
-    return h
-
-
-# ---- one-off: rebuild posted touchdowns in place (config nfl.redo_td_posts: [play ids]), once each, with the try state
-_nfl_prime_slot_redo = nfl_prime_slot
-
-
-def nfl_prime_slot(slot, st, getctx, force=False):
-    active = _nfl_prime_slot_redo(slot, st, getctx, force)
-    want = [str(x) for x in (CONFIG.get("nfl") or {}).get("redo_td_posts") or []]
-    done = st.setdefault("td_redone", [])
-    posts = st.get("td_posts") or {}
-    for pid in want:
-        r = posts.get(pid)
-        if pid in done or not r or r.get("done"):
-            continue
-        e = next((x for x in slot if x["id"] == r.get("game")), None)
-        if e is None:
-            continue
-        try:
-            summary = fetch(f"football/nfl/summary?event={e['id']}")
-            p = next((q for q in summary.get("scoringPlays") or [] if str(q.get("id")) == pid), None)
-            ctx = getctx()
-            if not p or not ctx:
-                continue
-            res = td_try(p, summary)
-            pl = p if res is not None else td_only_play(p, summary)
-            tag = res if res is not None else ({"label": "⏳ CONVERSION TO COME", "cls": "wait"}
-                                               if e["status"]["type"].get("state") == "in" else None)
-            img, name, html_text = _rebuild_td_image(e, pl, summary, ctx, tag)
-            if img and discord_edit(NFL_HOOK, r["msg"], img, name):
-                _gif_after_edit(NFL_HOOK, r["msg"])
-                if html_text:
-                    _TD_HTML[pid] = html_text
-                if res is not None:
-                    r["try"], r["try_result"] = "done", res["label"]
-                r["file"] = name
-                done.append(pid)
-                _log_plain(f"touchdown {pid}: post rebuilt in place")
-        except Exception as ex:  # noqa: BLE001
-            _log_plain(f"rebuild of touchdown {pid} skipped: {ex}")
-    return active
-
-
-
-# ------------------------------------------------ faster detection: ESPN's core plays feed
-#   Measured live: a scoring play shows up in the core feed ~22-47s after ESPN's wallclock, the scoreboard ~4-10s
-#   later and the summary (what the bot reads) ~13-17s after core. So every live NFL summary we fetch is topped up
-#   with the scoring plays the core feed already has: the scoring line (core "shortText" = the summary's own format),
-#   the score, the try and a drive-chart entry with the full text. Everything downstream (touchdowns, field goals,
-#   try edits) sees the play early. The core feed is polled at most every 4s per game (last 10-20 plays only); any
-#   failure backs off for a minute and the plain summary is used. Plays keep ESPN's ids in both feeds, so nothing is
-#   posted twice (and a posted touchdown is also matched by team + quarter + clock in case the id changes).
-#   A touchdown posted from the core feed is rebuilt once the summary has it (fresh box score), unless its try edit
-#   is still to come (that edit rebuilds it anyway).
-CORE = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/events/{e}/competitions/{e}/plays"
-_CORE = {}
-
-
-def _core_latest(ev):
-    """The last ~10-20 plays of a game from the core feed (cached 4s), or None."""
-    c = _CORE.setdefault(ev, {"t": 0.0, "count": 0, "items": None, "off": 0.0})
-    now = time.time()
-    if now < c["off"]:
-        return None
-    if now - c["t"] < 4 and c["items"] is not None:
-        return c["items"]
-    try:
-        base = CORE.format(e=ev)
-        if not c["count"]:
-            c["count"] = int(_fetch_index_plain_url(f"{base}?limit=1", 1).get("count") or 0)
-        page = max(1, math.ceil(c["count"] / 10))
-        d = _fetch_index_plain_url(f"{base}?limit=10&page={page}", 1)
-        if int(d.get("pageCount") or page) > page:               # new plays since: read the new last page
-            page = int(d["pageCount"])
-            d = _fetch_index_plain_url(f"{base}?limit=10&page={page}", 1)
-        items = list(d.get("items") or [])
-        if len(items) < 5 and page > 1:                          # nearly empty last page: the one before too
-            items = list(_fetch_index_plain_url(f"{base}?limit=10&page={page - 1}", 1).get("items") or []) + items
-        c.update(t=now, count=int(d.get("count") or c["count"]), items=items)
-        return items
-    except Exception as ex:  # noqa: BLE001
-        c["off"] = now + 60
-        _log_plain(f"core plays feed unavailable, using the summary only: {ex}")
-        return None
-
-
-def _fetch_index_plain_url(url, tries):
-    return fetch_url(url, tries)
-
-
-import math  # noqa: E402
-
-
-def _core_merge(d, ev):
-    comp = ((d.get("header") or {}).get("competitions") or [{}])[0]
-    if ((comp.get("status") or {}).get("type") or {}).get("state") != "in":
-        return d
-    items = _core_latest(ev)
-    if not items:
-        return d
-    teams = {str((c.get("team") or {}).get("id")): c["team"] for c in comp.get("competitors") or [] if c.get("team")}
-    sps = d.setdefault("scoringPlays", [])
-    have = {str(p.get("id")): p for p in sps}
-    dr = d.setdefault("drives", {})
-    pool = {str(p.get("id")): p for dv in list(dr.get("previous") or []) + ([dr["current"]] if dr.get("current") else [])
-            for p in dv.get("plays") or []}
-    injected = d.setdefault("_core_ids", [])
-    for q in items:
-        if not q.get("scoringPlay") or not q.get("shortText"):
-            continue
-        pid = str(q.get("id"))
-        tid = re.search(r"/teams/(\d+)", ((q.get("team") or {}).get("$ref") or ""))
-        tm = teams.get(tid.group(1)) if tid else None
-        if not tm:
-            continue
-        sp = have.get(pid)
-        if sp is None:
-            logo = next((x.get("href") for x in tm.get("logos") or [] if x.get("href")), "")
-            sp = {"id": pid, "type": q.get("type") or {}, "text": q["shortText"], "awayScore": q.get("awayScore"),
-                  "homeScore": q.get("homeScore"), "period": q.get("period") or {}, "clock": q.get("clock") or {},
-                  "team": {"id": tm.get("id"), "abbreviation": tm.get("abbreviation"), "displayName": tm.get("displayName"),
-                           "logo": logo},
-                  "scoringType": q.get("scoringType") or {}, "_core": True}
-            sps.append(sp)
-            have[pid] = sp
-            injected.append(pid)
-        elif (int(num(q.get("awayScore"))) + int(num(q.get("homeScore"))) >
-              int(num(sp.get("awayScore"))) + int(num(sp.get("homeScore")))):
-            sp.update(text=q["shortText"], awayScore=q.get("awayScore"), homeScore=q.get("homeScore"))   # try is in
-        dp = pool.get(pid)
-        if dp is None:
-            dp = {"id": pid, "type": q.get("type") or {}, "text": q.get("text") or "", "wallclock": q.get("wallclock"),
-                  "scoringPlay": True, "start": {}, "end": {}}
-            if q.get("pointAfterAttempt"):
-                dp["pointAfterAttempt"] = q["pointAfterAttempt"]
-            cur = dr.get("current") or {"plays": []}
-            cur.setdefault("plays", []).append(dp)
-            dr["current"] = cur
-            pool[pid] = dp
-            if "touchdown" in ((q.get("type") or {}).get("text") or "").lower():
-                _PLAYTXT[pid] = (dp["text"], _PLAYTXT.get(pid, ("", []))[1] or [])
-        elif q.get("pointAfterAttempt") and not ((dp.get("pointAfterAttempt") or {}).get("id")):
-            dp["pointAfterAttempt"] = q["pointAfterAttempt"]
-    return d
-
-
-_fetch_core_plain = fetch
-
-
-def fetch(path, tries=3):
-    d = _fetch_core_plain(path, tries)
-    m = re.fullmatch(r"football/nfl/summary\?event=(\d+)", path)
-    if m and (CONFIG.get("nfl") or {}).get("core_feed", True):
-        try:
-            d = _core_merge(d, m.group(1))
-            if d.get("_core_ids"):
-                _index_summary(d)
-        except Exception as ex:  # noqa: BLE001
-            _log_plain(f"core feed merge skipped: {ex}")
-    return d
-
-
-_post_td_core = post_td_fantasy
-
-
-def post_td_fantasy(event, play, summary, ctx):
-    st = _NFL_ST.get("st")
-    key = f"{event['id']}|{(play.get('team') or {}).get('abbreviation')}|{(play.get('period') or {}).get('number')}|" \
-          f"{(play.get('clock') or {}).get('displayValue')}"
-    keys = st.setdefault("td_keys", {}) if st is not None else {}
-    if key in keys and keys[key] != str(play.get("id")):
-        _log_plain(f"touchdown {play.get('id')} is {keys[key]} under another id: not posted again")
-        return True
-    ok = _post_td_core(event, play, summary, ctx)
-    if ok and st is not None:
-        keys[key] = str(play.get("id"))
-        for k in list(keys)[:-200]:
-            keys.pop(k, None)
-        r = (st.get("td_posts") or {}).get(str(play.get("id")))
-        if r is not None and play.get("_core"):
-            r["core"] = True
-    return ok
-
-
-def _td_rebuild_post(e, pid, r, getctx, why):
-    """Rebuild a posted touchdown card from the current feed (with its try state) and edit it in place."""
-    summary = fetch(f"football/nfl/summary?event={e['id']}")
-    p = next((q for q in summary.get("scoringPlays") or [] if str(q.get("id")) == pid), None)
-    ctx = getctx()
-    if not p or not ctx:
-        return False
-    res = td_try(p, summary)
-    pl = p if res is not None else td_only_play(p, summary)
-    tag = res if res is not None else ({"label": "⏳ CONVERSION TO COME", "cls": "wait"}
-                                       if e["status"]["type"].get("state") == "in" else None)
-    img, name, html_text = _rebuild_td_image(e, pl, summary, ctx, tag)
-    if not img or r.get("done") or not discord_edit(NFL_HOOK, r["msg"], img, name):
-        return False
-    _gif_after_edit(NFL_HOOK, r["msg"])
-    if html_text:
-        _TD_HTML[pid] = html_text
-    if res is not None:
-        r["try"], r["try_result"] = "done", res["label"]
-    r["file"] = name
-    _log_plain(f"touchdown {pid}: post rebuilt in place ({why})")
-    return True
-
-
-_nfl_prime_slot_core = nfl_prime_slot
-
-
-def nfl_prime_slot(slot, st, getctx, force=False):
-    active = _nfl_prime_slot_core(slot, st, getctx, force)
-    for pid, r in list((st.get("td_posts") or {}).items()):
-        if not r.get("core") or r.get("done") or r.get("try") == "pending":
-            continue
-        e = next((x for x in slot if x["id"] == r.get("game")), None)
-        if e is None:
-            continue
-        try:
-            summary = fetch(f"football/nfl/summary?event={e['id']}")
-            if pid in (summary.get("_core_ids") or []):
-                continue                                    # the summary hasn't caught up yet
-            r["core"] = False
-            _td_rebuild_post(e, pid, r, getctx, "full details")
-        except Exception as ex:  # noqa: BLE001
-            _log_plain(f"details refresh of touchdown {pid} skipped: {ex}")
-    return active
-
-
-
-# ------------------------------------------------ touchdown cards: useful extras in the spare space (right column)
-#   In order of usefulness (waiver watch first for an unrostered scorer; the middle two rotate for variety): win chance
-#   + scoring drive + game state, the scorer's line today, league players in this game, waiver watch. All are added;
-#   a small script in the card removes the lowest ones until nothing overflows (so the card never shrinks for them).
-FILL_CSS = """
-.lsx>.rcol{min-width:0}.lsx .rcol:has(.fx)>.imp{flex:0 0 auto!important}
-.fxm .lsx{align-items:start!important}.fxm .lsx>.lcol>*,.fxm .lsx>.rcol>*{flex:none!important}
-.lsx .rcol>.fx:last-child{flex:1}
-.fx{min-width:0;overflow:hidden;background:rgba(9,12,22,.62);border-radius:14px;padding:10px 16px 11px;box-shadow:inset 4px 0 0 var(--a)}
-.fx .fh{font-size:15px;font-weight:900;letter-spacing:1.6px;color:#c3cad8;margin-bottom:5px}
-.fx .fr{display:flex;flex-wrap:wrap;justify-content:space-between;column-gap:14px;min-width:0;font-size:20px;line-height:1.25;
- color:#e3e7ef;white-space:nowrap}
-.fx .fr span:last-child{margin-left:auto}
-.fx .fr+.fr{margin-top:3px}
-.fx .fr b{color:#fff;font-weight:900}.fx .fr .u{color:#7ee2a8}.fx .fr .dn{color:#ff9a9e}.fx .fr .g{color:#ffd166}
-.fx .fr span:last-child{text-align:right;color:#c3cad8}
-.fx .fr span:first-child{overflow:hidden;text-overflow:clip}
-.sbx .sc.hot{text-shadow:0 0 22px var(--hc,#ffd166),0 0 44px var(--hc,#ffd166)!important}
-"""
-FILL_JS = ("<script>document.addEventListener('DOMContentLoaded',()=>{const go=()=>{const c=document.querySelector('.card');"
-           "if(!c)return;const fx=[...document.querySelectorAll('.fx')];if(!fx.length)return;c.classList.add('fxm');"
-           "const L=document.querySelector('.lsx>.lcol'),R=document.querySelector('.lsx>.rcol');"
-           "const tall=()=>c.scrollHeight>c.clientHeight+1&&(!L||!R||R.offsetHeight>L.offsetHeight+2);"
-           "const wide=()=>[...document.querySelectorAll('.fx .fr')].some(r=>r.scrollWidth>r.clientWidth+1);"
-           "while(fx.length&&(tall()||wide())){fx.pop().remove();}c.classList.remove('fxm');};"
-           "(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(go);});</script>")
-_NEXTWK = {}
-
-
-def _fx(head, rows):
-    import html as H
-    rows = [r for r in rows if r]
-    if not rows:
-        return ""
-    return f"<div class='fx'><div class='fh'>{H.escape(head)}</div>" + "".join(
-        f"<div class='fr'><span>{a}</span><span>{b}</span></div>" for a, b in rows) + "</div>"
-
-
-def _stat_line(summary, name):
-    """'15/20 · 247 yds · 2 TD' passing, then rushing / receiving, from the box score."""
-    want = {"passing": ("completions/passingAttempts", "passingYards", "passingTouchdowns", "interceptions"),
-            "rushing": ("rushingAttempts", "rushingYards", "rushingTouchdowns"),
-            "receiving": ("receptions", "receivingYards", "receivingTouchdowns")}
-    out = []
-    for team in (summary.get("boxscore") or {}).get("players") or []:
-        for cat in team.get("statistics") or []:
-            if cat.get("name") not in want:
-                continue
-            keys = cat.get("keys") or []
-            for a in cat.get("athletes") or []:
-                if (a.get("athlete") or {}).get("displayName") != name:
-                    continue
-                v = dict(zip(keys, a.get("stats") or []))
-                if cat["name"] == "passing":
-                    t = f"{v.get('completions/passingAttempts', '')} · {v.get('passingYards', 0)} pass yds"
-                    t += f" · {v.get('passingTouchdowns', 0)} TD" if v.get("passingTouchdowns") not in (None, "0") else ""
-                    t += f" · {v.get('interceptions')} INT" if v.get("interceptions") not in (None, "0") else ""
-                elif cat["name"] == "rushing":
-                    t = f"{v.get('rushingAttempts', 0)} car · {v.get('rushingYards', 0)} yds"
-                    t += f" · {v.get('rushingTouchdowns')} TD" if v.get("rushingTouchdowns") not in (None, "0") else ""
-                else:
-                    t = f"{v.get('receptions', 0)} rec · {v.get('receivingYards', 0)} yds"
-                    t += f" · {v.get('receivingTouchdowns')} TD" if v.get("receivingTouchdowns") not in (None, "0") else ""
-                out.append((cat["name"], t))
-    return out
-
-
-def _fill_sections(event, play, summary, live, td, owned):
-    import html as H
-    away, home = teams_of(event)
-    abbr = (play.get("team") or {}).get("abbreviation", "")
-    team = away if away["team"]["abbreviation"] == abbr else home
-    nick = team["team"].get("name") or abbr
-    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
-    secs = {}
-    # 1) win chance + drive + game state
-    rows = []
-    wp = summary.get("winprobability") or []
-    sw = _win_swing(summary, play.get("id"), team is home)
-    if sw:
-        d = sw[1] - sw[0]
-        rows.append((f"{H.escape(nick)} win", f"<b>{sw[1]:.0f}%</b> <span class='{'u' if d >= 0 else 'dn'}'>"
-                     f"{'▲' if d >= 0 else '▼'}{abs(d):.0f}</span>"))
-    elif wp:
-        w = float(wp[-1].get("homeWinPercentage") or 0) * 100
-        rows.append((f"{H.escape(nick)} win", f"<b>{(w if team is home else 100 - w):.0f}%</b>"))
-    dr = summary.get("drives") or {}
-    for dv in list(dr.get("previous") or []) + ([dr["current"]] if dr.get("current") else []):
-        if any(str(p.get("id")) == str(play.get("id")) for p in dv.get("plays") or []) and dv.get("description"):
-            m = re.match(r"(\d+) plays?, (-?\d+) yards?, ([\d:]+)", dv["description"])
-            if m:
-                rows.append(("Drive", f"<b>{m.group(1)}</b> plays · <b>{m.group(2)}</b> yds · {m.group(3)}"))
-            break
-    q = (play.get("period") or {}).get("number", 0)
-    clk = (play.get("clock") or {}).get("displayValue", "")
-    diff = abs(a_s - h_s)
-    state = ("tied" if diff == 0 else "one-score game" if diff <= 8 else "two-score game" if diff <= 16 else f"{diff}-point game")
-    when = f"{clk} " + (f"Q{q}" if q <= 4 else "OT")
-    rows.append(("Game", f"<b class='g'>{state}</b> · {when}"))
-    secs["game"] = _fx("WIN CHANCE & DRIVE", rows)
-    # 2) scorer's line today
-    names = [td.get("scorer")] + ([td["qb"]] if td.get("qb") else [])
-    rows = []
-    for nm in names:
-        for cat, t in _stat_line(summary, nm or "")[:2]:
-            rows.append((f"<b>{H.escape(short_name(nm) if len(names) > 1 else nm)}</b>", H.escape(t)))
-    secs["line"] = _fx("TODAY'S LINE", rows[:3])
-    # 3) league players in this game
-    players = sleeper_players("nfl")
-    here = {sl_team(t["team"]["abbreviation"]) for t in teams_of(event)}
-    skip = {str(_sl_pid(n, abbr) or "") for n in names if n}
-    lst = []
-    for rid, x in live["rosters"].items():
-        for pid in x.get("starters") or []:
-            pl = players.get(pid) or {}
-            if (pl.get("team") or pid) in here and str(pid) not in skip:
-                nm = f"{pid} D/ST" if str(pid).isalpha() and str(pid).isupper() else (pl.get("full_name") or pid)
-                lst.append((float(x["pp"].get(pid) or 0), nm, x["manager"]))
-    lst.sort(reverse=True)
-    secs["league"] = _fx("LEAGUE PLAYERS IN THIS GAME",
-                         [(f"<b>{H.escape(short_name(nm) if ' ' in nm and 'D/ST' not in nm else nm)}</b> {pts:.1f}",
-                           H.escape(mg)) for pts, nm, mg in lst[:3]])
-    # 4) waiver watch (unrostered scorer)
-    if not owned and td.get("scorer") and not td.get("sub"):
-        pid = _sl_pid(td["scorer"], abbr)
-        rows = [("Unrostered", "<span class='g'>free agent</span>")]
-        rk = position_ranks("nfl").get(str(pid)) if pid else None
-        if rk:
-            pos, n = rk
-            note = ("worth a pick-up" if n <= (12 if pos in ("QB", "TE") else 24) else
-                    "deep-league flier" if n <= 40 else "watch, don't chase")
-            rows.append((f"<b>{pos}{n}</b> this season", f"<span class='g'>{note}</span>"))
-        try:
-            hit = _wb_cached(("trend",), 1800, lambda: fetch_url(f"{SLEEPER}/players/nfl/trending/add?lookback_hours=24&limit=200"))
-            adds = next((x["count"] for x in hit or [] if str(x.get("player_id")) == str(pid)), None)
-            if adds:
-                rows.append(("Sleeper adds (24h)", f"<b>{adds:,}</b>"))
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            wk = int(live.get("week") or 0) + 1
-            evs = _wb_cached(("nextwk", wk), 6 * 3600, lambda: fetch(f"football/nfl/scoreboard?seasontype=2&week={wk}").get("events", []))
-            for e2 in evs:
-                ts = teams_of(e2)
-                if abbr in [t["team"]["abbreviation"] for t in ts]:
-                    other = next(t for t in ts if t["team"]["abbreviation"] != abbr)
-                    at = "vs" if other.get("homeAway") == "away" else "at"
-                    rows.append(("Next week", f"{at} <b>{other['team']['abbreviation']}</b> · "
-                                 f"{parse_time(e2['date']).astimezone(UK):%a %H:%M}"))
-                    break
-        except Exception:  # noqa: BLE001
-            pass
-        secs["waiver"] = _fx(f"WAIVER WATCH · {td['scorer'].upper()}", rows)
-    seed = int(re.sub(r"\D", "", str(play.get("id", "0")))[-3:] or 0)
-    mid = ["line", "league"] if seed % 2 == 0 else ["league", "line"]
-    order = ["game"] + (["waiver"] if "waiver" in secs else []) + mid
-    return "".join(secs.get(k) or "" for k in order)
-
-
-_nfl_td_html_fill = nfl_td_fantasy_html
-
-
-def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
-    h = _nfl_td_html_fill(event, play, summary, live, ol, base, *a, **k)
-    if not (CONFIG.get("nfl") or {}).get("td_fill", True):
-        return h
-    try:
-        td = td_parse(play)
-        owned = league_owner(boxscore_id(summary, td.get("scorer") or ""), td.get("scorer") or "")
-        extra = _fill_sections(event, play, summary, live, td, owned)
-        if not extra or "<div class='imp'>" not in h:
-            return h
-        i = h.find("<div class='imp'>")
-        j = _div_end(h, i)
-        imp = h[i:j]
-        if "WAIVER WATCH" in extra and imp.count("<div class='im'>") == 1 and "🆓" in imp:
-            h = h[:i] + extra + h[j:]                          # the waiver section says it (and more)
-        else:
-            h = h[:j] + extra + h[j:]
-        if "<div class='rcol'>" not in h:                  # older layout: keep the extras next to the impact panel
-            pass
-        h = h.replace("</style>", FILL_CSS + "</style>", 1).replace("<head>", "<head>" + FILL_JS, 1)
-        _last_td_html["h"] = h
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"touchdown extras skipped: {ex}")
-    return h
-
-
-
-# ------------------------------------------------ MISSED / BLOCKED kicks in crunch time (one-score game, last 5:00 of
-#   Q4 or any time in OT): missed or blocked field goals and extra points, and a failed 2-pt try that would have tied it
-#   or taken the lead. Dramatic red card (flash + shake when animated), still first then GIF like every big moment.
-MISS_CSS = """
-.bg{opacity:1!important;background:radial-gradient(circle at 50% 30%,rgba(255,40,40,.42),rgba(60,0,8,.78) 55%,rgba(8,4,8,.96) 100%)!important}
-.hl{border-left-color:#ff3d3d!important}
-.sbx .mid .yd{color:#ff5a5a!important;text-shadow:0 0 18px rgba(255,40,40,.9),0 0 40px rgba(255,0,0,.6)}
-.sbx .mid .st{background:#ff3d3d!important;color:#fff!important}
-.mkx{margin-top:10px;display:flex;align-items:center;gap:14px;white-space:nowrap;padding:10px 16px;border-radius:14px;
- background:linear-gradient(100deg,rgba(255,61,61,.32),rgba(120,0,0,.4));box-shadow:0 0 0 3px #ff3d3d,0 0 34px rgba(255,40,40,.7);
- font-size:20px;font-weight:800;color:#fff}
-.mkx b{font-size:24px;font-weight:900;color:#ffd166}.mkx .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;background:#ff3d3d;
- color:#fff;border-radius:7px;padding:3px 9px;flex:none}
-.pp5.mk{box-shadow:0 0 0 3px #ff3d3d,0 0 30px rgba(255,40,40,.65)!important;background:linear-gradient(120deg,rgba(70,6,12,.9),rgba(9,12,22,.75))!important}
-.pp5.mk .gn b{color:#ff6b6b!important}
-"""
-ANIM_CSS += """
-@keyframes a_mkshake{0%,100%{transform:translateX(0)}20%{transform:translateX(-6px)}40%{transform:translateX(6px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}
-@keyframes a_mkflash{0%,100%{opacity:1}50%{opacity:.55}}
-.mkc .sbx .mid .yd{animation:a_mkshake .5s ease-in-out infinite}
-.mkx{animation:a_pulse 1s ease-in-out infinite}
-.mkc .bg{animation:a_mkflash 1s ease-in-out infinite}
-"""
-_wants_animation_mk = wants_animation
-
-
-def wants_animation(html_text):
-    return _wants_animation_mk(html_text) or ("class='mkx'" in html_text and (CONFIG.get("animations") or {}).get("enabled", True))
-
-
-def _miss_drive_team(summary, pid):
-    dr = summary.get("drives") or {}
-    for dv in list(dr.get("previous") or []) + ([dr["current"]] if dr.get("current") else []):
-        if any(str(p.get("id")) == str(pid) for p in dv.get("plays") or []):
-            return (dv.get("team") or {}).get("abbreviation")
-    return None
-
-
-def missed_kicks(summary, event):
-    """[(key, play, info)] for crunch-time missed / blocked kicks (and decisive failed 2-pt tries) in this game."""
-    out = []
-    away, home = teams_of(event)
-    names = []
-    for t in (summary.get("boxscore") or {}).get("players") or []:
-        ab = (t.get("team") or {}).get("abbreviation", "")
-        for cat in t.get("statistics") or []:
-            for a in cat.get("athletes") or []:
-                if (a.get("athlete") or {}).get("displayName"):
-                    names.append((a["athlete"]["displayName"], ab))
-    for p in _all_plays(summary):
-        q = (p.get("period") or {}).get("number", 0)
-        ck = p.get("clock") or {}
-        mm = re.match(r"(\d+):(\d+)", ck.get("displayValue") or "")
-        secs = float(ck["value"]) if ck.get("value") is not None else (int(mm.group(1)) * 60 + int(mm.group(2)) if mm else 9999)
-        if not (q >= 5 or (q == 4 and secs <= 300)):
-            continue
-        tt = ((p.get("type") or {}).get("text") or "").lower()
-        text = p.get("text") or ""
-        a1, h1 = int(num(p.get("awayScore"))), int(num(p.get("homeScore")))
-        team = _miss_drive_team(summary, p.get("id")) or ""
-        info = None
-        if "field goal" in tt and ("missed" in tt or "blocked" in tt or "no good" in text.lower()):
-            m = re.search(rf"({_ABBR}) (\d+) yard field goal", text)
-            blk = re.search(rf"BLOCKED by ({_ABBR})", text)
-            why = re.search(r"No Good, ([A-Za-z ]+?)(?:,|\.|$)", text)
-            info = {"kind": "fg", "yds": int(m.group(2)) if m else None, "kicker": m.group(1) if m else "",
-                    "blocked": bool(blk) or "blocked" in tt, "blocker": blk.group(1) if blk else None,
-                    "why": why.group(1).strip().lower() if why else "", "team": team, "before": (a1, h1)}
-            key = str(p.get("id"))
-        elif "touchdown" in tt:
-            pa = (p.get("pointAfterAttempt") or {})
-            pat = (pa.get("text") or "").lower()
-            if "extra point" in pat and ("miss" in pat or "block" in pat or "no good" in pat):
-                m = re.search(rf"({_ABBR}) extra point is (?:No Good|BLOCKED)", text)
-                blk = re.search(rf"extra point is BLOCKED[^.]*?by ({_ABBR})", text) or re.search(rf"BLOCKED by ({_ABBR})", text)
-                why = re.search(r"extra point is No Good, ([A-Za-z ]+?)(?:,|\.|$)", text)
-                info = {"kind": "xp", "yds": None, "kicker": m.group(1) if m else "", "blocked": "block" in pat,
-                        "blocker": blk.group(1) if blk else None, "why": why.group(1).strip().lower() if why else "",
-                        "team": team, "before": (a1, h1)}
-            elif "two point" in pat and not pa.get("value"):
-                mine, theirs = (a1, h1) if team == away["team"]["abbreviation"] else (h1, a1)
-                if -2 <= mine - theirs <= 0:                       # the try would have tied it or taken the lead
-                    info = {"kind": "2pt", "yds": None, "kicker": "", "blocked": False, "blocker": None, "why": "",
-                            "team": team, "before": (a1, h1)}
-            key = f"{p.get('id')}-pat"
-        if not info:
-            continue
-        if abs(a1 - h1) > 8:
-            continue
-        for k in ("kicker", "blocker"):
-            if info.get(k):
-                info[k] = _full_name(info[k], names, team if k == "kicker" else "")
-        out.append((key, p, info))
-    return out
-
-
-def nfl_miss_html(event, play, summary, live, ol, info):
-    import html as H
-    away, home = teams_of(event)
-    abbr = info["team"]
-    kt = away if away["team"]["abbreviation"] == abbr else home
-    other = home if kt is away else away
-    nick = kt["team"].get("name") or abbr
-    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
-    q = (play.get("period") or {}).get("number", 0)
-    clk = (play.get("clock") or {}).get("displayValue", "")
-    when = ("OT" if q > 4 else "Q4") + f" · {clk} LEFT"
-    diff = abs(a_s - h_s)
-    state = "STILL TIED" if diff == 0 else "STILL A ONE-SCORE GAME"
-    word = "BLOCKED" if info["blocked"] else ("NO GOOD" if info["kind"] == "2pt" else "MISSED")
-    icon = "🚫" if info["blocked"] else "❌"
-    big = {"fg": f"{icon} {word} {info['yds']}-YD FG" if info.get("yds") else f"{icon} {word} FG",
-           "xp": f"{icon} {word} EXTRA POINT", "2pt": "❌ 2-PT TRY FAILS"}[info["kind"]]
-    sc = league_scoring("nfl")
-    proj = nfl_projections(live["week"])
-    rows = []
-    panel = ""
-    if info["kind"] in ("fg", "xp") and info["kicker"]:
-        kicker = info["kicker"]
-        k = next((x for x in nfl_kickers(summary) if name_key(x["name"]) == name_key(kicker)), None)
-        kid = k["id"] if k else boxscore_id(summary, kicker)
-        o = league_owner(kid, kicker)
-        lost = kicker_fpts(info["yds"] or 30) if info["kind"] == "fg" else float(sc.get("xpm") or 1)
-        pen = float(sc.get("fgmiss" if info["kind"] == "fg" else "xpmiss") or 0)
-        now = k["pts"] if k else None
-        own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o
-               else "<b>Unrostered</b> — free agent")
-        why = f" · {H.escape(info['why'])}" if info.get("why") else ""
-        panel = (f"<div class='pair one'><div class='pp5 mk'><img src='{H.escape(nfl_headshot(kid) or kt['team'].get('logo', ''))}'"
-                 f"{pid_attr(_sl_pid(kicker, abbr))}><div><div class='role'>KICKER · {abbr}</div><div class='nm'>{H.escape(kicker)}</div>"
-                 f"<div class='gn'><b>{(f'+{pen:g}' if pen > 0 else f'{pen:g}')}</b><span>no +{lost:g}{why}</span></div>"
-                 + (f"<div class='pjn'>now <b>{fmt_pts(now)}</b> pts</div>" if now is not None else "")
-                 + f"<div class='ow3'>{own}</div></div></div></div>")
-        if o:
-            rid = next((r for r, x in live["rosters"].items() if x["manager"] == o["manager"]), None)
-            if rid in ol:
-                rows.append(f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(o['manager'])}</b>"
-                            f"<span>misses out on <b class='dn'>+{lost:g}</b> from {H.escape(short_name(kicker))}</span>"
-                            f"<span>win <b>{ol[rid]['win']:.0f}%</b></span><span></span></div>")
-    if info["blocked"]:
-        od = league_owner(f"def:{sl_team(other['team']['abbreviation'])}", "")
-        b = float(sc.get("blk_kick") or 0)
-        if od and b:
-            rows.append(f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(od['manager'])}</b>"
-                        f"<span>{H.escape(other['team'].get('name') or '')} D/ST <b class='u'>+{b:g}</b> for the block"
-                        + (f" ({H.escape(info['blocker'])})" if info.get("blocker") else "") + "</span><span></span><span></span></div>")
-    sw = _win_swing(summary, play.get("id"), kt is home)
-    strip = "<div class='mkx'><span class='gc'>CRUNCH TIME</span>"
-    if sw and abs(sw[1] - sw[0]) >= 1:
-        strip += f"{H.escape(nick)} win chance <b>{sw[0]:.0f}% → {sw[1]:.0f}%</b>"
-    else:
-        strip += f"<b>{H.escape(clk)}</b> left · {diff}-point game"
-    strip += "</div>"
-    if not rows:
-        rows.append("<div class='im'><span class='ar'>·</span><b class='who5'>No league points</b>"
-                    "<span>change hands on this one</span><span></span><span></span></div>")
-    imp = f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>"
-    try:                                                  # spare space: game state + league players (dropped if no room)
-        imp += _fill_sections(event, play, summary, live, {"scorer": info.get("kicker") or "", "sub": "kick"}, True)
-    except Exception:  # noqa: BLE001
-        pass
-    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>{word} KICK · {'OT' if q > 4 else 'Q' + str(q)} {clk} · "
-            f"{away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div><div class='pill'>{state}</div></div>"
-            + score_hero(event, a_s, h_s, when, state, hot=None, plus=None, big=big)
-            + (panel or "") + strip + imp)
-    return _card("--a:#ff3d3d;--h:#ffd166", body, extra_css=V4_CSS + TD5_CSS + FG_CSS + SB_CSS + MISS_CSS + FILL_CSS).replace(
-        "<div class='card'", "<div class='card mkc'", 1).replace("<head>", "<head>" + FILL_JS, 1)
-
-
-def post_missed_kick(event, play, summary, ctx, info):
-    away, home = teams_of(event)
-    kt = away if away["team"]["abbreviation"] == info["team"] else home
-    nick = kt["team"].get("name") or info["team"]
-    clk = (play.get("clock") or {}).get("displayValue", "")
-    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
-    diff = abs(a_s - h_s)
-    k = info.get("kicker") or nick
-    yd = f" {info['yds']}-yarder" if info.get("yds") else ""
-    if info["kind"] == "2pt":
-        title = f"❌ NO GOOD! The {nick} two-point try fails — still {'tied' if not diff else f'a {diff}-point game'}!"
-    elif info["blocked"]:
-        title = f"🚫 BLOCKED! {k}'s{yd or ' extra point'} is blocked" + (f" by {info['blocker']}" if info.get("blocker") else "") + "!"
-    else:
-        title = f"❌ MISSED! {k}'s{yd or ' extra point'} is no good" + (f" — {info['why']}!" if info.get("why") else "!")
-    desc = (f"Still tied" if not diff else f"Still a one-score game") + f" · {clk} left" + (" in OT" if (play.get("period") or {}).get("number", 0) > 4 else "")
-    embed = {"author": AU_NFL(), "color": 0xFF3D3D, "img_title": title, "img_desc": desc, "title": title, "description": desc}
-    html_text = nfl_miss_html(event, play, summary, ctx["live"], ctx["ol"], info)
-    return _post_card(NFL_HOOK, html_text, f"❌ **{title}**", embed, "miss.png")
-
-
-_nfl_prime_slot_miss = nfl_prime_slot
-
-
-def nfl_prime_slot(slot, st, getctx, force=False):
-    active = _nfl_prime_slot_miss(slot, st, getctx, force)
-    if not (CONFIG.get("nfl") or {}).get("missed_kicks", True):
-        return active
-    for e in slot:
-        if e["status"]["type"]["state"] != "in":
-            continue
-        g = st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})
-        try:
-            summary = fetch(f"football/nfl/summary?event={e['id']}")
-            for key, p, info in missed_kicks(summary, e):
-                if key in g.setdefault("mk", []):
-                    continue
-                wc = p.get("wallclock")
-                if wc and time.time() - _wallclock_ts(wc) > 600:
-                    g["mk"].append(key)                     # old (restart): don't post late
-                    continue
-                t0 = _wallclock_ts(wc) if wc else g.setdefault("mk_seen", {}).setdefault(key, time.time())
-                if not due(t0, "missed kick"):
-                    continue
-                ctx = getctx()
-                if ctx and post_missed_kick(e, p, summary, ctx, info):
-                    g["mk"].append(key)
-        except Exception as ex:  # noqa: BLE001
-            _log_plain(f"missed-kick check skipped: {ex}")
-    return active
-
-
-
-# ---- one-off preview: config nfl.test_missed_kick = "<play id>" posts that missed kick once to #rick-only through the
-#      real path (still first, then the GIF swap), ignoring the age limit. Done once (state "test_mk_done"), then ignored.
-_run_nfl_testmk = run_nfl
-
-
-def run_nfl(st, date=None, force=False):
-    out = _run_nfl_testmk(st, date, force)
-    try:
-        _test_missed_kick(st)
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"test missed kick skipped: {ex}")
-    return out
-
-
-def _test_missed_kick(st):
-    global NFL_HOOK
-    pid = str((CONFIG.get("nfl") or {}).get("test_missed_kick") or "").strip()
-    done = st.setdefault("test_mk_done", [])
-    if not pid or pid in done or not ALERT_HOOK or CAPTURE is not None or DRY_RUN:
-        return
-    done.append(pid)                                    # once, whatever happens
-    week = int(fetch_url(f"{SLEEPER}/state/nfl").get("week") or 0)
-    events = fetch(f"football/nfl/scoreboard?seasontype=2&week={week}").get("events", [])
-    e = next((x for x in events if pid.startswith(str(x["id"]))), None)
-    if e is None:
-        _log_plain(f"test missed kick {pid}: game not found this week")
-        return
-    summary = fetch(f"football/nfl/summary?event={e['id']}")
-    hit = next(((k, p, i) for k, p, i in missed_kicks(summary, e) if k in (pid, pid + "-pat")), None)
-    ctx = nfl_ctx(st, events)
-    if not hit or not ctx:
-        _log_plain(f"test missed kick {pid}: not a crunch-time missed kick (or no league data)")
-        return
-    keep = NFL_HOOK
-    NFL_HOOK = ALERT_HOOK
-    try:
-        ok = post_missed_kick(e, hit[1], summary, ctx, hit[2])
-    finally:
-        NFL_HOOK = keep
-    _log_plain(f"test missed kick {pid}: posted to #rick-only ({ok})")
-
-
-
-# ------------------------------------------------ crunch-time TURNOVERS: on downs, interceptions, lost fumbles in a
-#   one-score game with <= 2:00 left in Q4 (or in OT). Two moods, by who gets the ball:
-#   the team behind / level -> COMEBACK ON (bright, gold, pulsing); the team ahead -> GAME OVER-ish (dark, muted).
-#   Plays the game-changer post already covered are skipped (and these are marked so it won't post them later).
-_TO_SKIP = ("timeout", "end period", "end of", "two-minute", "penalty")
-TOD_CSS = """
-.sbx .mid .yd{font-size:42px!important;white-space:nowrap}
-.tox{margin-top:10px;display:flex;align-items:center;gap:14px;white-space:nowrap;padding:10px 16px;border-radius:14px;
- font-size:20px;font-weight:800;color:#fff}
-.tox b{font-size:24px;font-weight:900}.tox .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;border-radius:7px;padding:3px 9px;flex:none}
-.pp5.to .gn b{font-size:40px!important}
-"""
-TOD_ON_CSS = """
-.bg{opacity:1!important;background:radial-gradient(circle at 50% 28%,rgba(255,214,0,.42),rgba(255,120,0,.22) 40%,rgba(10,14,26,.92) 80%)!important}
-.hl{border-left-color:#ffd600!important}
-.sbx .mid .yd{color:#ffd600!important;text-shadow:0 0 18px rgba(255,190,0,.95),0 0 44px rgba(255,120,0,.7)}
-.sbx .mid .st{background:#ffd600!important;color:#1b1305!important}
-.tox{background:linear-gradient(100deg,rgba(255,214,0,.3),rgba(255,120,0,.22));box-shadow:0 0 0 3px #ffd600,0 0 34px rgba(255,170,0,.75)}
-.tox b{color:#ffd600}.tox .gc{background:#ffd600;color:#1b1305}
-.pp5.to{box-shadow:0 0 0 3px #ffd600,0 0 30px rgba(255,190,0,.6)!important}
-"""
-TOD_OVER_CSS = """
-.bg{opacity:1!important;background:linear-gradient(180deg,rgba(20,22,30,.9),rgba(4,5,9,.98))!important;filter:saturate(.5)}
-.hl{border-left-color:#6b7280!important}
-.sbx .mid .yd{color:#e5e7eb!important;text-shadow:0 0 14px rgba(0,0,0,.9)}
-.sbx .mid .st{background:#374151!important;color:#e5e7eb!important}
-.tox{background:rgba(31,41,55,.85);box-shadow:0 0 0 2px #4b5563}
-.tox b{color:#e5e7eb}.tox .gc{background:#111827;color:#e5e7eb;box-shadow:inset 0 0 0 1.5px #6b7280}
-.pp5.to{box-shadow:0 0 0 2px #4b5563!important}.pp5.to .gn b{color:#e5e7eb!important}
-"""
-ANIM_CSS += """
-@keyframes a_tofade{0%,100%{opacity:1}50%{opacity:.7}}
-.toc.on .sbx .mid .yd{animation:a_mkshake .6s ease-in-out infinite}
-.toc.on .tox{animation:a_pulse 1s ease-in-out infinite}
-.toc.over .sbx .mid .yd{animation:a_tofade 2s ease-in-out infinite}
-"""
-_wants_animation_to = wants_animation
-
-
-def wants_animation(html_text):
-    return _wants_animation_to(html_text) or ("class='tox'" in html_text and (CONFIG.get("animations") or {}).get("enabled", True))
-
-
-def _secs_left(p):
-    ck = p.get("clock") or {}
-    if ck.get("value") is not None:
-        return float(ck["value"])
-    m = re.match(r"(\d+):(\d+)", ck.get("displayValue") or "")
-    return int(m.group(1)) * 60 + int(m.group(2)) if m else 9999
-
-
-def crunch_turnovers(summary, event):
-    """[(play id, play, info)]: turnovers on downs / interceptions / lost fumbles, <= 2:00 left in Q4 or in OT,
-    one-score game. info: kind, offense (lost it), defense (got it), defender, passer."""
-    away, home = teams_of(event)
-    abbrs = [away["team"]["abbreviation"], home["team"]["abbreviation"]]
-    names = []
-    for t in (summary.get("boxscore") or {}).get("players") or []:
-        ab = (t.get("team") or {}).get("abbreviation", "")
-        for cat in t.get("statistics") or []:
-            for a in cat.get("athletes") or []:
-                if (a.get("athlete") or {}).get("displayName"):
-                    names.append((a["athlete"]["displayName"], ab))
-    dr = summary.get("drives") or {}
-    seen, out = set(), []
-    for dv in list(dr.get("previous") or []) + ([dr["current"]] if dr.get("current") else []):
-        if id(dv) in seen:
-            continue
-        seen.add(id(dv))
-        off = (dv.get("team") or {}).get("abbreviation", "")
-        if off not in abbrs:
-            continue
-        de = abbrs[1] if off == abbrs[0] else abbrs[0]
-        res = (dv.get("result") or dv.get("shortDisplayResult") or "").upper()
-        plays = [p for p in dv.get("plays") or [] if not any(k in ((p.get("type") or {}).get("text") or "").lower() for k in _TO_SKIP)]
-        hit = None
-        if res == "DOWNS" and plays:
-            hit = (plays[-1], "downs")
-        else:
-            for p in plays:
-                tt = (p.get("type") or {}).get("text") or ""
-                if "touchdown" in tt.lower():
-                    continue
-                if "Interception" in tt:
-                    hit = (p, "int")
-                elif "Fumble Recovery (Opponent)" in tt or ("fumble" in tt.lower() and "opponent" in tt.lower()):
-                    hit = (p, "fumble")
-        if not hit:
-            continue
-        p, kind = hit
-        q = (p.get("period") or {}).get("number", 0)
-        if not (q >= 5 or (q == 4 and _secs_left(p) <= 120)):
-            continue
-        a1, h1 = int(num(p.get("awayScore"))), int(num(p.get("homeScore")))
-        if abs(a1 - h1) > 8:
-            continue
-        text = p.get("text") or ""
-        who = None
-        if kind == "int":
-            m = re.search(rf"INTERCEPTED by ({_ABBR})", text)
-            who = m.group(1) if m else None
-        elif kind == "fumble":
-            m = re.search(rf"RECOVERED by [A-Z]{{2,3}}-({_ABBR})", text)
-            who = m.group(1) if m else None
-        else:
-            m = re.search(rf"sacked [^(]*\(({_ABBR})", text) or re.search(rf"\(({_ABBR})(?:[;,)])", text)
-            who = m.group(1) if m else None
-        qb = re.search(rf"({_ABBR}) (?:pass|sacked|scrambles)", text)
-        info = {"kind": kind, "off": off, "def": de, "sack": " sacked" in text,
-                "defender": _full_name(who, names, de) if who else None,
-                "passer": _full_name(qb.group(1), names, off) if qb else None}
-        out.append((str(p.get("id")), p, info))
-    return out
-
-
-def nfl_turnover_html(event, play, summary, live, ol, info):
-    import html as H
-    away, home = teams_of(event)
-    dt = away if away["team"]["abbreviation"] == info["def"] else home        # got the ball
-    ot = home if dt is away else away
-    dnick, onick = dt["team"].get("name") or info["def"], ot["team"].get("name") or info["off"]
-    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
-    mine, theirs = (a_s, h_s) if dt is away else (h_s, a_s)
-    q = (play.get("period") or {}).get("number", 0)
-    clk = (play.get("clock") or {}).get("displayValue", "")
-    sw = _win_swing(summary, play.get("id"), dt is home)
-    behind = theirs - mine
-    on = behind >= 0
-    need = ("needs a score to win" if behind == 0 else "needs a FG to win" if behind <= 2 else "needs a FG to tie"
-            if behind == 3 else "needs a TD to win" if behind <= 6 else "needs a TD to tie" if behind == 7 else "needs a TD + 2")
-    over = (not on) and (sw is None or sw[1] >= 97)
-    big = {"downs": "STOPPED ON 4TH!" if on else ("TURNED OVER" if over else "STOPPED ON 4TH!"),
-           "int": "INTERCEPTED!", "fumble": "FUMBLE! TURNOVER!"}[info["kind"]]
-    big = ("🔥 " if on else ("💀 " if over else "🛑 ")) + big
-    when = ("OT" if q > 4 else "Q4") + f" · {clk} LEFT"
-    sub = (f"{info['def']} BALL · {need.upper()}" if on else
-           ("THAT'S THE BALLGAME" if over else f"{info['def']} BALL · CAN RUN IT DOWN"))
-    sc = league_scoring("nfl")
-    rows = []
-    # D/ST that made the stop
-    od = league_owner(f"def:{sl_team(info['def'])}", "")
-    pts = (float(sc.get("int") or 0) if info["kind"] == "int" else float(sc.get("fum_rec") or 0) if info["kind"] == "fumble" else 0.0)
-    pts += float(sc.get("sack") or 0) if info.get("sack") else 0.0
-    bits = " · ".join(x for x in (("INT" if info["kind"] == "int" else "fumble rec" if info["kind"] == "fumble" else ""),
-                                   ("sack" if info.get("sack") else "")) if x)
-    if od:
-        rows.append(f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(od['manager'])}</b>"
-                    f"<span>{H.escape(dnick)} D/ST " + (f"<b class='u'>+{pts:g}</b> ({bits})" if pts else "gets the stop")
-                    + f"</span><span>{'⭐' if od['starting'] else ''}</span><span></span></div>")
-    if info.get("passer") and info["kind"] in ("int", "fumble"):
-        o = league_owner(boxscore_id(summary, info["passer"]), info["passer"])
-        lose = float(sc.get("pass_int" if info["kind"] == "int" else "fum_lost") or 0)
-        if o and lose:
-            rows.append(f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(o['manager'])}</b>"
-                        f"<span>{H.escape(short_name(info['passer']))} <b class='dn'>{lose:g}</b> "
-                        f"({'INT' if info['kind'] == 'int' else 'fumble lost'})</span><span></span><span></span></div>")
-    if not rows:
-        rows.append("<div class='im'><span class='ar'>·</span><b class='who5'>No league points</b>"
-                    "<span>change hands on this one</span><span></span><span></span></div>")
-    imp = f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>"
-    try:
-        imp += _fill_sections(event, dict(play, team={"abbreviation": info["def"]}), summary, live,
-                              {"scorer": info.get("defender") or "", "sub": "to"}, True)
-    except Exception:  # noqa: BLE001
-        pass
-    panel = ""
-    if info.get("defender"):
-        did = boxscore_id(summary, info["defender"])
-        verb = {"int": "picks it off", "fumble": "recovers the fumble"}.get(info["kind"], "makes the stop on 4th down")
-        panel = (f"<div class='pair one'><div class='pp5 to'><img src='{H.escape(nfl_headshot(did) or dt['team'].get('logo', ''))}'>"
-                 f"<div><div class='role'>DEFENCE · {info['def']}</div><div class='nm'>{H.escape(info['defender'])}</div>"
-                 + (f"<div class='gn'><b>+{pts:g}</b><span>{H.escape(verb)}</span></div>" if pts else
-                    f"<div class='gn'><b>STOP</b><span>{H.escape(verb.replace('makes the stop ', ''))}</span></div>")
-                 + f"<div class='ow3'>for the <b>{H.escape(dnick)} D/ST</b></div></div></div></div>")
-    strip = f"<div class='tox'><span class='gc'>{'COMEBACK ON' if on else ('GAME OVER' if over else 'BIG STOP')}</span>"
-    if sw and abs(sw[1] - sw[0]) >= 1:
-        strip += f"{H.escape(dnick)} win chance <b>{sw[0]:.0f}% → {sw[1]:.0f}%</b>"
-    else:
-        strip += f"<b>{H.escape(clk)}</b> left · {abs(behind)}-point game"
-    strip += "</div>"
-    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>TURNOVER · {'OT' if q > 4 else 'Q' + str(q)} {clk} · "
-            f"{away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div>"
-            f"<div class='pill'>{'COMEBACK ON' if on else ('GAME OVER' if over else 'BIG STOP')}</div></div>"
-            + score_hero(event, a_s, h_s, when, sub, hot=None, plus=None, big=big) + panel + strip + imp)
-    mood = "on" if on else "over"
-    css = V4_CSS + TD5_CSS + FG_CSS + SB_CSS + TOD_CSS + (TOD_ON_CSS if on else TOD_OVER_CSS) + FILL_CSS
-    html_text = _card(f"--a:{'#ffd600' if on else '#6b7280'};--h:#ffd166", body, extra_css=css)
-    return (html_text.replace("<div class='card'", f"<div class='card toc {mood}'", 1).replace("<head>", "<head>" + FILL_JS, 1),
-            on, over, need, dnick, onick, sw)
-
-
-def post_turnover(event, play, summary, ctx, info):
-    html_text, on, over, need, dnick, onick, sw = nfl_turnover_html(event, play, summary, ctx["live"], ctx["ol"], info)
-    clk = (play.get("clock") or {}).get("displayValue", "")
-    what = {"downs": "STOPPED ON 4TH", "int": "INTERCEPTED", "fumble": "FUMBLE"}[info["kind"]]
-    if on:
-        title = f"🔥 {what}! {dnick} get the ball back · {clk} left · {need}"
-    elif over:
-        title = (f"💀 {'Turned over on downs' if info['kind'] == 'downs' else what.title()} — that's the ballgame for the {onick}"
-                 if info["kind"] == "downs" else f"💀 {what.title()}! That's the ballgame for the {onick}")
-    else:
-        title = f"🛑 {what}! {dnick} take over · {clk} left — the {onick} need a stop"
-    desc = f"{dnick} win chance {sw[0]:.0f}% → {sw[1]:.0f}%" if sw else ""
-    embed = {"author": AU_NFL(), "color": 0xFFD600 if on else 0x374151, "img_title": title, "img_desc": desc,
-             "title": title, "description": desc}
-    return _post_card(NFL_HOOK, html_text, f"**{title}**", embed, "turnover.png")
-
-
-_nfl_prime_slot_to = nfl_prime_slot
-
-
-def nfl_prime_slot(slot, st, getctx, force=False):
-    active = _nfl_prime_slot_to(slot, st, getctx, force)
-    if not (CONFIG.get("nfl") or {}).get("turnover_alerts", True):
-        return active
-    for e in slot:
-        if e["status"]["type"]["state"] != "in":
-            continue
-        g = st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})
-        try:
-            summary = fetch(f"football/nfl/summary?event={e['id']}")
-            for key, p, info in crunch_turnovers(summary, e):
-                if key in g.setdefault("tod", []) or key in g.setdefault("gc", []):
-                    continue
-                wc = p.get("wallclock")
-                if wc and time.time() - _wallclock_ts(wc) > 600:
-                    g["tod"].append(key)
-                    continue
-                t0 = _wallclock_ts(wc) if wc else g.setdefault("tod_seen", {}).setdefault(key, time.time())
-                if not due(t0, "turnover"):
-                    continue
-                ctx = getctx()
-                if ctx and post_turnover(e, p, summary, ctx, info):
-                    g["tod"].append(key)
-                    g["gc"].append(key)                     # the game-changer post won't do it again
-        except Exception as ex:  # noqa: BLE001
-            _log_plain(f"turnover check skipped: {ex}")
-    return active
-
-
-
-# ------------------------------------------------ WALK-OFF / LAST-SECOND WINNER tier: a go-ahead or tying FG / TD in the
-#   final 0:30 of Q4 or in OT (and a winner as time expires). Huge banner, blown-up score, confetti + shake / flash
-#   (animated), ESPN win-chance swing, "<team> need a miracle" framing, spare-space extras. Long kicks (55+) get
-#   "FROM 59!". The final whistle post then says how it was won.
-WO_CSS = """
-.bg{opacity:1!important;background:radial-gradient(circle at 50% 32%,rgba(255,214,0,.55),rgba(255,120,0,.28) 38%,rgba(10,14,26,.94) 78%)!important}
-.wob{position:relative;margin-top:10px;text-align:center;font-size:46px;font-weight:900;letter-spacing:2px;line-height:1.05;
- padding:10px 16px 12px;border-radius:16px;color:#1b1305;white-space:nowrap;
- background:linear-gradient(90deg,#ffd600,#fff3a8 50%,#ffd600);background-size:200% 100%;
- box-shadow:0 0 0 4px #fff7c2,0 0 46px rgba(255,200,0,.95),0 0 90px rgba(255,120,0,.6)}
-.wob small{display:block;font-size:20px;letter-spacing:3px;margin-top:3px;color:#5a3a00}
-.wo .sbx .sc{font-size:118px!important;line-height:.95}
-.wo .sbx .sc.hot{color:#fff!important;text-shadow:0 0 26px #ffd600,0 0 60px #ff9a00!important}
-.wo .sbx .mid .st{background:#ff3d3d!important;color:#fff!important}
-.wo .hl{border-left-color:#ffd600!important}
-.wo .pp5{box-shadow:0 0 0 3px #ffd600,0 0 30px rgba(255,200,0,.65)!important}
-.wox{margin-top:10px;display:flex;align-items:center;gap:14px;white-space:nowrap;padding:10px 16px;border-radius:14px;
- background:linear-gradient(100deg,rgba(255,214,0,.3),rgba(255,61,61,.25));box-shadow:0 0 0 3px #ffd600,0 0 30px rgba(255,170,0,.7);
- font-size:20px;font-weight:800;color:#fff}
-.wox b{font-size:24px;font-weight:900;color:#ffd600}.wox .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;background:#ff3d3d;
- color:#fff;border-radius:7px;padding:3px 9px;flex:none}
-.cft{position:absolute;inset:0;pointer-events:none;z-index:7;overflow:hidden;border-radius:inherit}
-.cft i{position:absolute;top:-14px;width:9px;height:15px;border-radius:2px;opacity:.95}
-"""
-ANIM_CSS += """
-@keyframes a_wobg{from{background-position:0 0}to{background-position:200% 0}}
-@keyframes a_woshake{0%,100%{transform:translate(0,0) rotate(0)}25%{transform:translate(-5px,1px) rotate(-1deg)}
- 50%{transform:translate(5px,-1px) rotate(1deg)}75%{transform:translate(-3px,0) rotate(-.5deg)}}
-@keyframes a_cft{from{transform:translateY(0) rotate(0)}to{transform:translateY(700px) rotate(540deg)}}
-.wob{animation:a_wobg 1s linear infinite,a_woshake .5s ease-in-out infinite}
-.wox{animation:a_pulse 1s ease-in-out infinite}
-.cft i{animation:a_cft 1s linear infinite}
-"""
-
-
-def _confetti(n=34):
-    cols = ("#ffd600", "#ff3d3d", "#ffffff", "#7ee2a8", "#5b9bff", "#ff9a00")
-    r = _random.Random(7)
-    return "<div class='cft'>" + "".join(
-        f"<i style='left:{r.uniform(0, 100):.1f}%;background:{cols[i % len(cols)]};animation-delay:-{r.uniform(0, 1):.2f}s;"
-        f"top:{r.uniform(-20, 80):.0f}%;transform:rotate({r.randint(0, 180)}deg)'></i>" for i in range(n)) + "</div>"
-
-
-def _walkoff(event, play):
-    """('walk-off' | 'winner' | 'ties', mine, theirs) for a go-ahead / tying score in the last 0:30 of Q4 or in OT."""
-    q = (play.get("period") or {}).get("number", 0)
-    if not (q >= 5 or (q == 4 and _secs_left(play) <= 30)):
-        return None
-    away, home = teams_of(event)
-    abbr = (play.get("team") or {}).get("abbreviation", "")
-    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
-    mine, theirs = (a_s, h_s) if abbr == away["team"]["abbreviation"] else (h_s, a_s)
-    if "field goal" in ((play.get("type") or {}).get("text") or "").lower():
-        pts = 3
-    else:
-        pts = (a_s + h_s) - _pre_total(play, a_s, h_s, abbr, away)
-    before = mine - pts
-    if mine == theirs:
-        return "ties", mine, theirs
-    if mine > theirs and before <= theirs:                  # it put them in front
-        final = event["status"]["type"].get("state") == "post" or _secs_left(play) <= 0 or q >= 5
-        return ("walk-off" if final else "winner"), mine, theirs
-    return None
-
-
-def _wo_apply(h, event, play, summary, live, kind, yds, scorer, label):
-    import html as H
-    away, home = teams_of(event)
-    abbr = (play.get("team") or {}).get("abbreviation", "")
-    team = away if away["team"]["abbreviation"] == abbr else home
-    other = home if team is away else away
-    nick, onick = team["team"].get("name") or abbr, other["team"].get("name") or ""
-    clk = (play.get("clock") or {}).get("displayValue", "")
-    head = {"walk-off": "🚨 WALK-OFF!", "winner": "🚨 GAME-WINNER!", "ties": "🚨 TIED IT!"}[kind]
-    far = f" · FROM {yds}!" if yds and yds >= 55 else ""
-    sub = {"walk-off": f"{nick.upper()} WIN IT AS TIME EXPIRES", "winner": f"{onick.upper()} NEED A MIRACLE · {clk} LEFT",
-           "ties": f"ALL SQUARE · {clk} LEFT"}[kind]
-    banner = f"<div class='wob'>{head}{far}<small>{H.escape(label)}</small></div>"
-    sw = _win_swing(summary, play.get("id"), team is home)
-    strip = "<div class='wox'><span class='gc'>LAST-SECOND</span>"
-    strip += (f"{H.escape(nick)} win chance <b>{sw[0]:.0f}% → {sw[1]:.0f}%</b>" if sw and abs(sw[1] - sw[0]) >= 1
-              else f"<b>{H.escape(clk)}</b> left")
-    strip += "</div>"
-    i = h.find("<div class='sbx'>")
-    if i >= 0:
-        h = h[:i] + banner + h[i:]
-        h = re.sub(r"<div class=st>[^<]*</div>", f"<div class=st>{H.escape(sub)}</div>", h, count=1)
-    k = h.find("<div class='imp'>")
-    if k >= 0:
-        e2 = _div_end(h, k)
-        imp = h[k:e2]
-        if "🆓" in imp and imp.count("<div class='im'>") == 1:   # unrostered kicker: the extras say more
-            imp = ""
-        try:
-            imp += _fill_sections(event, play, summary, live, {"scorer": scorer, "sub": "wo"}, True)
-        except Exception:  # noqa: BLE001
-            pass
-        h = h[:k] + strip + imp + h[e2:]
-    else:
-        h = h.replace("</div></div><script>", strip + "</div></div><script>", 1)
-    h = h.replace("</style>", WO_CSS + FILL_CSS + "</style>", 1).replace("<head>", "<head>" + FILL_JS, 1)
-    h = h.replace("<div class='card'", "<div class='card wo'", 1)
-    j = h.find("<div class='in'>")
-    if j >= 0:
-        h = h[:j] + _confetti() + h[j:]
-    return h
-
-
-_nfl_td_html_wo = nfl_td_fantasy_html
-
-
-def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
-    h = _nfl_td_html_wo(event, play, summary, live, ol, base, *a, **k)
-    try:
-        wo = _walkoff(event, play)
-        if wo:
-            td = td_parse(play)
-            h = _wo_apply(h, event, play, summary, live, wo[0], td.get("yds"), td.get("scorer") or "",
-                          f"{(td.get('scorer') or '').upper()} · {_td_yards_label(td)}")
-            _last_td_html["h"] = h
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"walk-off treatment skipped: {ex}")
-    return h
-
-
-# kicker's line today in the extras
-_stat_line_plain = _stat_line
-
-
-def _stat_line(summary, name):
-    out = _stat_line_plain(summary, name)
-    for team in (summary.get("boxscore") or {}).get("players") or []:
-        for cat in team.get("statistics") or []:
-            if cat.get("name") != "kicking":
-                continue
-            for a in cat.get("athletes") or []:
-                if (a.get("athlete") or {}).get("displayName") == name:
-                    v = dict(zip(cat.get("keys") or [], a.get("stats") or []))
-                    out.append(("kicking", f"FG {v.get('fieldGoalsMade/fieldGoalAttempts', '')} · long {v.get('longFieldGoalMade', '')}"
-                                           f" · XP {v.get('extraPointsMade/extraPointAttempts', '')}"))
-    return out
-
-
-_nfl_fg_html_wo = nfl_fg_html
-
-
-def nfl_fg_html(event, play, summary, live, ol, base):
-    res = _nfl_fg_html_wo(event, play, summary, live, ol, base)
-    try:
-        wo = _walkoff(event, play)
-        if wo:
-            html_text, tag, kicker, yds, kt, mine, theirs = res
-            label = f"{kicker.upper()} · {yds}-YARD FIELD GOAL"
-            res = (_wo_apply(html_text, event, play, summary, live, wo[0], yds, kicker, label),) + tuple(res[1:])
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"walk-off treatment skipped: {ex}")
-    return res
-
-
-_post_fg_clutch_wo = post_fg_clutch
-
-
-def post_fg_clutch(event, play, summary, ctx):
-    wo = _walkoff(event, play)
-    st = _NFL_ST.get("st")
-    if wo:
-        m = re.match(r"^(.+?) (\d+) Yd Field Goal", play.get("text") or "")
-        kicker, yds = (m.group(1), int(m.group(2))) if m else ("The kicker", 0)
-        away, home = teams_of(event)
-        abbr = (play.get("team") or {}).get("abbreviation", "")
-        team = away if away["team"]["abbreviation"] == abbr else home
-        other = home if team is away else away
-        nick = team["team"].get("name") or abbr
-        clk = (play.get("clock") or {}).get("displayValue", "")
-        kind, mine, theirs = wo
-        title = {"walk-off": f"🚨 WALK-OFF! {kicker} from {yds} — the {nick} win it {mine}–{theirs}!",
-                 "winner": f"🚨 GAME-WINNER! {kicker} from {yds}{'!' if yds >= 55 else ''} — {nick} lead {mine}–{theirs} with {clk} left!",
-                 "ties": f"🚨 TIED IT! {kicker} from {yds} — all square at {mine} with {clk} left!"}[kind]
-        sw = _win_swing(summary, play.get("id"), team is home)
-        desc = (f"{other['team'].get('name')} need a miracle" if kind == "winner" else "") + \
-               (f" · {nick} win chance {sw[0]:.0f}% → {sw[1]:.0f}%" if sw else "")
-        _WO_EMBED.update(img_title=title, img_desc=desc.strip(" ·"))
-        if st is not None:
-            st.setdefault("walkoffs", {})[event["id"]] = {"t": time.time(), "teams": [nick, other["team"].get("name") or ""], "text": (
-                f"{nick} won it with a {yds}-yard {'walk-off ' if kind != 'ties' else ''}field goal from {kicker}" if kind != "ties"
-                else f"{kicker} tied it from {yds} with {clk} left")}
-    _LAST_MSG.clear()
-    try:
-        ok = _post_fg_clutch_wo(event, play, summary, ctx)
-    finally:
-        _WO_EMBED.clear()
-    if ok and st is not None and _LAST_MSG.get("id"):
-        st.setdefault("fg_posts", {})[str(play["id"])] = {"game": event["id"], "msg": str(_LAST_MSG["id"]), "t": time.time()}
-    return ok
-
-
-_WO_EMBED = {}
-_post_card_wo = _post_card
-
-
-def _post_card(hook, html_text, content, embed, name):
-    if _WO_EMBED and name.startswith("fg"):
-        embed = dict(embed, **_WO_EMBED)
-    st = _NFL_ST.get("st") or {}
-    if name.startswith("ft") and st.get("walkoffs"):             # the final whistle post says how it was won
-        w = next((x for x in st["walkoffs"].values() if time.time() - x.get("t", 0) < 1800 and not x.get("used")
-                  and all(n in html_text for n in x.get("teams") or ["?"])), None)
-        if w:
-            embed = dict(embed)
-            embed["img_desc"] = ("🚨 " + w["text"] + "!") + (f"\n{embed.get('img_desc', embed.get('description', ''))}"
-                                                           if embed.get("img_desc", embed.get("description")) else "")
-            w["used"] = True
-    return _post_card_wo(hook, html_text, content, embed, name)
-
-
-# ---- one-off: rebuild posted field-goal cards in place (config nfl.redo_fg_posts: [play ids]), once each
-def _find_post(hook, ch, near_t, prefix):
-    """Our webhook's message in the channel posted near near_t with an attachment named prefix* (bot token)."""
-    m = re.search(r"/webhooks/(\d+)/", hook or "")
-    if not (m and ch and BOT_TOKEN):
-        return None
-    code, msgs = discord_api("GET", f"/channels/{ch}/messages?limit=50")
-    best = None
-    for x in msgs or [] if code == 200 else []:
-        if str(x.get("webhook_id")) != m.group(1):
-            continue
-        if not x.get("attachments") and not x.get("components"):
-            x = _hook_message(hook, x["id"]) or x                 # components-v2 posts: the webhook endpoint has them
-        names = [a.get("filename", "") for a in x.get("attachments") or []]
-        for c in x.get("components") or []:
-            for it in c.get("items") or []:
-                names.append(((it.get("media") or {}).get("url") or "").rsplit("/", 1)[-1].split("?")[0])
-        if not any(n.startswith(prefix) for n in names):
-            continue
-        t = datetime.fromisoformat(x["timestamp"].replace("Z", "+00:00")).timestamp()
-        if abs(t - near_t) < 900 and (best is None or abs(t - near_t) < best[0]):
-            best = (abs(t - near_t), str(x["id"]))
-    return best[1] if best else None
-
-
-def _redo_fg_posts(st):
-    """config nfl.redo_fg_posts: ["<play id>" or "<play id>:<message id>"]: rebuild that posted FG card in place, once
-    each (works for a finished game too: it just re-renders that play's card)."""
-    global CAPTURE
-    want = [str(x).strip() for x in (CONFIG.get("nfl") or {}).get("redo_fg_posts") or [] if str(x).strip()]
-    done = st.setdefault("fg_redone", [])
-    for entry in want:
-        if entry in done or CAPTURE is not None or DRY_RUN:
-            continue
-        done.append(entry)                                  # once, whatever happens
-        pid, _, mid = entry.partition(":")
-        try:
-            week = int(fetch_url(f"{SLEEPER}/state/nfl").get("week") or 0)
-            events = fetch(f"football/nfl/scoreboard?seasontype=2&week={week}").get("events", [])
-            e = next((x for x in events if pid.startswith(str(x["id"]))), None)
-            if e is None:
-                _log_plain(f"field goal {pid}: game not found this week, not rebuilt")
-                continue
-            summary = fetch(f"football/nfl/summary?event={e['id']}")
-            p = next((q for q in summary.get("scoringPlays") or [] if str(q.get("id")) == pid), None)
-            ctx = nfl_ctx(st, events)
-            if not p or not ctx:
-                _log_plain(f"field goal {pid}: play or league data missing, not rebuilt")
-                continue
-            mid = mid or ((st.get("fg_posts") or {}).get(pid) or {}).get("msg")
-            if not mid:
-                ch = next((b.get("ch") for b in (st.get("weekly_boards") or {}).values()
-                           if b.get("sport") == "nfl" and b.get("ch") and b.get("where") == "main"), None)
-                _, d = play_detail(summary, pid)
-                near = _wallclock_ts(d["wallclock"]) if (d or {}).get("wallclock") else time.time()
-                mid = _find_post(NFL_HOOK, ch, near, "fg")
-            if not mid or not _hook_message(NFL_HOOK, mid):
-                _log_plain(f"field goal {pid}: message {mid or '?'} not found as one of ours, not rebuilt")
-                continue
-            keep_cap, keep_send = CAPTURE, dict(_SEND_AT)
-            CAPTURE = []
-            _GIF_LAST.clear()
-            try:
-                _post_fg_clutch_wo_redo(e, p, summary, ctx)
-                got = CAPTURE[-1] if CAPTURE else None
-            finally:
-                CAPTURE = keep_cap
-                _SEND_AT.update(keep_send)
-            if not isinstance(got, dict) or not got.get("attachments"):
-                _log_plain(f"field goal {pid}: card not built, not rebuilt")
-                continue
-            path = Path(got["attachments"][0].replace("file://", ""))
-            if discord_edit(NFL_HOOK, mid, path.read_bytes(), path.name):
-                _gif_after_edit(NFL_HOOK, mid)
-                st.setdefault("fg_posts", {})[pid] = {"game": e["id"], "msg": mid, "t": time.time()}
-                _log_plain(f"field goal {pid}: post rebuilt in place (message {mid})")
-        except Exception as ex:  # noqa: BLE001
-            _log_plain(f"rebuild of field goal {pid} skipped: {ex}")
-
-
-_run_nfl_redofg = run_nfl
-
-
-def run_nfl(st, date=None, force=False):
-    out = _run_nfl_redofg(st, date, force)
-    try:
-        _redo_fg_posts(st)
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"field goal rebuilds skipped: {ex}")
-    return out
-
-
-def _post_fg_clutch_wo_redo(e, p, summary, ctx):
-    """post_fg_clutch for a rebuild: same card and headline, without recording a new post."""
-    st = _NFL_ST.get("st")
-    keep = dict((st or {}).get("fg_posts") or {})
-    try:
-        return post_fg_clutch(e, p, summary, ctx)
-    finally:
-        if st is not None:
-            st["fg_posts"] = keep
-
-
-
-# ------------------------------------------------ prettier moment cards + tension that escalates late in tight games
-#   Applied to every in-game moment card (touchdown, field goal, game-changer, missed kick, turnover...) at render time.
-#   Style: both teams' colours glowing behind their side of the scoreboard, a faint texture, panels with a soft top light
-#   and hairline border, livelier key numbers. Tension, read from the card's own "Q4 3:27 · PHI 30–38 DAL" line:
-#   one-score game in Q4 -> CRUNCH TIME accent; last 5:00 -> stronger glow + pulsing clock; last 2:00 / OT -> red
-#   alert framing. Blowouts (and earlier quarters) stay calm. Config "card_style": "classic" turns it off.
-PRETTY_CSS = """
-.bg::after{content:'';position:absolute;inset:0;pointer-events:none;opacity:.6;
- background:repeating-linear-gradient(135deg,rgba(255,255,255,.022) 0 2px,transparent 2px 7px),
- radial-gradient(circle at 50% -10%,rgba(255,255,255,.12),transparent 55%)}
-.sbx{position:relative;box-shadow:inset 0 0 0 1px rgba(255,255,255,.10),inset 0 1px 0 rgba(255,255,255,.12),
- 0 10px 30px rgba(0,0,0,.4)!important}
-.sbx .sc{text-shadow:0 3px 0 rgba(0,0,0,.28),0 0 22px rgba(255,255,255,.18)}
-.sbx .mid .yd{letter-spacing:.5px;text-shadow:0 2px 12px rgba(0,0,0,.5)}
-.pp5,.imp,.fx,.cv,.hl{background-image:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,0) 50%)!important}
-.imp,.fx,.cv,.hl{box-shadow:inset 0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.1),0 8px 22px rgba(0,0,0,.3)}
-.fx{box-shadow:inset 4px 0 0 var(--a),inset 0 0 0 1px rgba(255,255,255,.09),0 8px 22px rgba(0,0,0,.3)}
-.pp5:not(.hot):not(.h3):not(.h4):not(.mk):not(.to){box-shadow:inset 0 0 0 1px rgba(255,255,255,.10),inset 0 1px 0 rgba(255,255,255,.12),
- 0 0 0 2px color-mix(in srgb,var(--a) 55%,transparent),0 8px 22px rgba(0,0,0,.3)}
-.pp5 .gn b{text-shadow:0 0 18px rgba(126,226,168,.6)}
-.pp5 .nm{letter-spacing:.3px;text-shadow:0 2px 10px rgba(0,0,0,.4)}
-.imp .ih,.fx .fh{color:#dde3ee!important}
-.imp .im b.u,.fx .u{text-shadow:0 0 10px rgba(126,226,168,.5)}
-.tnx{display:inline-block;margin-left:10px;padding:2px 9px;border-radius:6px;font-size:15px;font-weight:900;letter-spacing:1.4px;
- vertical-align:middle}
-.tn1 .tnx{background:#ff9a00;color:#1b1000}
-.tn1 .sbx{box-shadow:inset 0 0 0 2px rgba(255,154,0,.75),0 0 24px rgba(255,140,0,.35),0 10px 30px rgba(0,0,0,.4)!important}
-.tn2 .tnx{background:#ff6a00;color:#fff}
-.tn2 .sbx{box-shadow:inset 0 0 0 3px #ff8a00,0 0 34px rgba(255,120,0,.7)!important}
-.tn2 .sbx .clk{color:#ffb347!important;text-shadow:0 0 14px rgba(255,140,0,.85)}
-.tn3 .tnx{background:#ff2d2d;color:#fff}
-.tn3{box-shadow:inset 0 0 0 4px #ff2d2d,inset 0 0 60px rgba(255,0,0,.35)!important}
-.tn3 .sbx{box-shadow:inset 0 0 0 3px #ff2d2d,0 0 40px rgba(255,30,30,.8)!important}
-.tn3 .sbx .clk{color:#ff6b6b!important;text-shadow:0 0 16px rgba(255,40,40,.95)}
-"""
-ANIM_CSS += """
-@keyframes a_tnclk{0%,100%{opacity:1}50%{opacity:.45}}
-@keyframes a_tnred{0%,100%{box-shadow:inset 0 0 0 4px #ff2d2d,inset 0 0 60px rgba(255,0,0,.35)}
- 50%{box-shadow:inset 0 0 0 6px #ff5a5a,inset 0 0 110px rgba(255,0,0,.55)}}
-.tn2 .sbx .clk,.tn3 .sbx .clk{animation:a_tnclk 1s ease-in-out infinite}
-.tn3{animation:a_tnred 1s ease-in-out infinite}
-"""
-
-
-def _tension(html_text):
-    """0 calm, 1 crunch time, 2 last 5:00, 3 last 2:00 / OT (one-score game only)."""
-    m = re.search(r"·\s*(Q(\d)|OT)\s*(\d+):(\d+)\s*·\s*[A-Z]{2,3}\s*(\d+)–(\d+)\s*[A-Z]{2,3}", html_text)
-    if not m:
-        return 0
-    q = 5 if m.group(1) == "OT" else int(m.group(2))
-    secs = int(m.group(3)) * 60 + int(m.group(4))
-    if abs(int(m.group(5)) - int(m.group(6))) > 8 or q < 4:
-        return 0
-    if q >= 5 or secs <= 120:
-        return 3
-    return 2 if secs <= 300 else 1
-
-
-_inline_ready_plain = _inline_ready
-
-
-def _inline_ready(html_text):
-    h = _inline_ready_plain(html_text)
-    if CONFIG.get("card_style", "pretty") != "pretty" or "class='lsx'" not in h:
-        return h
-    try:
-        css = PRETTY_CSS
-        i = h.find("<div class='sbx'>")
-        tcs = re.findall(r"--tc:(#[0-9a-fA-F]{6})", h[i:i + 4000]) if i >= 0 else []
-        if len(tcs) >= 2:                                       # both teams' colours across the scoreboard
-            ca, cb = tcs[0], tcs[1]
-            css += (f".sbx{{background:linear-gradient(90deg,{ca}66 0%,{ca}22 30%,rgba(9,12,22,.78) 46%,"
-                    f"rgba(9,12,22,.78) 54%,{cb}22 70%,{cb}66 100%),rgba(9,12,22,.7)!important}}"
-                    f".hl{{background:linear-gradient(90deg,{ca}26,rgba(9,12,22,.55) 40%,rgba(9,12,22,.55) 60%,{cb}26)!important}}")
-        t = 0 if "class='card wo" in h else _tension(h)        # the walk-off tier has its own treatment
-        if t:
-            label = {1: "CRUNCH TIME", 2: "FINAL 5:00", 3: "🚨 2-MIN DRILL"}[t]
-            h = h.replace("<div class='card", f"<div class='card tn{t}", 1)
-            if "class='mkx'" not in h and "class='tox'" not in h:   # those cards say it in their own big label
-                h = re.sub(r"(<div class='clk'>[^<]*)(</div>)", lambda mm: mm.group(1) + f"<span class='tnx'>{label}</span>" + mm.group(2),
-                           h, count=1)
-        return h.replace("</style>", css + "</style>", 1)
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"card style skipped: {ex}")
-        return h
-
-
-
-# ------------------------------------------------ a subtle roast when a rostered player messes up
-#   ONE small italic line on the card, aimed at the owner (Sleeper display name), only about the fantasy moment:
-#   picks, lost fumbles, missed kicks, turnovers on downs, a started D/ST giving up a TD, a big bust at full-time, and
-#   "bench cost you" in the recap. Kind: never on injuries, never for a team already out of the playoff race, and no
-#   line repeats for the same owner within a week (remembered in state "roasts"). Config "roasts": false turns it off.
-ROAST_LINES = {
-    "pick": [
-        "🫠 Bold strategy, {o}.", "{p} just found the other team's receiver. {o} noticed.",
-        "{o} drafted {p} for moments exactly like… not this.", "That one's going on {o}'s highlight reel. The wrong one.",
-        "{p} playing for both teams tonight, {o}?", "Somewhere, {o} is refreshing the app very hard.",
-        "{o}, that's a turnover with extra steps.", "{p} with a generous gift. {o} did not ask for it.",
-        "Respectfully, {o}: maybe check the waiver wire.", "{o}'s QB room just got very quiet.",
-    ],
-    "fumble": [
-        "Butterfingers, and {o} is holding the bag.", "{p} let go. {o} can't.", "{o} would like that one back.",
-        "Ball security is a lifestyle, {o}.", "{p} put it on the turf. {o} put head in hands.",
-        "Grip it and rip it, {o}. Mostly grip it.",
-    ],
-    "miss": [
-        "{p} thanks {o} for the playing time.", "{o} starting a kicker: brave. Trusting one: braver.",
-        "Wide of the posts, wide of {o}'s hopes.", "{o} felt that one in the standings.",
-        "That's three points {o} won't see again.", "{p} aimed for {o}'s heart and missed that too.",
-        "Kickers are people too, {o}. Unreliable people.", "{o} might want to look at the kicker market.",
-    ],
-    "downs": [
-        "Fourth-and-ouch for {o}.", "{o}'s guys came up a yard short. Story of the season?",
-        "{o} believed. The fourth down didn't.", "Close only counts in horseshoes, {o}.",
-    ],
-    "dst": [
-        "{o}'s D/ST is taking the night off.", "{o} started that defence on purpose, apparently.",
-        "{p} D/ST: open for business, {o}.", "{o}'s defence just waved them through.",
-        "Bold of {o} to start the {p} D/ST tonight.", "The {p} D/ST is giving {o} trust issues.",
-    ],
-    "bust": [
-        "{o}'s bench is having a better night.", "{p} left the projection in the locker room, {o}.",
-        "{o}, that's a rental you can return.", "{p} gave {o} a whole lot of nothing.",
-        "Projection: big. Reality: {o}'s {p}.", "{o} might want to check the waiver wire.",
-        "{p} spent tonight in airplane mode, {o}.",
-    ],
-    "bench": [
-        "{o}'s bench is louder than the starters.", "Lineup set by {o}. Allegedly.",
-        "The best players {o} owns were watching from the bench.", "{o}: start 'em next time, maybe?",
-        "{o}'s bench would like a word.",
-    ],
-}
-ROAST_CSS = ".rst{margin-top:8px;font-size:18px;font-style:italic;font-weight:600;color:#aeb7c7;line-height:1.3}" \
-            ".rst b{color:#e6e9ef;font-style:italic}"
-
-
-def _roast_ok(owner, txt=""):
-    if not CONFIG.get("roasts", True) or not owner or re.search(r"injur|carted|hurt", txt or "", re.I):
-        return False
-    return True
-
-
-def roast_line(kind, owner, player=""):
-    """One playful line for this owner and moment (no repeat for the same owner within 7 days), or ''."""
-    import html as H
-    pool = ROAST_LINES.get(kind) or []
-    if not pool or not owner:
-        return ""
-    st = _NFL_ST.get("st") or {}
-    mem = st.setdefault("roasts", {}) if st is not None else {}
-    now = time.time()
-    used = {x[0] for x in mem.get(owner, []) if now - x[1] < 7 * 86400}
-    pick = [ln for ln in pool if f"{kind}:{ln}" not in used] or pool
-    r = _random.Random(f"{owner}|{player}|{kind}|{int(now // 3600)}")
-    ln = r.choice(pick)
-    mem[owner] = [x for x in mem.get(owner, []) if now - x[1] < 7 * 86400][-30:] + [(f"{kind}:{ln}", now)]
-    txt = ln.replace("{o}", "\x00o\x00").replace("{p}", "\x00p\x00")
-    txt = H.escape(txt).replace("\x00o\x00", f"<b>{H.escape(owner)}</b>").replace("\x00p\x00", H.escape(short_name(player) or player))
-    return f"<div class='rst'>{txt}</div>"
-
-
-def _roast_into(h, line):
-    """Put the roast line at the bottom of the card's fantasy impact panel (or after the scorer panel)."""
-    if not line:
-        return h
-    i = h.find("<div class='imp'>")
-    if i >= 0:
-        e = _div_end(h, i) - len("</div>")
-        h = h[:e] + line + h[e:]
-    else:
-        return h
-    return h.replace("</style>", ROAST_CSS + "</style>", 1)
-
-
-def _alive(live, ol, manager):
-    """False for a team already out of the playoff race (no roasting them)."""
-    try:
-        rid = next((r for r, x in live["rosters"].items() if x["manager"] == manager), None)
-        return rid is None or rid not in ol or ol[rid].get("po", 100) >= 0.5
-    except Exception:  # noqa: BLE001
-        return True
-
-
-# missed kick card: the kicker's owner
-_nfl_miss_html_roast = nfl_miss_html
-
-
-def nfl_miss_html(event, play, summary, live, ol, info):
-    h = _nfl_miss_html_roast(event, play, summary, live, ol, info)
-    try:
-        if info["kind"] in ("fg", "xp") and info.get("kicker"):
-            k = next((x for x in nfl_kickers(summary) if name_key(x["name"]) == name_key(info["kicker"])), None)
-            o = league_owner(k["id"] if k else boxscore_id(summary, info["kicker"]), info["kicker"])
-            if o and o.get("starting") and _roast_ok(o["manager"], play.get("text")) and _alive(live, ol, o["manager"]):
-                h = _roast_into(h, roast_line("miss", o["manager"], info["kicker"]))
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"roast skipped: {ex}")
-    return h
-
-
-# turnover card: the QB (pick / fumble / stopped on downs)
-_nfl_turnover_html_roast = nfl_turnover_html
-
-
-def nfl_turnover_html(event, play, summary, live, ol, info):
-    res = _nfl_turnover_html_roast(event, play, summary, live, ol, info)
-    try:
-        if info.get("passer"):
-            o = league_owner(boxscore_id(summary, info["passer"]), info["passer"])
-            if o and o.get("starting") and _roast_ok(o["manager"], play.get("text")) and _alive(live, ol, o["manager"]):
-                kind = {"int": "pick", "fumble": "fumble", "downs": "downs"}[info["kind"]]
-                res = (_roast_into(res[0], roast_line(kind, o["manager"], info["passer"])),) + tuple(res[1:])
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"roast skipped: {ex}")
-    return res
-
-
-# game-changer card (interceptions / fumbles that swing the game): the player who gave it away
-_nfl_gc_html_roast = nfl_gc_html
-
-
-def nfl_gc_html(event, play, summary, live, ol, before, after):
-    res = _nfl_gc_html_roast(event, play, summary, live, ol, before, after)
-    try:
-        kind, victim = res[1], res[3]
-        if victim and kind in ("INTERCEPTION", "FUMBLE"):
-            o = league_owner(boxscore_id(summary, victim), victim)
-            if o and o.get("starting") and _roast_ok(o["manager"], play.get("text")) and _alive(live, ol, o["manager"]):
-                line = roast_line("pick" if kind == "INTERCEPTION" else "fumble", o["manager"], victim)
-                h = res[0]
-                h = _roast_into(h, line) if "<div class='imp'>" in h else \
-                    h.replace("</div></div><script>", line + "</div></div><script>", 1).replace("</style>", ROAST_CSS + "</style>", 1)
-                res = (h,) + tuple(res[1:])
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"roast skipped: {ex}")
-    return res
-
-
-# touchdown card: the started D/ST that just gave it up (and a pick-six thrower)
-_nfl_td_html_roast = nfl_td_fantasy_html
-
-
-def nfl_td_fantasy_html(event, play, summary, live, ol, base, *a, **k):
-    h = _nfl_td_html_roast(event, play, summary, live, ol, base, *a, **k)
-    try:
-        if "class='rst'" in h:
-            return h
-        away, home = teams_of(event)
-        abbr = (play.get("team") or {}).get("abbreviation", "")
-        con = home if away["team"]["abbreviation"] == abbr else away
-        td = td_parse(play)
-        line = ""
-        if td.get("kind") == "int" and td.get("sub"):
-            text = (_PLAYTXT.get(str(play.get("id"))) or ("", []))[0]
-            m = re.search(rf"({_ABBR}) pass", text)
-            if m:
-                qb = _full_name(m.group(1), (_PLAYTXT.get(str(play.get("id"))) or ("", []))[1], con["team"]["abbreviation"])
-                o = league_owner(boxscore_id(summary, qb), qb)
-                if o and o.get("starting") and _roast_ok(o["manager"], play.get("text")) and _alive(live, ol, o["manager"]):
-                    line = roast_line("pick", o["manager"], qb)
-        if not line:
-            od = league_owner(f"def:{sl_team(con['team']['abbreviation'])}", "")
-            if (od and od.get("starting") and "D/ST loses" in h and _roast_ok(od["manager"], play.get("text"))
-                    and _alive(live, ol, od["manager"])):       # only when it actually cost them points
-                line = roast_line("dst", od["manager"], con["team"].get("name") or con["team"]["abbreviation"])
-        if line:
-            h = _roast_into(h, line)
-            _last_td_html["h"] = h
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"roast skipped: {ex}")
-    return h
-
-
-# full-time game card: the biggest bust among started players
-_nfl_game_fantasy_html_roast = nfl_game_fantasy_html
-
-
-def nfl_game_fantasy_html(event, summary, live, ol, base, max_rows=30):
-    h = _nfl_game_fantasy_html_roast(event, summary, live, ol, base, max_rows)
-    try:
-        if event["status"]["type"].get("state") != "post" or not CONFIG.get("roasts", True):
-            return h
-        proj = nfl_projections(live["week"])
-        worst = None
-        for p in nfl_fantasy(summary):
-            o = league_owner(p.get("id"), p["name"])
-            if not (o and o.get("starting")) or not _alive(live, ol, o["manager"]):
-                continue
-            pj = float(proj.get(str(_sl_pid(p["name"], p.get("team", "")) or ""), 0) or 0)
-            if pj >= 12 and p["pts"] <= 0.35 * pj and (worst is None or p["pts"] / pj < worst[0]):
-                worst = (p["pts"] / pj, p["name"], o["manager"])
-        if worst:
-            line = roast_line("bust", worst[2], worst[1])
-            i = h.find("<div class='more'>")
-            if i < 0:
-                i = h.find("</div></div><script>")
-            if i >= 0:
-                h = h[:i] + line + h[i:]
-                h = h.replace("</style>", ROAST_CSS + ".pl2+.rst,.more+.rst,.rst{margin:8px 2px 0}</style>", 1)
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"roast skipped: {ex}")
-    return h
-
-
-# weekly recap: "bench cost you"
-_recap_v2_roast = recap_v2_html
-
-
-def recap_v2_html(sport, week, live, settings):
-    a, b = _recap_v2_roast(sport, week, live, settings)
-    try:
-        m = re.search(r"💔 Bench cost ([^<]+?) the win</span>", a)
-        if m and CONFIG.get("roasts", True):
-            import html as H
-            owner = H.unescape(m.group(1))
-            line = roast_line("bench", owner)
-            if line:
-                j = a.find("</div>", m.end())
-                a = a[:j] + " <i class='rsi'>" + re.sub(r"</?div[^>]*>", "", line) + "</i>" + a[j:]
-                a = a.replace("</style>", ".rsi{font-style:italic;color:#aeb7c7}.rsi b{color:#e6e9ef}</style>", 1)
-    except Exception as ex:  # noqa: BLE001
-        _log_plain(f"roast skipped: {ex}")
-    return a, b
-
-
-
-# ---- half-time UPSET (Rick: "the half time post should be a bit more exciting if an upset is on the card"): the pre-game underdog
-#   (spread 2.5+) leads at the half → 🚨 UPSET WATCH (lead up to 7) / 🔥 UPSET ALERT (lead 8+, or a 7+ point underdog leading).
-#   Headline calls it, the scoreboard glows in the underdog's favour, and a banner in the spare space gives the spread, ESPN's
-#   win chance kick-off → now, and which managers are riding it. Animated (pulsing glow + siren). Config nfl.upset_alerts (default on).
-UPSET_CSS = """
-.sb5.ups{position:relative;box-shadow:0 0 0 3px #ff8a00,0 0 30px rgba(255,110,0,.55)!important;
- background:linear-gradient(120deg,rgba(95,30,0,.85),rgba(14,10,18,.85))!important}
-.sb5.ups.u4{box-shadow:0 0 0 4px #ffd600,0 0 44px rgba(255,40,0,.85)!important;
- background:radial-gradient(circle at 50% 0%,rgba(255,80,0,.5),rgba(110,0,0,.78) 60%,rgba(25,4,4,.9))!important}
-.sb5.ups .sc.dog{color:#ffd166!important;text-shadow:0 0 18px rgba(255,170,0,.9)}
-.sb5.ups .mid::after{content:'UPSET';display:block;margin-top:4px;font-size:12px;font-weight:900;letter-spacing:2px;color:#1a0800;
- background:linear-gradient(90deg,#ff3d00,#ffb000);border-radius:6px;padding:2px 8px}
-.in>.upz{grid-column:1/-1}
-.upz{display:flex;align-items:center;gap:16px;margin-top:12px;padding:12px 18px;border-radius:14px;color:#fff;
- background:linear-gradient(100deg,#7a1500,#c2410c 45%,#3b0a00);box-shadow:0 0 0 2px #ff8a00,0 0 26px rgba(255,100,0,.55)}
-.upz.u4{background:linear-gradient(100deg,#5c0000,#d40000 40%,#ff6a00 70%,#4a0000);box-shadow:0 0 0 3px #ffd600,0 0 40px rgba(255,40,0,.9)}
-.upz .upl{display:flex;align-items:center;gap:10px;flex:none}
-.upz .siren{font-size:38px;line-height:1;display:inline-block}
-.upz .upl b{font-size:30px;font-weight:900;letter-spacing:1.5px;line-height:1;white-space:nowrap;
- background:linear-gradient(180deg,#fff,#ffd166);-webkit-background-clip:text;background-clip:text;color:transparent}
-.upz .upm{min-width:0;display:flex;flex-direction:column;gap:3px}
-.upz .up1{font-size:21px;font-weight:800;line-height:1.2}.upz .up1 b{color:#ffd166}
-.upz .up2{font-size:17px;font-weight:700;color:#ffe4cc;line-height:1.25}.upz .up2 b{color:#fff}
-"""
-ANIM_CSS += """
-@keyframes a_upg{0%,100%{box-shadow:0 0 0 2px #ff8a00,0 0 18px rgba(255,100,0,.4)}50%{box-shadow:0 0 0 2px #ffb000,0 0 48px rgba(255,140,0,1)}}
-@keyframes a_upg4{0%,100%{box-shadow:0 0 0 3px #ffd600,0 0 28px rgba(255,40,0,.7)}50%{box-shadow:0 0 0 3px #fff,0 0 70px rgba(255,90,0,1)}}
-@keyframes a_siren{0%,100%{transform:rotate(0) scale(1)}25%{transform:rotate(-14deg) scale(1.12)}75%{transform:rotate(14deg) scale(1.12)}}
-@keyframes a_upsc{0%,100%{text-shadow:0 0 10px rgba(255,170,0,.6)}50%{text-shadow:0 0 30px rgba(255,200,0,1)}}
-.upz{animation:a_upg 1s ease-in-out infinite}.upz.u4{animation:a_upg4 .6s ease-in-out infinite}
-.upz .siren{animation:a_siren .5s linear infinite}
-.sb5.ups .sc.dog{animation:a_upsc 1s ease-in-out infinite}
-"""
-
-
-def nfl_upset(event, summary):
-    """The pre-game underdog leading: dict (dog/fav teams, spread, lead, ESPN win chance kick-off → now, tier) or None."""
-    if not (CONFIG.get("nfl") or {}).get("upset_alerts", True):
-        return None
-    pc = (summary.get("pickcenter") or [{}])[0]
-    try:
-        spread = abs(float(pc.get("spread")))
-    except (TypeError, ValueError):
-        return None
-    away, home = teams_of(event)
-    hf = (pc.get("homeTeamOdds") or {}).get("favorite")
-    af = (pc.get("awayTeamOdds") or {}).get("favorite")
-    if hf is None and af is None:
-        m = re.match(r"\s*([A-Z]{2,4})\s*-", pc.get("details") or "")
-        if not m:
-            return None
-        hf = home["team"]["abbreviation"] == m.group(1)
-    elif hf is None:
-        hf = not af
-    if spread < 2.5:
-        return None
-    fav, dog = (home, away) if hf else (away, home)
-    fs, ds = int(num(fav.get("score"))), int(num(dog.get("score")))
-    if ds <= fs:
-        return None
-    wp = summary.get("winprobability") or []
-
-    def dogp(w):
-        v = float(w.get("homeWinPercentage") or 0) * 100
-        return v if dog is home else 100 - v
-    return {"dog": dog, "fav": fav, "spread": spread, "lead": ds - fs, "ds": ds, "fs": fs,
-            "wp0": dogp(wp[0]) if wp else None, "wp1": dogp(wp[-1]) if wp else None,
-            "tier": 4 if ds - fs >= 8 or spread >= 7 else 3}
-
-
-def _fmt_spread(v):
-    return f"{v:.1f}".rstrip("0").rstrip(".")
-
-
-def upset_banner(u, summary):
-    import html as H
-    dn, fn = u["dog"]["team"].get("name"), u["fav"]["team"].get("name")
-    riders = []
-    try:
-        for p in nfl_fantasy(summary):
-            if p.get("team") != u["dog"]["team"]["abbreviation"] or p["pts"] <= 0:
-                continue
-            o = league_owner(p.get("id"), p["name"])
-            if o and o.get("starting"):
-                riders.append(f"<b>{H.escape(o['manager'])}</b> ({H.escape(p['name'] if p.get('pos') == 'DEF' else (short_name(p['name']) or p['name']))} {fmt_pts(p['pts'])})")
-    except Exception as e:  # noqa: BLE001
-        log(f"upset riders skipped: {e}")
-    wp = (f"ESPN win chance <b>{u['wp0']:.0f}% → {u['wp1']:.0f}%</b>" if u["wp0"] is not None and u["wp1"] is not None else "")
-    ride = ("riding it: " + ", ".join(riders[:3])) if riders else ""
-    line2 = " · ".join(x for x in (wp, ride) if x)
-    return (f"<div class='upz u{u['tier']}'><div class='upl'><span class='siren'>{'🔥' if u['tier'] == 4 else '🚨'}</span>"
-            f"<b>UPSET {'ALERT' if u['tier'] == 4 else 'WATCH'}</b></div><div class='upm'>"
-            f"<div class='up1'>{H.escape(dn)} were <b>{_fmt_spread(u['spread'])}-point underdogs</b> — "
-            f"now <b>up {u['lead']}</b> on the {H.escape(fn)} at the half</div>"
-            + (f"<div class='up2'>{line2}</div>" if line2 else "") + "</div></div>")
-
-
-def nfl_half_upset_html(html_text, u, summary):
-    dog_ab = u["dog"]["team"]["abbreviation"].lower()
-    i = html_text.find("<div class='sb5 big'>")
-    if i < 0:
-        return html_text
-    j = _div_end(html_text, i)
-    sb = html_text[i:j].replace("<div class='sb5 big'>", f"<div class='sb5 big ups u{u['tier']}'>", 1)
-    # the underdog's score glows gold: the team block holding its logo
-    parts = re.split(r"(?=<div class='tm)", sb)
-    sb = "".join(re.sub(r"class='sc(?: lo)?'", "class='sc dog'", q, count=1) if f"/{dog_ab}.png" in q else q for q in parts)
-    out = html_text[:i] + sb + upset_banner(u, summary) + html_text[j:]
-    return out.replace("</style>", UPSET_CSS + "</style>", 1)
-
-
-_wants_animation_up = wants_animation
-
-
-def wants_animation(html_text):
-    return _wants_animation_up(html_text) or ("class='upz" in html_text and (CONFIG.get("animations") or {}).get("enabled", True))
-
-
-_post_prime_half_plain = post_prime_half
-
-
-def post_prime_half(event, summary, ctx):
-    try:
-        u = nfl_upset(event, summary)
-    except Exception as e:  # noqa: BLE001
-        log(f"upset check skipped: {e}")
-        u = None
-    if not u:
-        return _post_prime_half_plain(event, summary, ctx)
-    away, home = teams_of(event)
-    a, h = int(num(away.get("score"))), int(num(home.get("score")))
-    owned = [(p, o) for p in nfl_fantasy(summary) for o in [league_owner(p.get("id"), p["name"])] if o]
-    word = "🔥 UPSET ALERT" if u["tier"] == 4 else "🚨 UPSET WATCH"
-    title = (f"{word} · {u['dog']['team'].get('name')} (+{_fmt_spread(u['spread'])}) lead the "
-             f"{u['fav']['team'].get('name')} {u['ds']}\u2060–\u2060{u['fs']} at the half")
-    embed = {"author": AU_NFL(), "color": 0xFF5A00, "title": title}
-    if owned:
-        embed["description"] = f"{owned[0][0]['name']} leads the way with {fmt_pts(owned[0][0]['pts'])} for {owned[0][1]['manager']}"
-    content = f"⏸️ **HALF-TIME** · {word} · {away['team'].get('name')} {a}–{h} {home['team'].get('name')}"
-    html_text = nfl_half_upset_html(nfl_half_html(event, summary, ctx["live"], ctx["ol"], ctx["base"]), u, summary)
-    return _post_card(NFL_HOOK, html_text, content, embed, "half.png")
-
-
-# ---- SAFETY (Rick: "a safety should show"): its own card, same look as the field-goal card. The defence that got it
-#   (+2 and its owner), who was caught in his own end zone, and the fantasy impact: the scoring D/ST's owner, and the other
-#   D/ST losing points-allowed points. Posted for prime-time games like touchdowns. Config nfl.safety_posts (default on).
-SAFETY_CSS = """
-.sfw{margin-top:10px;display:flex;align-items:center;gap:14px;padding:10px 16px;border-radius:14px;white-space:nowrap;
- background:linear-gradient(100deg,rgba(255,214,0,.25),rgba(255,61,61,.2));box-shadow:0 0 0 3px #ffd600,0 0 30px rgba(255,140,0,.7);
- font-size:20px;font-weight:800;color:#fff}
-.sfw b{font-size:24px;font-weight:900;color:#ffd600}.sfw .gc{font-size:16px;font-weight:900;letter-spacing:1.6px;background:#ff3d3d;
- color:#fff;border-radius:7px;padding:3px 9px;flex:none}
-"""
-ANIM_CSS += ".sfw{animation:a_pulse 1s ease-in-out infinite}"
-
-
-def _safety_victim(text):
-    m = re.match(r"^\s*([A-Z][\w.'\-]+(?: [A-Z][\w.'\-]+)+?)\s+(?:Rush|Pass|Kneel|Punt|sacked|Sacked|Run|Scramble|Fumble)", text or "")
-    if m:
-        return m.group(1)
-    m = re.search(r"([A-Z][\w.'\-]+(?: [A-Z][\w.'\-]+)+?) sacked", text or "")
-    return m.group(1) if m else None
-
-
-def nfl_safety_html(event, play, summary, live, ol, base):
-    import html as H
-    away, home = teams_of(event)
-    abbr = (play.get("team") or {}).get("abbreviation", "")
-    st_team = away if away["team"]["abbreviation"] == abbr else home
-    other = home if st_team is away else away
-    a_s, h_s = int(num(play.get("awayScore"))), int(num(play.get("homeScore")))
-    q = (play.get("period") or {}).get("number", 0)
-    clock = (play.get("clock") or {}).get("displayValue", "")
-    mine, theirs = (a_s, h_s) if st_team is away else (h_s, a_s)
-    nick, onick = st_team["team"].get("name") or abbr, other["team"].get("name") or ""
-    victim = _safety_victim(play.get("text") or "")
-    sc = league_scoring("nfl")
-    safe = float(sc.get("safe") or 2)
-    tag = "TIES IT" if mine == theirs else "GO-AHEAD" if mine > theirs and mine - 2 <= theirs else f"LEAD NOW {mine - theirs}" if mine > theirs else f"WITHIN {theirs - mine}"
-    defs = {x["team"]: x for x in nfl_defenses(summary, event)}
-    dn = defs.get(abbr)
-    o = league_owner(f"def:{sl_team(abbr)}", "")
-    own = (f"<b>{H.escape(o['manager'])}</b> {'⭐ starting' if o['starting'] else '· bench'}" if o else "<b>Unrostered</b> — free agent")
-    now_txt = f"<span>now <em>{fmt_pts(dn['pts'])}</em> pts</span>" if dn else ""
-    panel = (f"<div class='pair one'><div class='pp5 hot'><img src='{H.escape(st_team['team'].get('logo', ''))}'><div>"
-             f"<div class='role'>DEFENCE · {abbr}</div><div class='nm'>{H.escape(nick)} D/ST</div>"
-             f"<div class='gn'><b>+{safe:g}</b>{now_txt}</div>"
-             + (f"<div class='blk'>caught <b>{H.escape(victim)}</b> in his own end zone</div>" if victim else "")
-             + f"<div class='ow3'>{own}</div></div></div></div>")
-    rows = []
-    if o:
-        rid = next((r for r, x in live["rosters"].items() if x["manager"] == o["manager"]), None)
-        opp = next((b if a == rid else a for a, b in live["pairs"] if rid in (a, b)), None) if rid else None
-        if opp:
-            proj = nfl_projections(live["week"])
-            pa, pb = _proj_total(rid, live, ol, event, proj), _proj_total(opp, live, ol, event, proj)
-            rows.append(f"<div class='im'><span class='ar u'>▲</span><b class='who5'>{H.escape(o['manager'])}</b>"
-                        f"<span>{H.escape(nick)} D/ST <b class='u'>+{safe:g}</b> · projected <b class='{'u' if pa >= pb else 'dn'}'>{pa:.1f}</b> – {pb:.1f} vs "
-                        f"{H.escape(live['rosters'][opp]['manager'])}</span><span>win <b>{ol[rid]['win']:.0f}%</b></span><span></span></div>")
-    od = league_owner(f"def:{sl_team(other['team']['abbreviation'])}", "")
-    if od:
-        def tier(n):
-            for lo, hi, key in ((0, 0, "pts_allow_0"), (1, 6, "pts_allow_1_6"), (7, 13, "pts_allow_7_13"), (14, 20, "pts_allow_14_20"),
-                                (21, 27, "pts_allow_21_27"), (28, 34, "pts_allow_28_34"), (35, 999, "pts_allow_35p")):
-                if lo <= n <= hi:
-                    return float(sc.get(key) or 0)
-            return 0.0
-        d = tier(mine) - tier(mine - 2)
-        if abs(d) >= 0.05:
-            odn = defs.get(other["team"]["abbreviation"])
-            odn_txt = f" → now <b>{fmt_pts(odn['pts'])}</b> pts" if odn else ""
-            rows.append(f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(od['manager'])}</b>"
-                        f"<span>{H.escape(onick)} D/ST loses <b class='dn'>{abs(d):g}</b>{odn_txt} "
-                        f"({mine} allowed)</span><span>{'starting' if od['starting'] else 'bench'}</span><span></span></div>")
-    if victim:
-        vo = league_owner(boxscore_id(summary, victim), victim)
-        if vo:
-            rows.append(f"<div class='im'><span class='ar dn'>▼</span><b class='who5'>{H.escape(vo['manager'])}</b>"
-                        f"<span>{H.escape(victim)} tackled in his own end zone. Awkward.</span><span>{'starting' if vo['starting'] else 'bench'}</span><span></span></div>")
-    imp = f"<div class='imp'><div class='ih'>FANTASY IMPACT</div>{''.join(rows)}</div>" if rows else ""
-    wow = f"<div class='sfw'><span class='gc'>SAFETY</span>Two points for the {H.escape(nick)} defence — <b>{a_s}–{h_s}</b></div>"
-    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>SAFETY · {'OT' if q > 4 else 'Q' + str(q)} {clock} · "
-            f"{away['team']['abbreviation']} {a_s}–{h_s} {home['team']['abbreviation']}</div><div class='pill'>{tag}</div></div>"
-            + score_hero(event, a_s, h_s, f"{'OT' if q > 4 else 'Q' + str(q)} · {clock}", tag, hot=abbr, plus=2, big="SAFETY")
-            + wow + f"{panel}{imp}")
-    t = st_team["team"]
-    ca = vivid(t.get("color") or "1faa59")
-    ch = vivid(t.get("alternateColor") or t.get("color") or "5b7bd5", min_l=0.5)
-    co = vivid(other["team"].get("color") or "5b7bd5")
-    bg = (f".bg{{opacity:1!important;background:linear-gradient(120deg,{ca}d9 0%,{ca}73 38%,rgba(13,18,32,0) 78%),"
-          f"linear-gradient(300deg,{co}38 0%,rgba(13,18,32,0) 22%)!important}}.hl{{border-left-color:{ch}!important}}")
-    html_text = _card(f"--a:{ca};--h:{ch}", body, extra_css=V4_CSS + TD5_CSS + FG_CSS + SB_CSS + DST_CSS + SAFETY_CSS + bg)
-    return html_text, nick, victim, a_s, h_s
-
-
-def post_safety(event, play, summary, ctx):
-    html_text, nick, victim, a_s, h_s = nfl_safety_html(event, play, summary, ctx["live"], ctx["ol"], ctx["base"])
-    away, home = teams_of(event)
-    title = (f"SAFETY! {victim} is caught in his own end zone — two points for the {nick}!" if victim
-             else f"SAFETY! Two points for the {nick} defence!")
-    embed = {"author": AU_NFL(), "color": 0xFFD600, "title": title}
-    return _post_card(NFL_HOOK, html_text, f"🏈 SAFETY · {away['team'].get('name')} {a_s}–{h_s} {home['team'].get('name')}", embed, "safety.png")
-
-
-def _is_safety(p):
-    ty = p.get("type") or {}
-    return ty.get("abbreviation") == "SF" or "safety" in (ty.get("text") or "").lower()
-
-
-_nfl_prime_slot_sf = nfl_prime_slot
-
-
-def nfl_prime_slot(slot, st, getctx, force=False):
-    """+ a post for every safety (in-game, or just after the final whistle)."""
-    if (CONFIG.get("nfl") or {}).get("safety_posts", True):
-        for e in slot:
-            if e["status"]["type"]["state"] not in ("in", "post"):
-                continue
-            g = st["nfl"].setdefault(e["id"], {"date": e["date"][:10], "tds": [], "pending": {}})
-            if g.get("final") and e["status"]["type"]["state"] == "post":
-                continue
-            try:
-                summary = fetch(f"football/nfl/summary?event={e['id']}")
-            except Exception as ex:  # noqa: BLE001
-                log(f"safety check skipped: {ex}")
-                continue
-            for p in summary.get("scoringPlays", []):
-                if p["id"] in g["tds"] or not _is_safety(p):
-                    continue
-                if not td_ready(summary, p, g.setdefault("seen", {}).setdefault(p["id"], time.time())):
-                    continue
-                ctx = getctx()
-                if ctx and post_safety(e, p, summary, ctx):
-                    g["tds"].append(p["id"])
-    return _nfl_prime_slot_sf(slot, st, getctx, force)
-
-
-# ---- team colours (Rick: "colour scheme kinda wrong for a steelers score surely"): ESPN gives some teams a black / white /
-#   grey main colour (Steelers 000000, Raiders 000000), which the cards' colour booster turns into a dull grey, so the other
-#   team's colour took over. Such teams use their second colour (Steelers gold) everywhere. The D/ST hype panel on a
-#   defensive / return TD uses the scoring team's colours instead of a fixed red.
-def _greyish(h):
-    import colorsys
-    try:
-        r, g, b = (x / 255 for x in hex_rgb(h))
-    except Exception:  # noqa: BLE001
-        return False
-    _, ll, ss = colorsys.rgb_to_hls(r, g, b)
-    return ss < 0.15 or ll < 0.1 or ll > 0.93
-
-
-def _fix_team_colours(d, depth=0):
-    if depth > 8:
-        return
-    if isinstance(d, dict):
-        c, alt = d.get("color"), d.get("alternateColor")
-        if isinstance(c, str) and isinstance(alt, str) and _greyish(c) and not _greyish(alt):
-            d["color"], d["alternateColor"] = alt, alt
-        for v in d.values():
-            if isinstance(v, (dict, list)):
-                _fix_team_colours(v, depth + 1)
-    elif isinstance(d, list):
-        for v in d:
-            if isinstance(v, (dict, list)):
-                _fix_team_colours(v, depth + 1)
-
-
-_fetch_colour_plain = fetch
-
-
-def fetch(path, tries=3):
-    d = _fetch_colour_plain(path, tries)
-    if isinstance(path, str) and path.startswith("football/"):
-        try:
-            _fix_team_colours(d)
-        except Exception:  # noqa: BLE001
-            pass
-    return d
-
-
-def same_player_name(a, b):
-    """'J. Ramsey' and 'Jalen Ramsey' are the same player: same surname, same first initial."""
-    import unicodedata
-    f = lambda n: re.sub(r"[^a-z ]", "", unicodedata.normalize("NFKD", str(n)).encode("ascii", "ignore").decode().lower()).split()  # noqa: E731
-    x, y = f(a), f(b)
-    if not x or not y:
-        return a == b
-    if x == y:
-        return True
-    sx = [w for w in x if w not in ("jr", "sr", "ii", "iii", "iv")]
-    sy = [w for w in y if w not in ("jr", "sr", "ii", "iii", "iv")]
-    return bool(sx and sy) and sx[-1] == sy[-1] and sx[0][0] == sy[0][0]
-
-
-HYPE_CSS += """
-.pp5.h4.dstc{background:radial-gradient(circle at 15% 0%,color-mix(in srgb,var(--a) 62%,transparent),rgba(14,12,8,.94) 64%)!important;
- box-shadow:0 0 0 4px var(--a),0 0 40px color-mix(in srgb,var(--a) 70%,transparent)!important}
-.pp5.h4.dstc::after{opacity:.3}
-"""
-
-
-# ---- NIGHT'S OVER (Rick: "when the final game of the day has been played … a new post to just sit there which can provide
-#   info about the gameweek and whats happened so far and the play off outlook and how things have changed, can change or
-#   will change … pretty graphic, as wide as the others … informative and useful and fun" · "5mins after the final score
-#   post of the day"). Fires once per NFL game day: the day's last game has had its final-score post, nothing is live and
-#   the next kick-off is 4h+ away -> 5 min later, one wide card:
-#     matchups so far (score, projected final, win chance and how it moved since the week began, players left)
-#     playoff race (every team: chance now, change this week, what a win / a loss does)
-#     star + dud of the night, the biggest thing still on the line, and what's left to play.
-#   Config nfl.night_posts (default on).
-NIGHT_CSS = """
-body,.card{width:1100px!important}
-.top{font-size:20px!important;letter-spacing:1.5px!important}.top img{width:32px!important;height:32px!important}
-.top .pill{font-size:18px!important;padding:5px 12px!important}
-.hl{margin:10px 0 0!important;padding:10px 18px!important}.hl .h1{font-size:28px!important}.hl .h2{font-size:20px!important}
-.ng{display:grid;grid-template-columns:1.18fr 1fr;gap:14px;margin-top:12px}
-.nb{background:rgba(255,255,255,.06);border-radius:14px;padding:10px 14px;display:flex;flex-direction:column}
-.nh{font-size:13px;letter-spacing:1.6px;font-weight:900;color:#aab3c5;margin-bottom:6px;display:flex;justify-content:space-between}
-.nh em{font-style:normal;color:#7d879b;letter-spacing:.6px;font-weight:700}
-.mu{display:grid;grid-template-columns:1fr 64px 1fr;align-items:center;gap:8px;padding:7px 0}
-.mu+.mu{border-top:1px solid rgba(255,255,255,.07)}
-.ms{display:flex;flex-direction:column;gap:2px;min-width:0}.ms.r{align-items:flex-end;text-align:right}
-.ms .n{font-size:18px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-.ms .p{font-size:15px;font-weight:700;color:#cfd5e1;white-space:nowrap}.ms .p b{color:#fff;font-size:17px}
-.ms .p i{font-style:normal;color:#8b95a8}
-.ms.fav .n{color:#7ee2a8}
-.rc{font-style:normal;font-size:14px;font-weight:800;color:#aab3c5;margin-left:8px;padding:1px 7px;border-radius:6px;background:rgba(255,255,255,.08);letter-spacing:.3px}
-.ms .n .rc{font-size:13px}
-.mw{text-align:center;font-size:12px;font-weight:800;color:#8b95a8;line-height:1.2}
-.mw b{display:block;font-size:20px;color:#fff;font-weight:900}
-.mbar{grid-column:1/-1;height:7px;border-radius:4px;background:#3a4152;overflow:hidden;display:flex}
-.mbar i{display:block;height:100%}
-.dl{font-size:13px;font-weight:900;padding:0 5px;border-radius:5px;margin-left:5px}
-.dl.u{color:#062312;background:#4be38e}.dl.d{color:#fff;background:#e5484d}.dl.z{color:#c3cad8;background:rgba(255,255,255,.1)}
-.pr{display:grid;grid-template-columns:32px minmax(0,1fr) 54px 50px 140px;align-items:center;gap:5px;padding:4px 0;font-size:16px;flex:1}
-.pr+.pr{border-top:1px solid rgba(255,255,255,.06)}
-.pr .k{color:#ffd166;font-weight:900;text-align:center}
-.pr .n{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pr .po{font-weight:900;font-size:19px;text-align:right;font-variant-numeric:tabular-nums}
-.pr .wl{font-size:13px;overflow:hidden;color:#aab3c5;font-weight:700;white-space:nowrap;text-align:right}.pr .wl b{color:#7ee2a8}.pr .wl s{text-decoration:none;color:#ff9a9e}
-.pr.cut{border-top:2px dashed rgba(255,209,102,.55)!important}
-.pr.out{opacity:.55}
-.nt{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
-.ntl{background:rgba(255,255,255,.06);border-radius:14px;padding:10px 14px;min-width:0;text-align:left!important;letter-spacing:0!important}
-.ntl *{text-align:left!important;letter-spacing:0;text-transform:none}
-.ntl small{display:block;font-size:12px;letter-spacing:1.4px!important;text-transform:uppercase!important;font-weight:900;color:#aab3c5}
-.ntl b{display:block;font-size:19px;font-weight:900;margin-top:3px;line-height:1.2}
-.ntl span{display:block;font-size:15px;color:#cfd5e1;font-weight:600;margin-top:2px;line-height:1.3}
-.ntl.star{box-shadow:inset 0 0 0 2px #ffd166}.ntl.dud{box-shadow:inset 0 0 0 2px #e5484d}.ntl.line{box-shadow:inset 0 0 0 2px #7aa7ff}
-.nf{margin-top:10px;font-size:15px;color:#aab3c5;font-weight:700;text-align:center}.nf b{color:#fff}
-"""
-
-
-def _night_day_key(ts):
-    """The NFL game day a kick-off belongs to: UK date, with anything before 06:00 counted as the night before."""
-    return (datetime.fromtimestamp(ts, timezone.utc).astimezone(UK) - timedelta(hours=6)).strftime("%Y-%m-%d")
-
-
-def nfl_night_html(events, ctx, day_events):
-    import html as H
-    live, ol, base = ctx["live"], ctx["ol"], ctx["base"]
-    week = live["week"]
-    d = wb_nfl_data(week, events, live=live) or {}
-    sides = d.get("sides") or {}
-    ppl = _wb_people("nfl")
-    man = lambda r: live["rosters"][r]["manager"]  # noqa: E731
-
-    def rec(r):  # season record before this week ("8-3", "7-3-1")
-        p_ = ppl.get(r) or {}
-        if "w" not in p_:
-            return ""
-        return f"{p_['w']}-{p_['l']}" + (f"-{p_['t']}" if p_.get("t") else "")
-    done = sum(1 for e in events if e["status"]["type"]["state"] == "post")
-    left_games = len(events) - done
-    nxt = min((parse_time(e["date"]) for e in events if e["status"]["type"]["state"] == "pre"), default=None)
-    nxt_txt = f"next {nxt.astimezone(UK):%a %H:%M} UK" if nxt else "week done"
-    day = parse_time(day_events[-1]["date"]).astimezone(UK) - timedelta(hours=6)
-    dayname = f"{day:%A}"
-
-    def delta(now, then, unit="%"):
-        if then is None:
-            return ""
-        dv = now - then
-        if abs(dv) < 0.5:
-            return "<span class='dl z'>–</span>"
-        return f"<span class='dl {'u' if dv > 0 else 'd'}'>{'▲' if dv > 0 else '▼'}{abs(dv):.0f}</span>"
-
-    # matchups: biggest swing since the week began first
-    pairs = sorted(live["pairs"], key=lambda ab: -abs(ol[ab[0]]["win"] - (base.get(ab[0]) or {}).get("win", ol[ab[0]]["win"])))
-    mus = []
-    for a, b in pairs:
-        wa = ol[a]["win"]
-        cols = []
-        for r, w, right in ((a, wa, False), (b, 100 - wa, True)):
-            sd = sides.get(str(r)) or sides.get(r) or {}
-            bw = (base.get(r) or {}).get("win")
-            cols.append(f"<div class='ms{' r' if right else ''}{' fav' if w >= 50 else ''}'><div class='n'>{H.escape(man(r))}<em class='rc'>{rec(r)}</em></div>"
-                        f"<div class='p'><b>{sd.get('points', 0):.1f}</b> <i>→ proj {sd.get('proj', 0):.0f}</i></div>"
-                        f"<div class='p'>win <b>{w:.0f}%</b>{delta(w, bw)} <i>· {sd.get('left', 0)} left</i></div></div>")
-        mus.append(f"<div class='mu'>{cols[0]}<div class='mw'>vs<b>{max(wa, 100 - wa):.0f}%</b></div>{cols[1]}"
-                   f"<div class='mbar'><i style='width:{wa:.1f}%;background:#4be38e'></i><i style='flex:1;background:#e5484d'></i></div></div>")
-
-    # playoff race: best chance first, the cut line drawn where the teams in a playoff place end
-    order = sorted(ol, key=lambda r: (-ol[r]["po"], (ppl.get(r) or {}).get("rank", 99)))
-    spots = int((CONFIG.get("nfl") or {}).get("playoff_teams") or 6)
-    prs = []
-    for i, r in enumerate(order):
-        o, bp = ol[r], (base.get(r) or {}).get("po")
-        wl = (f"win <b>{_pct(o['po_w'])}</b> · lose <s>{_pct(o['po_l'])}</s>"
-              if o.get("po_w") is not None and o.get("po_l") is not None and abs(o["po_w"] - o["po_l"]) >= 3 else
-              ("locked in" if o["po"] >= 99.5 else "out" if o["po"] < 0.5 else ""))
-        rk = (ppl.get(r) or {}).get("rank", "–")
-        prs.append(f"<div class='pr{' cut' if i == spots else ''}{' out' if o['po'] < 0.5 else ''}'><span class='k'>#{rk}</span>"
-                   f"<span class='n'>{H.escape(man(r))}<em class='rc'>{rec(r)}</em></span><span class='po'>{o['po']:.0f}%</span>"
-                   f"<span>{delta(o['po'], bp)}</span><span class='wl'>{wl}</span></div>")
-
-    # star + dud of the night (rostered starters in today's games)
-    proj = nfl_projections(week)
-    got = []
-    for e in day_events:
-        try:
-            sm = fetch(f"football/nfl/summary?event={e['id']}")
-            for pl in nfl_fantasy(sm):
-                o = league_owner(pl.get("id"), pl["name"])
-                if o and o.get("starting"):
-                    pj = proj.get(str(_sl_pid(pl["name"], pl.get("team", "")) or ""), 0.0)
-                    if pl.get("pos") == "DEF":
-                        pj = proj.get(sl_team(pl.get("team", "")), pj)
-                    got.append((pl, o, pj))
-        except Exception as ex:  # noqa: BLE001
-            log(f"night card players skipped: {ex}")
-    star = max(got, key=lambda x: x[0]["pts"], default=None)
-    duds = [x for x in got if x[2] >= 8]
-    dud = min(duds, key=lambda x: x[0]["pts"] - x[2], default=None)
-    tiles = []
-    if star:
-        p_, o_, pj = star
-        tiles.append(f"<div class='ntl star'><small>⭐ STAR OF THE NIGHT</small><b>{H.escape(p_['name'])} · {fmt_pts(p_['pts'])}</b>"
-                     f"<span>for {H.escape(o_['manager'])}{f' (proj {pj:.1f})' if pj else ''}</span></div>")
-    if dud and dud[0]["pts"] < dud[2]:
-        p_, o_, pj = dud
-        tiles.append(f"<div class='ntl dud'><small>💀 DUD OF THE NIGHT</small><b>{H.escape(p_['name'])} · {fmt_pts(p_['pts'])}</b>"
-                     f"<span>projected {pj:.1f}. {H.escape(o_['manager'])} would like a word.</span></div>")
-    # the most still on the line
-    swing = max((r for r in ol if ol[r].get("po_w") is not None and ol[r].get("po_l") is not None),
-                key=lambda r: ol[r]["po_w"] - ol[r]["po_l"], default=None)
-    if swing is not None:
-        o = ol[swing]
-        tiles.append(f"<div class='ntl line'><small>🔥 MOST ON THE LINE</small><b>{H.escape(man(swing))}</b>"
-                     f"<span>playoffs {o['po_w']:.0f}% with a win, {o['po_l']:.0f}% with a loss</span></div>")
-    close = min(live["pairs"], key=lambda ab: abs(ol[ab[0]]["win"] - 50))
-    if len(tiles) < 3:
-        tiles.append(f"<div class='ntl line'><small>⚖️ CLOSEST MATCHUP</small><b>{H.escape(man(close[0]))} v {H.escape(man(close[1]))}</b>"
-                     f"<span>{ol[close[0]]['win']:.0f}% – {100 - ol[close[0]]['win']:.0f}% with {left_games} games to go</span></div>")
-    # headline: the night in one line
-    big = max(ol, key=lambda r: abs(ol[r]["po"] - ((base.get(r) or {}).get("po", ol[r]["po"]))))
-    bd = ol[big]["po"] - (base.get(big) or {}).get("po", ol[big]["po"])
-    h1 = f"That's {dayname} done · week {week}"
-    h2 = (f"Biggest mover: <b>{H.escape(man(big))}</b> {'up' if bd > 0 else 'down'} {abs(bd):.0f} points in the playoff race this week"
-          if abs(bd) >= 2 else f"{done} of {len(events)} games played · {left_games} to come")
-    most_left = max(live["rosters"], key=lambda r: (sides.get(str(r)) or sides.get(r) or {}).get("left", 0))
-    ml = (sides.get(str(most_left)) or sides.get(most_left) or {}).get("left", 0)
-    foot = (f"<b>{done}</b> of {len(events)} games played · <b>{left_games}</b> to come · {nxt_txt}"
-            + (f" · most players left: <b>{H.escape(man(most_left))}</b> ({ml})" if ml else ""))
-    body = (f"<div class='top'><div class='lg'><img src='{NFL_LOGO}'>NFL · WEEK {week} · {dayname.upper()} DONE</div>"
-            f"<div class='pill'>🌙 NIGHT'S OVER</div></div>"
-            f"<div class='hl'><div class='h1'>{H.escape(h1)}</div><div class='h2'>{h2}</div></div>"
-            f"<div class='ng'><div class='nb'><div class='nh'>MATCHUPS SO FAR<em>win chance · ▲▼ since the week began</em></div>{''.join(mus)}</div>"
-            f"<div class='nb'><div class='nh'>PLAYOFF RACE<em>chance now · this week</em></div>{''.join(prs)}</div></div>"
-            f"<div class='nt'>{''.join(tiles[:3])}</div><div class='nf'>{foot}</div>")
-    return _card("--a:#5b7bd5;--h:#d50a0a", body, extra_css=NIGHT_CSS, width=1100)
-
-
-def post_nfl_night(events, ctx, day_events):
-    html_text = nfl_night_html(events, ctx, day_events)
-    png = render_card(html_text)
-    if not png:
-        return False
-    return discord(NFL_HOOK, [], "night.png", files={"night.png": png}) is True
-
-
-def nfl_night_check(st, force=False):
-    if not (CONFIG.get("nfl") or {}).get("night_posts", True) or SILENT:
-        return
-    try:
-        events = fetch("football/nfl/scoreboard").get("events", [])
-    except Exception as ex:  # noqa: BLE001
-        log(f"night post check skipped: {ex}")
-        return
-    if not events or any(e["status"]["type"]["state"] == "in" for e in events):
-        return
-    played = [e for e in events if e["status"]["type"]["state"] == "post"]
-    if not played:
-        return
-    last = max(played, key=lambda e: parse_time(e["date"]))
-    key = _night_day_key(parse_time(last["date"]).timestamp())
-    nights = st.setdefault("nfl_night", {})
-    if nights.get(key) == "posted":
-        return
-    nxt = [parse_time(e["date"]) for e in events if e["status"]["type"]["state"] == "pre"]
-    if nxt and min(nxt) - now_utc() < timedelta(hours=4):
-        return                                                    # more football soon: not the end of the day yet
-    day_events = sorted([e for e in played if _night_day_key(parse_time(e["date"]).timestamp()) == key], key=lambda e: e["date"])
-    # the day's final-score posts: wait until they've gone, then 5 more minutes
-    gs = [st["nfl"].get(e["id"]) or {} for e in day_events]
-    if not force and not all(g.get("final") for g in gs):
-        return
-    if (now_utc() - parse_time(last["date"])) > timedelta(hours=14):
-        nights[key] = "posted"                                    # long gone (bot was down): don't post a stale one
-        return
-    seen = nights.setdefault(key + ":seen", time.time())
-    if not force and time.time() - seen < 300:
-        return
-    ctx = nfl_ctx(st, events)
-    if not ctx:
-        return
-    if post_nfl_night(events, ctx, day_events):
-        nights[key] = "posted"
-        log(f"NIGHT'S OVER posted for {key}")
-    for k in list(nights)[:-30]:
-        nights.pop(k, None)
-
-
-_run_nfl_night = run_nfl
-
-
-def run_nfl(st, date=None, force=False):
-    active = _run_nfl_night(st, date, force)
-    try:
-        nfl_night_check(st)
-    except Exception as ex:  # noqa: BLE001
-        log(f"night post error: {ex}")
-    return active
-
-# ------------------------------------------------ NBA Lock-In: each player counts ONE game a week (Sleeper Lock-In mode)
-# Rick: "i've already locked in Poeltl's other score, so his new score doesn't count". Sleeper's public matchup data
-# already counts the locked game (players_points = the locked score, not tonight's), so a starter whose counted score
-# matches an EARLIER game this week, and not tonight's, is locked: show it on the card and leave tonight out of the totals.
-
-_NBA_LIVE_C = {"t": 0, "v": None}
-_NBA_GL_C = {}
-_LK_HEAD = {}
-
-
-def _nba_live_cached():
-    """Several reads of this week's counted scores [{sleeper pid: pts}]. Sleeper's public servers don't agree: some lag
-    (even from before tonight's game), some show a fresh lock-in late, so the lock check looks at each read on its own."""
-    if time.time() - _NBA_LIVE_C["t"] > 60:
-        reads = []
-        try:
-            lid = str(CONFIG["nba"].get("sleeper_league_id") or "").strip()
-            week = fetch_url(f"{SLEEPER}/state/nba").get("week")
-            for i in range(20):
-                rd = {}
-                for m in fetch_url(f"{SLEEPER}/league/{lid}/matchups/{week}?r={int(time.time() * 1000) + i}") or []:
-                    for pid, v in (m.get("players_points") or {}).items():
-                        if v is not None:
-                            rd[pid] = round(float(v), 1)
-                reads.append(rd)
-            seen = _lock_seen()
-            if seen.get("week") != week:
-                seen.clear()
-                seen.update(week=week, pts={})
-            _NBA_LIVE_C["week"] = week
-        except Exception as e:  # noqa: BLE001
-            _log_plain(f"lock-in check: Sleeper unavailable: {e}")
-        _NBA_LIVE_C["v"], _NBA_LIVE_C["t"] = reads, time.time()
-    return _NBA_LIVE_C["v"]
-
-
-_LOCK_FILE = Path(__file__).with_name("nba_locks.json")
-_LOCK_MEM = {}
-
-
-def _lock_seen():
-    if not _LOCK_MEM:
-        try:
-            _LOCK_MEM.update(json.loads(_LOCK_FILE.read_text()))
-        except Exception:  # noqa: BLE001
-            _LOCK_MEM.update(week=None, pts={})
-    return _LOCK_MEM
-
-
-def _lock_remember(pid, pts):
-    m = _lock_seen()
-    if m.get("week") != _NBA_LIVE_C.get("week"):
-        m.clear()
-        m.update(week=_NBA_LIVE_C.get("week"), pts={})
-    if pts not in m["pts"].get(pid, []):
-        m["pts"].setdefault(pid, []).append(pts)
-        try:
-            _LOCK_FILE.write_text(json.dumps(m))
-        except Exception as e:  # noqa: BLE001
-            _log_plain(f"lock-in memory not saved: {e}")
-
-
-def _nba_fp_stats(s):
-    """Fantasy points for one ESPN game-log line, in the league's scoring."""
-    sc = league_scoring("nba")
-    v = lambda k: float(sc.get(k) or 0)  # noqa: E731
-    n = lambda *ks: next((num(str(s[k]).split("-")[0]) for k in ks if s.get(k) not in (None, "", "--")), 0.0)  # noqa: E731
-    pts, reb, ast = n("points", "PTS"), n("totalRebounds", "rebounds", "REB"), n("assists", "AST")
-    stl, blk, tov = n("steals", "STL"), n("blocks", "BLK"), n("turnovers", "TO")
-    tpm = n("threePointFieldGoalsMade-threePointFieldGoalsAttempted", "3PT")
-    d = sum(1 for x in (pts, reb, ast, stl, blk) if x >= 10)
-    fp = pts * v("pts") + reb * v("reb") + ast * v("ast") + stl * v("stl") + blk * v("blk") + tov * v("to") + tpm * v("tpm")
-    fp += (v("dd") if d >= 2 else 0) + (v("td") if d >= 3 else 0) + (v("qd") if d >= 4 else 0)
-    fp += (v("bonus_pt_40p") if pts >= 40 else 0) + (v("bonus_pt_50p") if pts >= 50 else 0)
-    fp += (v("bonus_reb_20p") if reb >= 20 else 0) + (v("bonus_ast_15p") if ast >= 15 else 0)
-    return round(fp, 1)
-
-
-def _nba_recent_games(eid):
-    """[(tip-off datetime UTC, event id, fpts)] for the player's regular-season games (ESPN game log, cached 10 min)."""
-    c = _NBA_GL_C.get(eid)
-    if c and time.time() - c[0] < 600:
-        return c[1]
-    out = []
-    try:
-        g = fetch_url(f"https://site.web.api.espn.com/apis/common/v3/sports/basketball/nba/athletes/{eid}/gamelog")
-        names, evs = g.get("names") or [], g.get("events") or {}
-        st = next((x for x in g.get("seasonTypes") or [] if "Regular" in (x.get("displayName") or "")), None)
-        for cat in (st or {}).get("categories") or []:
-            for ev in cat.get("events") or []:
-                gd = (evs.get(ev["eventId"]) or {}).get("gameDate")
-                if gd:
-                    t = datetime.fromisoformat(gd.replace("Z", "+00:00")).astimezone(timezone.utc)
-                    out.append((t, str(ev["eventId"]), _nba_fp_stats(dict(zip(names, ev.get("stats") or [])))))
-    except Exception as e:  # noqa: BLE001
-        _log_plain(f"lock-in check: game log unavailable for {eid}: {e}")
-    _NBA_GL_C[eid] = (time.time(), out)
-    return out
-
-
-def _nba_sleeper_pid(row):
-    """Sleeper id for an ESPN box-score row (Sleeper's NBA list has no ESPN ids): name + team, then a unique rostered name."""
-    ix, nk = _player_index("nba"), name_key(row.get("name", ""))
-    pid = ix["espn"].get(str(row.get("eid") or ""))
-    tm = NBA_ESPN_TO_SLEEPER.get(row.get("team") or "", row.get("team") or "")
-    pid = pid or ix["name_team"].get((nk, tm))
-    if not pid:
-        owned = [c for c in ix["name"].get(nk, []) if c in roster_pid_index("nba")]
-        pid = owned[0] if len(owned) == 1 else None
-    return pid
-
-
-def nba_lock_of(row, event=None, game_rows=()):
-    """Locked-in score for this row: config nba.manual_locks {"week": N, "players": {"Name": [pts, "Mon"]}} always;
-    automatic detection from Sleeper's public data only with nba.lock_detect (off: those numbers proved unreliable)."""
-    cfg = CONFIG["nba"]
-    man = cfg.get("manual_locks") or {}
-    if man.get("players", {}).get(row.get("name")):
-        try:
-            week = _NBA_LIVE_C.get("week") or fetch_url(f"{SLEEPER}/state/nba").get("week")
-            _NBA_LIVE_C["week"] = week
-            if int(man.get("week") or -1) == int(week):
-                pts, day = man["players"][row["name"]]
-                return float(pts), str(day)
-        except Exception as e:  # noqa: BLE001
-            _log_plain(f"manual lock check skipped: {e}")
-    if not cfg.get("lock_detect", False):
-        return None
-    return _nba_lock_auto(row, event, game_rows)
-
-
-def _nba_lock_auto(row, event=None, game_rows=()):
-    """(locked fpts, 'Mon') when this player's counted score this week is an earlier game, else None.
-    Only reads that are up to date for THIS game count (another league player in it already shows tonight's final
-    score); a lagging read still shows everyone's score from before tonight and would look like a lock."""
-    try:
-        if not row.get("owner") or not row.get("eid"):
-            return None
-        pid = _nba_sleeper_pid(row)
-        if not pid:
-            return None
-        fp = float(row.get("fp") or 0)
-        others = [(p2, float(r2.get("fp") or 0)) for r2 in game_rows if r2 is not row and r2.get("owner")
-                  for p2 in [_nba_sleeper_pid(r2)] if p2 and p2 != pid]
-        vals = set(_lock_seen().get("pts", {}).get(pid, []))
-        for rd in _nba_live_cached() or []:
-            v = rd.get(pid)
-            if v is None or abs(v - fp) <= 0.5:
-                continue
-            if any(abs(rd.get(p2, -999) - f2) <= 0.15 for p2, f2 in others if f2 >= 1):
-                vals.add(v)
-        if not vals:
-            return None
-        tip = parse_time(event["date"]) if event and event.get("date") else datetime.now(timezone.utc)
-        for t, gid, gfp in sorted(_nba_recent_games(str(row["eid"])), reverse=True):
-            if event and gid == str(event.get("id")):
-                continue
-            pp = next((v for v in vals if abs(gfp - v) <= 0.15), None)
-            if pp is not None and tip - timedelta(days=7) < t < tip - timedelta(hours=2):
-                _lock_remember(pid, float(pp))
-                return float(pp), t.astimezone(ZoneInfo("America/New_York")).strftime("%a")
-    except Exception as e:  # noqa: BLE001
-        _log_plain(f"lock-in check skipped for {row.get('name')}: {e}")
-    return None
-
-
-def _nba_lock_rows(summary, event):
-    rows = nba_league_rows(summary)
-    for r in rows:
-        if r.get("owner") and r.get("starting"):
-            r["lock"] = nba_lock_of(r, event, rows)
-            if r["lock"]:
-                _LK_HEAD[r["name"]] = r["lock"]
-    return rows
-
-
-NBA_LOCK_CSS = """
-.bd.lk{background:#7c3aed!important;color:#fff!important;box-shadow:0 0 12px rgba(124,58,237,.55)}
-.pr2:has(.bd.lk){box-shadow:inset 5px 0 0 #7c3aed!important}
-.pr2.lkd .fp.lkb{background:linear-gradient(160deg,#6d28d9,#4c1d95)!important;color:#fff!important;
- box-shadow:0 0 14px rgba(124,58,237,.55)!important;filter:none!important;display:flex!important;flex-direction:column;
- align-items:center;justify-content:center;text-align:center;line-height:1.05}
-.pr2.lkd .fp.lkb small.lt{display:block;color:#e9d5ff!important;font-size:.42em!important;font-weight:900;letter-spacing:.6px;
- margin:0 0 2px!important;white-space:nowrap}
-.pr2.lkd .fp.lkb i.lk{display:block;color:#ddd6fe!important;font-style:normal;font-size:.42em!important;font-weight:800;
- margin-top:3px;white-space:nowrap}
-.pr2.lkd .fp.lkb i.lk s{opacity:.85}
-.tpr .ow5 em.lk{background:#7c3aed!important;color:#fff!important}
-.tpr:has(em.lk){box-shadow:inset 4px 0 0 #7c3aed}
-.tpr .fp5.lkb{background:linear-gradient(160deg,#6d28d9,#4c1d95)!important;color:#fff!important;box-shadow:0 0 14px rgba(124,58,237,.55)!important;
- display:flex!important;flex-direction:column;align-items:center;justify-content:center;line-height:1.05;padding-top:4px!important;padding-bottom:4px!important}
-.tpr .fp5.lkb{overflow:hidden}
-.tpr .fp5.lkb small{display:block;font-size:12px!important;font-weight:900;letter-spacing:.4px;color:#e9d5ff;white-space:nowrap;line-height:1.2}
-.tpr .fp5.lkb i{display:block;font-style:normal;font-size:12px!important;font-weight:800;color:#ddd6fe;white-space:nowrap;line-height:1.2}
-"""
-
-
-def _lock_mark(h, rows, name_tag, row_cls):
-    import html as H
-    for r in rows:
-        lk = r.get("lock")
-        if not lk:
-            continue
-        i = h.find(f"{name_tag}{H.escape(r['name'])}")
-        s = h.rfind(f"<div class='{row_cls}", 0, i) if i >= 0 else -1
-        if s < 0:
-            continue
-        e = _div_end(h, s)
-        blk = h[s:e]
-        tag = "🔒 LOCKED IN"
-        nb = blk.replace(f"<div class='{row_cls}", f"<div class='{row_cls} lkd", 1)
-        nb = nb.replace("<span class='bd st'>STARTING</span>", f"<span class='bd lk'>{tag}</span>", 1)
-        nb = nb.replace("<em class='s'>STARTING</em>", f"<em class='lk'>{tag}</em>", 1)
-        nb = re.sub(r"<div class='fp[^']*'>[^<]*<small>[^<]*</small>(?:<i[^>]*>[^<]*</i>)?</div>",
-                    f"<div class='fp lkb'><small class='lt'>🔒 LOCKED · {lk[1].upper()}</small>{fmt_pts(lk[0])}"
-                    f"<i class='lk'>tonight <s>{fmt_pts(r['fp'])}</s> ✗</i></div>", nb, count=1)
-        nb = re.sub(r"<span class='fp5'>[^<]*</span>",
-                    f"<span class='fp5 lkb'><small>🔒 {lk[1].upper()}</small>{fmt_pts(lk[0])}"
-                    f"<i><s>{fmt_pts(r['fp'])}</s> ✗</i></span>", nb, count=1)
-        h = h[:s] + nb + h[e:]
-    return h
-
-
-def _lock_totals(h, rows_list):
-    """'N league players · X fpts from starters' → only the points that count, + how many were locked."""
-    out, pos = [], 0
-    pat = re.compile(r"((?:<b>)?\d+(?:</b>)? league players · (?:<b>)?)([\d.,]+)((?:</b>)? fpts from starters)")
-    k = 0
-    for m in pat.finditer(h):
-        rows = rows_list[k] if k < len(rows_list) else []
-        k += 1
-        locked = [r for r in rows if r.get("lock")]
-        if not locked:
-            continue
-        cnt = sum(r["fp"] for r in rows if r.get("owner") and r.get("starting") and not r.get("lock"))
-        out.append((m.start(), m.end(), f"{m.group(1)}{fmt_pts(cnt)}{m.group(3).replace('fpts from starters', 'fpts count')}"
-                                        f" · 🔒 {len(locked)} locked in"))
-    for s, e, t in reversed(out):
-        h = h[:s] + t + h[e:]
-    return h
-
-
-_nba_game_html_nolock = nba_game_fantasy_html
-
-
-def nba_game_fantasy_html(event, summary, live, max_rows=7):
-    h = _nba_game_html_nolock(event, summary, live, max_rows)
-    try:
-        rows = _nba_lock_rows(summary, event)
-        if any(r.get("lock") for r in rows):
-            h = _lock_totals(_lock_mark(h, rows, "<div class='nm2'>", "pr2"), [rows])
-            h = h.replace("</style>", NBA_LOCK_CSS + "</style>", 1)
-    except Exception as e:  # noqa: BLE001
-        _log_plain(f"lock-in marks skipped: {e}")
-    return h
-
-
-_nba_batch_html_nolock = nba_batch_html
-
-
-def nba_batch_html(mode, events, summaries, live, title):
-    h = _nba_batch_html_nolock(mode, events, summaries, live, title)
-    try:
-        rl = [(_nba_lock_rows(s, e) if s else []) for e, s in zip(events, summaries)]
-        if any(r.get("lock") for rows in rl for r in rows):
-            for rows in rl:
-                h = _lock_mark(h, rows, "<span class='nm5'>", "tpr")
-            h = _lock_totals(h, [[r for r in rows if r.get("owner")] for rows in rl if any(r.get("owner") for r in rows)])
-            h = h.replace("</style>", NBA_LOCK_CSS + "</style>", 1)
-    except Exception as e:  # noqa: BLE001
-        _log_plain(f"lock-in marks skipped: {e}")
-    return h
-
-
-_post_card_nolock = _post_card
-
-
-def _post_card(hook, html_text, content, embed, name):
-    """A headline naming a locked-in player says tonight doesn't count."""
-    try:
-        for nm, (pts, day) in list(_LK_HEAD.items()):
-            for k in ("img_title", "title"):
-                t = embed.get(k)
-                if t and nm in t and "LOCKED" not in t:
-                    embed[k] = f"{t} · 🔒 doesn't count (locked {fmt_pts(pts)} {day})"
-    finally:
-        _LK_HEAD.clear()
-    return _post_card_nolock(hook, html_text, content, embed, name)
 
 
 if __name__ == "__main__":
