@@ -13434,7 +13434,11 @@ NBA_LOCK_CSS = """
 .pr2.lkd .fp.lkb i.lk s{opacity:.85}
 .tpr .ow5 em.lk{background:#7c3aed!important;color:#fff!important}
 .tpr:has(em.lk){box-shadow:inset 4px 0 0 #7c3aed}
-.tpr.lkd .fp5{opacity:.5;text-decoration:line-through}
+.tpr .fp5.lkb{background:linear-gradient(160deg,#6d28d9,#4c1d95)!important;color:#fff!important;box-shadow:0 0 14px rgba(124,58,237,.55)!important;
+ display:flex!important;flex-direction:column;align-items:center;justify-content:center;line-height:1.05;padding-top:4px!important;padding-bottom:4px!important}
+.tpr .fp5.lkb{overflow:hidden}
+.tpr .fp5.lkb small{display:block;font-size:12px!important;font-weight:900;letter-spacing:.4px;color:#e9d5ff;white-space:nowrap;line-height:1.2}
+.tpr .fp5.lkb i{display:block;font-style:normal;font-size:12px!important;font-weight:800;color:#ddd6fe;white-space:nowrap;line-height:1.2}
 """
 
 
@@ -13457,7 +13461,9 @@ def _lock_mark(h, rows, name_tag, row_cls):
         nb = re.sub(r"<div class='fp[^']*'>[^<]*<small>[^<]*</small>(?:<i[^>]*>[^<]*</i>)?</div>",
                     f"<div class='fp lkb'><small class='lt'>🔒 LOCKED · {lk[1].upper()}</small>{fmt_pts(lk[0])}"
                     f"<i class='lk'>tonight <s>{fmt_pts(r['fp'])}</s> ✗</i></div>", nb, count=1)
-        nb = re.sub(r"(<span class='pj5[^']*'>)", rf"\1<b class='lk'>{lk[1]}'s {fmt_pts(lk[0])} counts</b> ", nb, count=1)
+        nb = re.sub(r"<span class='fp5'>[^<]*</span>",
+                    f"<span class='fp5 lkb'><small>🔒 {lk[1].upper()}</small>{fmt_pts(lk[0])}"
+                    f"<i><s>{fmt_pts(r['fp'])}</s> ✗</i></span>", nb, count=1)
         h = h[:s] + nb + h[e:]
     return h
 
