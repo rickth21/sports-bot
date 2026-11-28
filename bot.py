@@ -13424,9 +13424,14 @@ def _nba_lock_rows(summary, event):
 NBA_LOCK_CSS = """
 .bd.lk{background:#7c3aed!important;color:#fff!important;box-shadow:0 0 12px rgba(124,58,237,.55)}
 .pr2:has(.bd.lk){box-shadow:inset 5px 0 0 #7c3aed!important}
-.pr2.lkd .fp{background:#241d33!important;color:#94a3b8!important;box-shadow:inset 0 0 0 2px #7c3aed!important;filter:none!important}
-.pr2.lkd .fp small{color:#94a3b8!important}
-.pr2.lkd .fp i.lk{color:#e9d5ff!important;font-style:normal;font-size:.72em!important;line-height:1.15;white-space:normal}
+.pr2.lkd .fp.lkb{background:linear-gradient(160deg,#6d28d9,#4c1d95)!important;color:#fff!important;
+ box-shadow:0 0 14px rgba(124,58,237,.55)!important;filter:none!important;display:flex!important;flex-direction:column;
+ align-items:center;justify-content:center;text-align:center;line-height:1.05}
+.pr2.lkd .fp.lkb small.lt{display:block;color:#e9d5ff!important;font-size:.42em!important;font-weight:900;letter-spacing:.6px;
+ margin:0 0 2px!important;white-space:nowrap}
+.pr2.lkd .fp.lkb i.lk{display:block;color:#ddd6fe!important;font-style:normal;font-size:.42em!important;font-weight:800;
+ margin-top:3px;white-space:nowrap}
+.pr2.lkd .fp.lkb i.lk s{opacity:.85}
 .tpr .ow5 em.lk{background:#7c3aed!important;color:#fff!important}
 .tpr:has(em.lk){box-shadow:inset 4px 0 0 #7c3aed}
 .tpr.lkd .fp5{opacity:.5;text-decoration:line-through}
@@ -13445,11 +13450,13 @@ def _lock_mark(h, rows, name_tag, row_cls):
             continue
         e = _div_end(h, s)
         blk = h[s:e]
-        tag = "🔒 LOCKED"
+        tag = "🔒 LOCKED IN"
         nb = blk.replace(f"<div class='{row_cls}", f"<div class='{row_cls} lkd", 1)
         nb = nb.replace("<span class='bd st'>STARTING</span>", f"<span class='bd lk'>{tag}</span>", 1)
         nb = nb.replace("<em class='s'>STARTING</em>", f"<em class='lk'>{tag}</em>", 1)
-        nb = re.sub(r"<i class='(?:up|dn)'>[^<]*</i>", f"<i class='lk'>{lk[1]}'s {fmt_pts(lk[0])} counts</i>", nb, count=1)
+        nb = re.sub(r"<div class='fp[^']*'>[^<]*<small>[^<]*</small>(?:<i[^>]*>[^<]*</i>)?</div>",
+                    f"<div class='fp lkb'><small class='lt'>🔒 LOCKED · {lk[1].upper()}</small>{fmt_pts(lk[0])}"
+                    f"<i class='lk'>tonight <s>{fmt_pts(r['fp'])}</s> ✗</i></div>", nb, count=1)
         nb = re.sub(r"(<span class='pj5[^']*'>)", rf"\1<b class='lk'>{lk[1]}'s {fmt_pts(lk[0])} counts</b> ", nb, count=1)
         h = h[:s] + nb + h[e:]
     return h
